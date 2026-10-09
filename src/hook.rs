@@ -63,11 +63,10 @@ fn trim(raw: &Value) -> Value {
         }
     }
     let event = raw.get("hook_event_name").and_then(Value::as_str).unwrap_or("");
-    if matches!(event, "SessionStart" | "UserPromptSubmit") {
-        if let Some(pid) = claude_pid() {
+    if matches!(event, "SessionStart" | "UserPromptSubmit")
+        && let Some(pid) = claude_pid() {
             out.insert("pid".into(), json!(pid));
         }
-    }
     Value::Object(out)
 }
 

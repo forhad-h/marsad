@@ -49,13 +49,181 @@ pub struct SkillStat {
     pub tokens: TokenUsage,
 }
 
+/// Agent id/type used for a session's main agent (as opposed to a subagent).
+pub const MAIN_AGENT: &str = "main";
+
+/// Date format for local calendar days, e.g. `2026-10-09`.
+pub const DAY_FMT: &str = "%Y-%m-%d";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Via {
+    /// Claude invoked the Skill tool.
+    Tool,
+    /// The user typed `/skill`.
+    Command,
+}
+
+impl Via {
+    /// Inverse of `as_str`; anything unrecognized is treated as a tool call.
+    pub fn parse(s: &str) -> Self {
+        if s == "command" { Via::Command } else { Via::Tool }
+    }
+
+    /// Stored form in the usage database.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Via::Tool => "tool",
+            Via::Command => "command",
+        }
+    }
+}
+
+/// One skill invocation and the tokens of the turns that ran inside its window.
+#[derive(Clone, Debug)]
+pub struct SkillRun {
+    pub name: String,
+    /// ISO-8601 UTC timestamp from the transcript.
+    pub at: Option<String>,
+    pub via: Via,
+    pub tokens: TokenUsage,
+    pub turns: u32,
+}
+
 /// Token and skill figures derived from one transcript file.
 #[derive(Clone, Debug, Default)]
 pub struct TranscriptStats {
     pub tokens: TokenUsage,
     pub skills: BTreeMap<String, SkillStat>,
+    /// Skill invocations in transcript order.
+    pub runs: Vec<SkillRun>,
+    /// Prompt size of the latest API call (input + cache read + cache write).
+    pub context_used: Option<u64>,
+    /// Unix time of the API call `context_used` came from.
+    pub context_at: Option<f64>,
     pub model: Option<String>,
     pub title: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RateWindow {
+    pub used_pct: f64,
+    pub resets_at: Option<f64>,
+}
+
+/// What the status line last reported for a session (exact context window and rate limits).
+#[derive(Clone, Debug, Default)]
+pub struct StatusSnapshot {
+    pub ts: f64,
+    pub window: Option<u64>,
+    pub used: Option<u64>,
+    pub model: Option<String>,
+    pub five_hour: Option<RateWindow>,
+    pub seven_day: Option<RateWindow>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ContextInfo {
+    pub used: u64,
+    pub window: u64,
+    /// Token count at which auto-compact triggers.
+    pub limit: u64,
+    /// True when the window size is guessed from the model id rather than reported.
+    pub estimated: bool,
+}
+
+impl ContextInfo {
+    pub fn left(&self) -> u64 {
+        self.limit.saturating_sub(self.used)
+    }
+
+    pub fn used_ratio(&self) -> f64 {
+        if self.limit == 0 { 0.0 } else { self.used as f64 / self.limit as f64 }
+    }
+}
+
+/// How full a gauge is: green below 60%, yellow below 85%, red above.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    Ok,
+    Warn,
+    Critical,
+}
+
+impl Level {
+    pub fn of(ratio: f64) -> Self {
+        match ratio {
+            r if r >= 0.85 => Level::Critical,
+            r if r >= 0.6 => Level::Warn,
+            _ => Level::Ok,
+        }
+    }
+}
+
+/// Compact token count: `950`, `12.3k`, `1.2M`.
+pub fn fmt_tokens(n: u64) -> String {
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
+        _ => format!("{:.1}M", n as f64 / 1e6),
+    }
+}
+
+/// The user's auto-compact window, from `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or the
+/// `autoCompactWindow` setting. Accepts `200000`, `500k`, `1M` or a bare `200` (thousands).
+pub fn auto_compact_window() -> Option<u64> {
+    let parse = |v: &str| -> Option<u64> {
+        let v = v.trim().to_ascii_lowercase();
+        let n = if let Some(k) = v.strip_suffix('k') {
+            k.parse::<f64>().ok()? * 1e3
+        } else if let Some(m) = v.strip_suffix('m') {
+            m.parse::<f64>().ok()? * 1e6
+        } else {
+            let n: f64 = v.parse().ok()?;
+            if n <= 1000.0 { n * 1e3 } else { n }
+        };
+        Some((n as u64).clamp(100_000, 1_000_000))
+    };
+    if let Some(v) = std::env::var("CLAUDE_CODE_AUTO_COMPACT_WINDOW").ok().and_then(|v| parse(&v)) {
+        return Some(v);
+    }
+    let text = std::fs::read_to_string(crate::claude_dir().join("settings.json")).ok()?;
+    let settings: serde_json::Value = serde_json::from_str(&text).ok()?;
+    match &settings["autoCompactWindow"] {
+        serde_json::Value::Number(n) => n.as_u64().and_then(|n| parse(&n.to_string())),
+        serde_json::Value::String(s) => parse(s),
+        _ => None,
+    }
+}
+
+/// Context fill relative to the auto-compact point, given the prompt size of the latest
+/// API call. `reported_window` is the exact size from the status line, when known.
+pub fn context_info(used: u64, model: Option<&str>, reported_window: Option<u64>, compact_window: Option<u64>) -> ContextInfo {
+    let window = reported_window.unwrap_or_else(|| model_window(model.unwrap_or(""), used));
+    let limit = match compact_window {
+        Some(w) => w.min(window),
+        None if window >= 1_000_000 => NATIVE_1M_COMPACT_AT,
+        None => window,
+    };
+    ContextInfo { used, window, limit, estimated: reported_window.is_none() }
+}
+
+/// Native 1M windows compact early, at about this many tokens.
+const NATIVE_1M_COMPACT_AT: u64 = 967_000;
+
+/// Context window size implied by a model id, per the Claude Code model docs.
+pub fn model_window(model: &str, used: u64) -> u64 {
+    let m = model.to_ascii_lowercase();
+    let version = |family: &str| -> Option<(u32, u32)> {
+        let rest = &m[m.find(family)? + family.len()..];
+        let mut nums = rest.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty() && p.len() <= 2);
+        Some((nums.next()?.parse().ok()?, nums.next().and_then(|n| n.parse().ok()).unwrap_or(0)))
+    };
+    let native_1m = m.contains("[1m]")
+        || m.contains("fable")
+        || version("sonnet-").is_some_and(|(maj, _)| maj >= 5)
+        || version("haiku-").is_some_and(|(maj, _)| maj >= 5)
+        || version("opus-").is_some_and(|(maj, min)| maj >= 5 || (maj == 4 && min >= 7));
+    if native_1m || used > 200_000 { 1_000_000 } else { 200_000 }
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +249,7 @@ pub struct Session {
     pub pid: Option<u32>,
     pub subagents: BTreeMap<String, Subagent>,
     pub stats: TranscriptStats,
+    pub snapshot: Option<StatusSnapshot>,
 }
 
 impl Session {
@@ -99,6 +268,7 @@ impl Session {
             pid: None,
             subagents: BTreeMap::new(),
             stats: TranscriptStats::default(),
+            snapshot: None,
         }
     }
 
@@ -125,6 +295,33 @@ impl Session {
         t
     }
 
+    /// Context fill relative to the auto-compact point. `compact_window` is the
+    /// user's `autoCompactWindow` setting, if any.
+    pub fn context(&self, compact_window: Option<u64>) -> Option<ContextInfo> {
+        let snap = self.snapshot.as_ref();
+        // Prefer whichever source reported most recently.
+        let from_snapshot = snap.and_then(|s| s.used.map(|u| (u, s.ts)));
+        let from_transcript = self.stats.context_used.map(|u| (u, self.stats.context_at.unwrap_or(0.0)));
+        let used = match (from_transcript, from_snapshot) {
+            (Some(t), Some(s)) => if s.1 > t.1 { s.0 } else { t.0 },
+            (t, s) => t.or(s)?.0,
+        };
+        let model = snap.and_then(|s| s.model.clone()).or(self.model.clone()).or(self.stats.model.clone());
+        Some(context_info(used, model.as_deref(), snap.and_then(|s| s.window), compact_window))
+    }
+
+    /// Every skill invocation across the main agent and subagents, oldest first,
+    /// paired with the agent that ran it.
+    pub fn skill_runs(&self) -> Vec<(String, &SkillRun)> {
+        let mut runs: Vec<(String, &SkillRun)> =
+            self.stats.runs.iter().map(|r| (MAIN_AGENT.to_string(), r)).collect();
+        for a in self.subagents.values() {
+            runs.extend(a.stats.runs.iter().map(|r| (a.agent_type.clone(), r)));
+        }
+        runs.sort_by(|a, b| a.1.at.cmp(&b.1.at));
+        runs
+    }
+
     /// Skills across the main agent and its subagents, by name.
     pub fn all_skills(&self) -> BTreeMap<String, SkillStat> {
         let mut out = self.stats.skills.clone();
@@ -136,5 +333,36 @@ impl Session {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_windows() {
+        assert_eq!(model_window("claude-opus-5-5", 0), 1_000_000);
+        assert_eq!(model_window("claude-opus-4-7", 0), 1_000_000);
+        assert_eq!(model_window("claude-opus-4-6", 0), 200_000);
+        assert_eq!(model_window("claude-opus-4-6[1m]", 0), 1_000_000);
+        assert_eq!(model_window("claude-sonnet-4-5-20250929", 0), 200_000);
+        assert_eq!(model_window("claude-sonnet-4-5-20250929", 250_000), 1_000_000);
+        assert_eq!(model_window("claude-fable-5-1", 0), 1_000_000);
+        assert_eq!(model_window("claude-haiku-4-5", 0), 200_000);
+    }
+
+    #[test]
+    fn compact_limit() {
+        let mut s = Session::new("s", 0.0);
+        s.stats.context_used = Some(500_000);
+        s.model = Some("claude-opus-5-5".into());
+        let c = s.context(None).unwrap();
+        assert_eq!((c.window, c.limit, c.left()), (1_000_000, 967_000, 467_000));
+        assert!(c.estimated);
+        assert_eq!(s.context(Some(600_000)).unwrap().limit, 600_000);
+        s.snapshot = Some(StatusSnapshot { window: Some(200_000), ..Default::default() });
+        let c = s.context(None).unwrap();
+        assert_eq!((c.limit, c.left(), c.estimated), (200_000, 0, false));
     }
 }

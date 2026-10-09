@@ -4,8 +4,12 @@ mod hook;
 mod install;
 mod jsonl;
 mod model;
+mod report;
+mod statusline;
+mod store;
 mod transcript;
 mod ui;
+mod usage;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -22,10 +26,24 @@ struct Cli {
 enum Cmd {
     /// Hook entrypoint called by Claude Code (reads hook JSON on stdin).
     Hook,
-    /// Register marsad hooks in ~/.claude/settings.json.
-    Install,
+    /// Status line entrypoint called by Claude Code (reads status JSON on stdin).
+    Statusline,
+    /// Register marsad hooks (and status line) in ~/.claude/settings.json.
+    Install {
+        /// Don't install the status line; context size is then estimated from transcripts.
+        #[arg(long)]
+        no_statusline: bool,
+    },
     /// Remove marsad hooks from ~/.claude/settings.json.
     Uninstall,
+    /// Index new transcript data into the 30-day usage history.
+    Sync,
+    /// Summarize token usage over the last 30 days (by day, session, skill, project, model, agent).
+    Report(report::ReportArgs),
+    /// Run a read-only SQL query against the usage history.
+    Sql(report::SqlArgs),
+    /// Print the usage history database schema.
+    Schema,
 }
 
 /// Where marsad keeps its event log. Override with MARSAD_HOME.
@@ -54,8 +72,19 @@ fn main() -> anyhow::Result<()> {
             let _ = hook::run();
             Ok(())
         }
-        Some(Cmd::Install) => install::install(),
+        Some(Cmd::Statusline) => {
+            let _ = statusline::run();
+            Ok(())
+        }
+        Some(Cmd::Install { no_statusline }) => install::install(!no_statusline),
         Some(Cmd::Uninstall) => install::uninstall(),
+        Some(Cmd::Sync) => report::sync_now(),
+        Some(Cmd::Report(args)) => report::report(args),
+        Some(Cmd::Sql(args)) => report::sql(args),
+        Some(Cmd::Schema) => {
+            report::schema();
+            Ok(())
+        }
         None => app::run(),
     }
 }

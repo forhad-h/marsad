@@ -60,7 +60,7 @@ mod tests {
         f.flush().unwrap();
         let mut tail = JsonlTail::new(path.clone());
         assert_eq!(tail.read_new().len(), 1);
-        write!(f, "2}}\n").unwrap();
+        writeln!(f, "2}}").unwrap();
         f.flush().unwrap();
         let v = tail.read_new();
         assert_eq!(v.len(), 1);

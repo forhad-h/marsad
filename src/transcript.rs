@@ -5,7 +5,7 @@
 //! the next real user prompt or the next skill.
 
 use crate::jsonl::JsonlTail;
-use crate::model::{SkillStat, TokenUsage, TranscriptStats};
+use crate::model::{SkillRun, SkillStat, TokenUsage, TranscriptStats, Via};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -14,18 +14,37 @@ use std::path::PathBuf;
 const BUILTIN_COMMANDS: &[&str] = &[
     "add-dir", "agents", "artifacts", "clear", "compact", "config", "context", "cost", "doctor",
     "effort", "exit", "export", "fast", "help", "hooks", "ide", "init", "login", "logout", "mcp",
-    "memory", "model", "permissions", "plan", "plugin", "plugins", "release-notes", "resume",
+    "memory", "model", "permissions", "plan", "plugin", "plugins", "release-notes", "reload-plugins", "resume",
     "rewind", "status", "statusline", "terminal-setup", "theme", "usage", "vim",
 ];
 
 pub struct TranscriptReader {
     tail: JsonlTail,
-    /// message.id -> (usage, skill window it ran in). Streamed messages repeat their id.
-    messages: HashMap<String, (TokenUsage, Option<String>)>,
-    skill_calls: BTreeMap<String, u32>,
-    current_skill: Option<String>,
+    /// message.id -> (usage, index of the skill run it belongs to, local day). Streamed messages repeat their id.
+    messages: HashMap<String, (TokenUsage, Option<usize>, Option<String>)>,
+    /// (name, timestamp, via) per invocation, in transcript order.
+    runs: Vec<(String, Option<String>, Via)>,
+    current_run: Option<usize>,
+    context_used: Option<u64>,
+    context_at: Option<f64>,
     model: Option<String>,
     title: Option<String>,
+    cwd: Option<String>,
+    first_at: Option<String>,
+    last_at: Option<String>,
+}
+
+/// Tokens and assistant turns for one local calendar day.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DayUsage {
+    pub tokens: TokenUsage,
+    pub turns: u32,
+}
+
+/// Local calendar day (YYYY-MM-DD) of an ISO-8601 timestamp.
+pub fn local_day(iso: &str) -> Option<String> {
+    let t = chrono::DateTime::parse_from_rfc3339(iso).ok()?;
+    Some(t.with_timezone(&chrono::Local).format(crate::model::DAY_FMT).to_string())
 }
 
 impl TranscriptReader {
@@ -33,10 +52,15 @@ impl TranscriptReader {
         Self {
             tail: JsonlTail::new(path),
             messages: HashMap::new(),
-            skill_calls: BTreeMap::new(),
-            current_skill: None,
+            runs: Vec::new(),
+            current_run: None,
+            context_used: None,
+            context_at: None,
             model: None,
             title: None,
+            cwd: None,
+            first_at: None,
+            last_at: None,
         }
     }
 
@@ -50,6 +74,15 @@ impl TranscriptReader {
     }
 
     fn ingest(&mut self, e: &Value) {
+        if let Some(ts) = e["timestamp"].as_str() {
+            if self.first_at.is_none() {
+                self.first_at = Some(ts.to_string());
+            }
+            self.last_at = Some(ts.to_string());
+        }
+        if self.cwd.is_none() {
+            self.cwd = e["cwd"].as_str().map(str::to_string);
+        }
         match e["type"].as_str() {
             Some("assistant") => self.assistant(e),
             Some("user") => self.user(e),
@@ -68,19 +101,27 @@ impl TranscriptReader {
             self.model = Some(m.to_string());
         }
         let usage = parse_usage(&msg["usage"]);
+        let prompt = usage.input + usage.cache_read + usage.cache_write;
+        if prompt > 0 && e["isSidechain"] != true {
+            self.context_used = Some(prompt);
+            self.context_at = e["timestamp"]
+                .as_str()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .map(|t| t.timestamp_millis() as f64 / 1000.0);
+        }
         let id = msg["id"].as_str().or(e["uuid"].as_str()).unwrap_or_default().to_string();
-        let skill = self.current_skill.clone();
+        let run = self.current_run;
+        let day = e["timestamp"].as_str().and_then(local_day);
         self.messages
             .entry(id)
-            .and_modify(|(u, _)| *u = usage)
-            .or_insert((usage, skill));
+            .and_modify(|(u, _, _)| *u = usage)
+            .or_insert((usage, run, day));
 
         for block in msg["content"].as_array().into_iter().flatten() {
-            if block["type"] == "tool_use" && block["name"] == "Skill" {
-                if let Some(name) = block["input"]["skill"].as_str() {
-                    self.open_skill(name);
+            if block["type"] == "tool_use" && block["name"] == "Skill"
+                && let Some(name) = block["input"]["skill"].as_str() {
+                    self.open_skill(name, e, Via::Tool);
                 }
-            }
         }
     }
 
@@ -100,33 +141,75 @@ impl TranscriptReader {
             _ => return,
         };
         // A new real prompt closes the skill window; a typed /skill opens a new one.
-        self.current_skill = None;
-        if let Some(cmd) = slash_command(text) {
-            if !BUILTIN_COMMANDS.contains(&cmd) {
-                self.open_skill(cmd);
+        self.current_run = None;
+        if let Some(cmd) = slash_command(text)
+            && !BUILTIN_COMMANDS.contains(&cmd) {
+                self.open_skill(cmd, e, Via::Command);
             }
-        }
     }
 
-    fn open_skill(&mut self, name: &str) {
-        *self.skill_calls.entry(name.to_string()).or_default() += 1;
-        self.current_skill = Some(name.to_string());
+    fn open_skill(&mut self, name: &str, entry: &Value, via: Via) {
+        let at = entry["timestamp"].as_str().map(str::to_string);
+        self.runs.push((name.to_string(), at, via));
+        self.current_run = Some(self.runs.len() - 1);
     }
 
     pub fn stats(&self) -> TranscriptStats {
         let mut tokens = TokenUsage::default();
-        let mut skills: BTreeMap<String, SkillStat> = self
-            .skill_calls
+        let mut runs: Vec<SkillRun> = self
+            .runs
             .iter()
-            .map(|(k, &calls)| (k.clone(), SkillStat { calls, tokens: TokenUsage::default() }))
+            .map(|(name, at, via)| SkillRun {
+                name: name.clone(),
+                at: at.clone(),
+                via: *via,
+                tokens: TokenUsage::default(),
+                turns: 0,
+            })
             .collect();
-        for (usage, skill) in self.messages.values() {
+        for (usage, run, _) in self.messages.values() {
             tokens += *usage;
-            if let Some(s) = skill {
-                skills.entry(s.clone()).or_default().tokens += *usage;
+            if let Some(r) = run.and_then(|i| runs.get_mut(i)) {
+                r.tokens += *usage;
+                r.turns += 1;
             }
         }
-        TranscriptStats { tokens, skills, model: self.model.clone(), title: self.title.clone() }
+        let mut skills: BTreeMap<String, SkillStat> = BTreeMap::new();
+        for r in &runs {
+            let stat = skills.entry(r.name.clone()).or_default();
+            stat.calls += 1;
+            stat.tokens += r.tokens;
+        }
+        TranscriptStats {
+            tokens,
+            skills,
+            runs,
+            context_used: self.context_used,
+            context_at: self.context_at,
+            model: self.model.clone(),
+            title: self.title.clone(),
+        }
+    }
+
+    /// Usage bucketed by the local day each API call happened.
+    pub fn daily(&self) -> BTreeMap<String, DayUsage> {
+        let mut out: BTreeMap<String, DayUsage> = BTreeMap::new();
+        for (usage, _, day) in self.messages.values() {
+            let Some(day) = day else { continue };
+            let d = out.entry(day.clone()).or_default();
+            d.tokens += *usage;
+            d.turns += 1;
+        }
+        out
+    }
+
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
+    }
+
+    /// First and last entry timestamps (ISO-8601).
+    pub fn span(&self) -> (Option<&str>, Option<&str>) {
+        (self.first_at.as_deref(), self.last_at.as_deref())
     }
 }
 
@@ -150,6 +233,19 @@ fn slash_command(text: &str) -> Option<&str> {
 /// Subagent transcripts live at `<transcript without .jsonl>/subagents/agent-<id>.jsonl`.
 pub fn subagent_dir(transcript: &std::path::Path) -> PathBuf {
     transcript.with_extension("").join("subagents")
+}
+
+/// `(agent_id, path)` of every `agent-<id>.jsonl` in a subagents directory.
+pub fn subagent_files(dir: &std::path::Path) -> Vec<(String, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let id = name.strip_prefix("agent-")?.strip_suffix(".jsonl")?.to_string();
+            Some((id, e.path()))
+        })
+        .collect()
 }
 
 /// Reads `agentType` from a subagent's `.meta.json`, if present.
@@ -198,6 +294,9 @@ mod tests {
         assert_eq!(plan.calls, 1);
         assert_eq!(plan.tokens.total(), 1150);
         assert_eq!(s.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(s.runs.len(), 1);
+        assert_eq!((s.runs[0].turns, s.runs[0].via), (1, Via::Tool));
+        assert_eq!(s.context_used, Some(1));
     }
 
     #[test]

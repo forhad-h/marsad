@@ -1,0 +1,60 @@
+---
+name: marsad-usage
+description: Analyze Claude Code token usage from the last 30 days (by day, session, skill, project, model or subagent) using marsad's usage history. Use when the user asks which sessions, skills, projects or models used the most tokens, how usage changed over days, or wants a usage report.
+---
+
+# Claude Code usage history (marsad)
+
+`marsad` keeps a 30-day SQLite history of every Claude Code session on this machine, built from
+transcripts. Each command below indexes new transcript data first (add `--no-sync` to skip).
+If `marsad` is not on PATH, run it by its full path: `"{{MARSAD_EXE}}"`.
+
+## Ready-made reports
+
+```sh
+marsad report --by session            # top sessions by tokens (default, last 30 days)
+marsad report --by skill --days 7     # skills ranked by ≈tokens this week
+marsad report --by day                # daily totals, newest first
+marsad report --by project --from 2026-10-01 --to 2026-10-07
+marsad report --by model | --by agent # per model / per subagent type
+marsad report --by skill --session <id-prefix>
+```
+
+Filters: `--days N` (1 = today), `--date YYYY-MM-DD`, `--from/--to`, `--session <id prefix>`,
+`--project <substring>`, `--limit N` (default 25). Output: `--format table|json|csv`
+(use `--format json` when you will process the result).
+
+## Ad-hoc SQL (read-only)
+
+```sh
+marsad schema                                   # tables and column meanings
+marsad sql "SELECT ..." --format json
+```
+
+Tables:
+- `sessions(session_id, project, cwd, title, model, first_at, last_at, transcript_path)`
+- `usage_daily(session_id, agent_id, agent_type, day, input, output, cache_read, cache_write, total, turns)` —
+  one row per session × agent (`main` or a subagent) × local day.
+- `skill_runs(session_id, agent_id, agent_type, seq, skill, via, at, day, turns, input, output, cache_read, cache_write, total)` —
+  one row per skill invocation; `via` is `tool` (Claude invoked it) or `command` (user typed `/skill`).
+
+Example: skills with the highest average cost per call this week
+
+```sh
+marsad sql "SELECT skill, COUNT(*) calls, SUM(total)/COUNT(*) avg_tokens
+            FROM skill_runs WHERE day >= date('now','localtime','-6 days')
+            GROUP BY skill ORDER BY avg_tokens DESC LIMIT 10" --format json
+```
+
+## Interpreting the numbers
+
+- `total` = input + output + cache_read + cache_write. Cache reads usually dominate, but they are
+  billed at about 1/10 of the input price. To compare cost rather than raw volume, also look at
+  `output`, `cache_write`, and `input`.
+- Skill tokens are **approximate**: each run counts the turns between the skill's invocation and the
+  next user prompt or next skill, so it includes work Claude did while following that skill.
+- Days are the machine's local dates. Data older than 30 days is deleted automatically.
+- Sessions that ran inside subagents appear under `agent_type` other than `main`.
+
+When reporting, lead with the answer (the top items and their share of the total), then
+show a compact table. Mention that skill figures are approximate when they matter.

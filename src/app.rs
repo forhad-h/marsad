@@ -1,6 +1,6 @@
 use crate::events;
 use crate::jsonl::JsonlTail;
-use crate::model::{Session, Status, Subagent};
+use crate::model::{RateWindow, Session, Status, Subagent};
 use crate::transcript::{self, TranscriptReader};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use std::collections::HashMap;
@@ -13,12 +13,23 @@ const ENDED_GRACE_SECS: f64 = 10.0 * 60.0;
 /// Sessions with no known process and no events for this long are treated as gone.
 const STALE_SECS: f64 = 12.0 * 3600.0;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    List,
+    History,
+    Usage,
+}
+
 pub struct App {
     pub sessions: HashMap<String, Session>,
     pub selected: Option<String>,
     pub show_ended: bool,
+    pub view: View,
+    pub history_scroll: usize,
+    pub compact_window: Option<u64>,
     pub tick: u64,
     pub hooks_installed: bool,
+    pub usage: crate::usage::Usage,
     log: JsonlTail,
     readers: HashMap<PathBuf, TranscriptReader>,
     sys: System,
@@ -39,8 +50,12 @@ impl App {
             sessions,
             selected: None,
             show_ended: false,
+            view: View::List,
+            history_scroll: 0,
+            compact_window: crate::model::auto_compact_window(),
             tick: 0,
             hooks_installed,
+            usage: crate::usage::Usage::new(),
             log: JsonlTail::new(dir.join("events.jsonl")),
             readers: HashMap::new(),
             sys: System::new(),
@@ -75,6 +90,16 @@ impl App {
         self.visible().iter().position(|s| s.id == sel.id)
     }
 
+    /// Account-wide 5-hour and 7-day usage, from the most recent status line report.
+    pub fn rate_limits(&self) -> Option<(Option<RateWindow>, Option<RateWindow>)> {
+        self.sessions
+            .values()
+            .filter_map(|s| s.snapshot.as_ref())
+            .filter(|snap| snap.five_hour.is_some() || snap.seven_day.is_some())
+            .max_by(|a, b| a.ts.total_cmp(&b.ts))
+            .map(|snap| (snap.five_hour, snap.seven_day))
+    }
+
     fn move_selection(&mut self, delta: isize) {
         let ids: Vec<String> = self.visible().iter().map(|s| s.id.clone()).collect();
         if ids.is_empty() {
@@ -85,7 +110,14 @@ impl App {
         self.selected = Some(ids[next].clone());
     }
 
+    fn scroll(&mut self, delta: isize) {
+        let len = self.selected_session().map(|s| s.skill_runs().len()).unwrap_or(0);
+        let max = len.saturating_sub(1) as isize;
+        self.history_scroll = (self.history_scroll as isize + delta).clamp(0, max) as usize;
+    }
+
     fn refresh(&mut self) {
+        self.usage.tick();
         for ev in self.log.read_new() {
             events::apply(&mut self.sessions, &ev);
         }
@@ -93,6 +125,7 @@ impl App {
             self.last_slow_refresh = Instant::now();
             self.check_processes();
             self.refresh_transcripts();
+            self.refresh_snapshots();
         }
     }
 
@@ -123,6 +156,15 @@ impl App {
         }
     }
 
+    fn refresh_snapshots(&mut self) {
+        let dir = crate::statusline::status_dir();
+        for s in self.sessions.values_mut().filter(|s| s.status != Status::Ended || s.snapshot.is_none()) {
+            if let Some(snap) = crate::statusline::load(&dir.join(format!("{}.json", s.id))) {
+                s.snapshot = Some(snap);
+            }
+        }
+    }
+
     fn refresh_transcripts(&mut self) {
         let ids: Vec<String> = self.visible().iter().map(|s| s.id.clone()).collect();
         for id in ids {
@@ -138,20 +180,14 @@ impl App {
             }
 
             let dir = transcript::subagent_dir(&path);
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-            for entry in entries.flatten() {
-                let file = entry.path();
-                let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                let Some(agent_id) = name.strip_prefix("agent-").and_then(|n| n.strip_suffix(".jsonl")) else {
-                    continue;
-                };
-                let agent = session.subagents.entry(agent_id.to_string()).or_insert_with(|| Subagent {
+            for (agent_id, file) in transcript::subagent_files(&dir) {
+                let agent = session.subagents.entry(agent_id.clone()).or_insert_with(|| Subagent {
                     agent_type: String::new(),
                     running: false,
                     stats: Default::default(),
                 });
                 if agent.agent_type.is_empty() || agent.agent_type == "agent" {
-                    agent.agent_type = transcript::subagent_type(&dir, agent_id).unwrap_or_else(|| "agent".into());
+                    agent.agent_type = transcript::subagent_type(&dir, &agent_id).unwrap_or_else(|| "agent".into());
                 }
                 let reader = self.readers.entry(file.clone()).or_insert_with(|| TranscriptReader::new(file));
                 if reader.poll() {
@@ -169,21 +205,45 @@ pub fn run() -> anyhow::Result<()> {
     let result = (|| -> anyhow::Result<()> {
         loop {
             terminal.draw(|f| crate::ui::draw(f, &app))?;
-            if event::poll(Duration::from_millis(250))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                            KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
-                            KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-                            KeyCode::Home | KeyCode::Char('g') => app.move_selection(isize::MIN / 2),
-                            KeyCode::End | KeyCode::Char('G') => app.move_selection(isize::MAX / 2),
-                            KeyCode::Char('a') => app.show_ended = !app.show_ended,
+            if event::poll(Duration::from_millis(250))?
+                && let Event::Key(key) = event::read()?
+                    && key.kind == KeyEventKind::Press {
+                        match (app.view, key.code) {
+                            (_, KeyCode::Char('q')) => return Ok(()),
+                            (View::Usage, code) => {
+                                if !app.usage.on_key(code) {
+                                    app.view = View::List;
+                                }
+                            }
+                            (View::List, KeyCode::Char('u')) => {
+                                app.view = View::Usage;
+                                app.usage.reload();
+                            }
+                            (View::List, KeyCode::Esc) => return Ok(()),
+                            (View::List, KeyCode::Down | KeyCode::Char('j')) => app.move_selection(1),
+                            (View::List, KeyCode::Up | KeyCode::Char('k')) => app.move_selection(-1),
+                            (View::List, KeyCode::Home | KeyCode::Char('g')) => app.move_selection(isize::MIN / 2),
+                            (View::List, KeyCode::End | KeyCode::Char('G')) => app.move_selection(isize::MAX / 2),
+                            (View::List, KeyCode::Char('a')) => app.show_ended = !app.show_ended,
+                            (View::List, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) => {
+                                if let Some(id) = app.selected_session().map(|s| s.id.clone()) {
+                                    app.selected = Some(id);
+                                    app.view = View::History;
+                                    app.history_scroll = 0;
+                                }
+                            }
+                            (View::History, KeyCode::Esc | KeyCode::Enter | KeyCode::Left | KeyCode::Char('h')) => {
+                                app.view = View::List
+                            }
+                            (View::History, KeyCode::Down | KeyCode::Char('j')) => app.scroll(1),
+                            (View::History, KeyCode::Up | KeyCode::Char('k')) => app.scroll(-1),
+                            (View::History, KeyCode::PageDown | KeyCode::Char(' ')) => app.scroll(10),
+                            (View::History, KeyCode::PageUp) => app.scroll(-10),
+                            (View::History, KeyCode::Home | KeyCode::Char('g')) => app.history_scroll = 0,
+                            (View::History, KeyCode::End | KeyCode::Char('G')) => app.scroll(isize::MAX / 2),
                             _ => {}
                         }
                     }
-                }
-            }
             app.tick = app.tick.wrapping_add(1);
             app.refresh();
         }

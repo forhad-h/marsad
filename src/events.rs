@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn question_then_answer_then_idle() {
         let ask = json!({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "summary": "Which?"});
-        assert_eq!(run(&[ask.clone()]).status, Status::Question);
+        assert_eq!(run(std::slice::from_ref(&ask)).status, Status::Question);
         let done = run(&[ask, json!({"hook_event_name": "PostToolUse"}), json!({"hook_event_name": "Stop"})]);
         assert_eq!(done.status, Status::Idle);
     }

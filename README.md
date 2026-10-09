@@ -39,14 +39,37 @@ source with `cargo install --git https://github.com/forhad-h/marsad`.
 ## Usage
 
 ```sh
-marsad install     # registers async hooks in ~/.claude/settings.json (backup saved alongside)
+marsad install     # registers async hooks + status line in ~/.claude/settings.json (backup saved alongside)
+marsad install --no-statusline   # hooks only; context size is then estimated from transcripts
 marsad             # open the dashboard
 marsad uninstall   # removes only marsad's hooks
 ```
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `a` show/hide ended sessions · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` skill history · `u` 30-day usage · `a` show/hide ended sessions · `q` quit.
+In skill history: `↑↓` scroll · `g`/`G` top/bottom · `esc` back.
+
+### Context and usage limits
+
+The **CONTEXT LEFT** column and the details pane show how many tokens remain before
+auto-compact, colored green → yellow (60%) → red (85%). The header shows your 5-hour and 7-day
+usage limits with time to reset (claude.ai Pro/Max only).
+
+These exact figures come from Claude Code's status line feed, so `marsad install` sets
+`statusLine` to `marsad statusline`, which prints a compact `ctx 42% · 412k left · 5h 23% · 7d 41%`.
+If you already had a status line, marsad wraps it: your status line keeps rendering exactly as
+before, and `marsad uninstall` restores it. Without the status line, the window size is inferred from the
+model id (marked `≈`) and usage limits are not shown.
+
+Auto-compact point: 967K on native 1M-context models, otherwise the full window, or your
+`autoCompactWindow` / `CLAUDE_CODE_AUTO_COMPACT_WINDOW` if set.
+
+### Skill history
+
+`enter` on a session opens a scrollable timeline of every skill invocation (main agent and
+subagents): time, agent, skill, whether Claude called it (`tool`) or you typed it (`/cmd`), turns,
+output tokens and ≈ total tokens in its window.
 
 ## How it works
 
@@ -66,6 +89,31 @@ Keys: `↑↓`/`jk` select · `a` show/hide ended sessions · `q` quit.
   including subagent transcripts under `<session>/subagents/`. Hooks don't carry usage data.
 - **Per-skill tokens (≈)** are approximate: after a skill is invoked (Skill tool or a typed
   `/skill`), each assistant turn is charged to it until the next user prompt or the next skill.
+
+### 30-day usage history
+
+`u` opens the Usage view: days on the left, and the selected day's sessions and skills ranked by
+tokens on the right (`tab` switches pane, `enter` on a session shows its per-day totals and every
+skill run). "All 30 days" aggregates the whole window.
+
+The history is a SQLite database at `~/.claude/marsad/usage.db`, indexed from Claude Code
+transcripts (`~/.claude/projects`). It includes sessions from before marsad was installed.
+Tokens are bucketed by the local day each API call happened, so long sessions split across days.
+Rows older than 30 days are deleted automatically. The dashboard re-indexes every minute while open, and
+`marsad sync` / `report` / `sql` index on demand (only changed files are re-read).
+
+```sh
+marsad report --by skill --days 7          # skills by ≈tokens this week
+marsad report --by session --date 2026-10-04
+marsad report --by day --format json       # also: project, model, agent; csv
+marsad sql "SELECT skill, SUM(total) FROM skill_runs GROUP BY skill" --format json
+marsad schema
+```
+
+**For Claude:** `marsad install` adds a personal `marsad-usage` skill
+(`~/.claude/skills/marsad-usage/SKILL.md`). Ask any Claude Code session things like "which
+skills used the most tokens this week?" and it will use `marsad report` / `marsad sql`.
+`marsad sql` is read-only.
 
 ### Known limitations
 
