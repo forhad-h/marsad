@@ -14,6 +14,17 @@ pub enum Status {
 }
 
 impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Permission => "permission",
+            Status::Question => "question",
+            Status::Error => "error",
+            Status::Active => "active",
+            Status::Idle => "idle",
+            Status::Ended => "ended",
+        }
+    }
+
     pub fn needs_user(self) -> bool {
         matches!(self, Status::Permission | Status::Question)
     }

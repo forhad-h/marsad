@@ -209,3 +209,73 @@ impl Usage {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn usage_with(rows: &str) -> Usage {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(store::SCHEMA).unwrap();
+        conn.execute_batch(rows).unwrap();
+        let mut u = Usage::new();
+        u.conn = Some(conn);
+        u.reload();
+        u
+    }
+
+    #[test]
+    fn navigation_on_empty_history_is_safe() {
+        let mut u = usage_with("");
+        assert!(u.error.is_none());
+        for code in [KeyCode::Down, KeyCode::Up, KeyCode::Tab, KeyCode::Down, KeyCode::Enter, KeyCode::Tab, KeyCode::Down] {
+            assert!(u.on_key(code));
+        }
+        assert_eq!(u.day, None);
+        assert!(u.drill.is_none(), "nothing to drill into");
+        assert!(!u.on_key(KeyCode::Esc), "esc leaves the view");
+    }
+
+    #[test]
+    fn days_filter_sessions_and_enter_drills_in() {
+        let mut u = usage_with(
+            "INSERT INTO sessions (session_id, project) VALUES ('s1', 'web'), ('s2', 'api');
+             INSERT INTO usage_daily VALUES ('s1', 'main', 'main', '2026-10-09', 0, 0, 0, 0, 500, 3);
+             INSERT INTO usage_daily VALUES ('s2', 'main', 'main', '2026-10-08', 0, 0, 0, 0, 100, 1);
+             INSERT INTO skill_runs VALUES ('s1', 'main', 'main', 0, 'ce-plan', 'tool', '2026-10-09T10:00:00Z', '2026-10-09', 1, 0, 0, 0, 0, 400);",
+        );
+        // "All days" first: both sessions, biggest first.
+        assert_eq!(u.days.len(), 2);
+        assert_eq!(u.sessions.iter().map(|s| s.project.as_str()).collect::<Vec<_>>(), ["web", "api"]);
+
+        // Down selects the newest day; further moves clamp at the oldest.
+        u.on_key(KeyCode::Down);
+        assert_eq!(u.day.as_deref(), Some("2026-10-09"));
+        assert_eq!(u.sessions.len(), 1);
+        assert_eq!(u.skills[0].skill, "ce-plan");
+        for _ in 0..5 {
+            u.on_key(KeyCode::Down);
+        }
+        assert_eq!(u.day.as_deref(), Some("2026-10-08"));
+        assert_eq!(u.sessions[0].project, "api");
+        u.on_key(KeyCode::Up);
+        u.on_key(KeyCode::Up);
+        assert_eq!(u.day, None, "back to all days");
+
+        // Enter on Days jumps to Sessions; Enter there opens the drill-down.
+        u.on_key(KeyCode::Enter);
+        assert!(u.focus == Pane::Sessions);
+        u.on_key(KeyCode::Enter);
+        let drill = u.drill.as_ref().expect("drill opened");
+        assert_eq!(drill.session.session_id, "s1");
+        assert_eq!(drill.runs.len(), 1);
+        assert_eq!(drill.days, vec![("2026-10-09".to_string(), 500)]);
+
+        // Inside the drill, Esc closes it but stays in the view.
+        assert!(u.on_key(KeyCode::Esc));
+        assert!(u.drill.is_none());
+        u.on_key(KeyCode::BackTab);
+        assert!(u.focus == Pane::Days);
+        assert!(!u.on_key(KeyCode::Char('u')));
+    }
+}

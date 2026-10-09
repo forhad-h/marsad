@@ -3,6 +3,7 @@ mod events;
 mod hook;
 mod install;
 mod jsonl;
+mod live;
 mod model;
 mod report;
 mod statusline;
@@ -44,6 +45,8 @@ enum Cmd {
     Sql(report::SqlArgs),
     /// Print the usage history database schema.
     Schema,
+    /// Show live sessions: status, current activity, context left, and usage limits.
+    Status(live::StatusArgs),
 }
 
 /// Where marsad keeps its event log. Override with MARSAD_HOME.
@@ -85,6 +88,7 @@ fn main() -> anyhow::Result<()> {
             report::schema();
             Ok(())
         }
+        Some(Cmd::Status(args)) => live::status(args),
         None => app::run(),
     }
 }

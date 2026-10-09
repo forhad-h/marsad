@@ -384,14 +384,26 @@ fn draw_details(f: &mut Frame, area: Rect, s: &Session, app: &App) {
     tokens.extend(usage_spans(&s.total_tokens()));
 
     let mut agents = vec![label("agents"), Span::raw("main "), Span::styled(fmt_tokens(s.stats.tokens.total()), Style::new().bold())];
+    // Grouped by type so sessions with many subagents still fit on one line.
+    let mut by_type: std::collections::BTreeMap<&str, (usize, usize, u64)> = Default::default();
     for a in s.subagents.values() {
-        let mark = if a.running { SPINNER[(app.tick / 2 % 4) as usize] } else { "✓" };
-        let mark_style = if a.running { Style::new().fg(Color::Green) } else { Style::new().dark_gray() };
+        let e = by_type.entry(a.agent_type.as_str()).or_default();
+        e.0 += 1;
+        e.1 += usize::from(a.running);
+        e.2 += a.stats.tokens.total();
+    }
+    for (agent_type, (count, running, tokens)) in by_type {
+        let (mark, mark_style) = if running > 0 {
+            (format!("{} {running} running", SPINNER[(app.tick / 2 % 4) as usize]), Style::new().fg(Color::Green))
+        } else {
+            ("✓".to_string(), Style::new().dark_gray())
+        };
+        let count = if count > 1 { format!(" ×{count}") } else { String::new() };
         agents.extend([
             dim("  ·  "),
-            Span::raw(format!("{} ", a.agent_type)),
+            Span::raw(format!("{agent_type}{count} ")),
             Span::styled(format!("{mark} "), mark_style),
-            Span::raw(fmt_tokens(a.stats.tokens.total())),
+            Span::raw(fmt_tokens(tokens)),
         ]);
     }
 

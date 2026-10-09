@@ -8,6 +8,52 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
+/// Marks sessions whose Claude Code process is gone (crash, closed terminal) as ended.
+pub fn mark_exited(sessions: &mut HashMap<String, Session>, sys: &mut System) {
+    let now = crate::now();
+    let mut pids: Vec<Pid> = sessions
+        .values()
+        .filter(|s| s.status != Status::Ended)
+        .filter_map(|s| s.pid.map(Pid::from_u32))
+        .collect();
+    pids.sort();
+    pids.dedup();
+    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&pids), true, ProcessRefreshKind::nothing());
+    for s in sessions.values_mut().filter(|s| s.status != Status::Ended) {
+        let gone = match s.pid {
+            Some(pid) => sys.process(Pid::from_u32(pid)).is_none(),
+            None => now - s.last_event > STALE_SECS,
+        };
+        if gone {
+            s.set_status(Status::Ended, now);
+            s.detail = "process exited".into();
+            for a in s.subagents.values_mut() {
+                a.running = false;
+            }
+        }
+    }
+}
+
+/// Attaches the latest status line report (exact context window, rate limits) to each session.
+pub fn load_snapshots(sessions: &mut HashMap<String, Session>) {
+    let dir = crate::statusline::status_dir();
+    for s in sessions.values_mut().filter(|s| s.status != Status::Ended || s.snapshot.is_none()) {
+        if let Some(snap) = crate::statusline::load(&dir.join(format!("{}.json", s.id))) {
+            s.snapshot = Some(snap);
+        }
+    }
+}
+
+/// Account-wide 5-hour and 7-day usage, from the most recent status line report.
+pub fn latest_rate_limits(sessions: &HashMap<String, Session>) -> Option<(Option<RateWindow>, Option<RateWindow>)> {
+    sessions
+        .values()
+        .filter_map(|s| s.snapshot.as_ref())
+        .filter(|snap| snap.five_hour.is_some() || snap.seven_day.is_some())
+        .max_by(|a, b| a.ts.total_cmp(&b.ts))
+        .map(|snap| (snap.five_hour, snap.seven_day))
+}
+
 /// Ended sessions stay visible this long unless `a` is toggled.
 const ENDED_GRACE_SECS: f64 = 10.0 * 60.0;
 /// Sessions with no known process and no events for this long are treated as gone.
@@ -92,12 +138,7 @@ impl App {
 
     /// Account-wide 5-hour and 7-day usage, from the most recent status line report.
     pub fn rate_limits(&self) -> Option<(Option<RateWindow>, Option<RateWindow>)> {
-        self.sessions
-            .values()
-            .filter_map(|s| s.snapshot.as_ref())
-            .filter(|snap| snap.five_hour.is_some() || snap.seven_day.is_some())
-            .max_by(|a, b| a.ts.total_cmp(&b.ts))
-            .map(|snap| (snap.five_hour, snap.seven_day))
+        latest_rate_limits(&self.sessions)
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -131,38 +172,11 @@ impl App {
 
     /// Marks sessions whose Claude Code process is gone (crash, closed terminal) as ended.
     fn check_processes(&mut self) {
-        let now = crate::now();
-        let mut pids: Vec<Pid> = self
-            .sessions
-            .values()
-            .filter(|s| s.status != Status::Ended)
-            .filter_map(|s| s.pid.map(Pid::from_u32))
-            .collect();
-        pids.sort();
-        pids.dedup();
-        self.sys.refresh_processes_specifics(ProcessesToUpdate::Some(&pids), true, ProcessRefreshKind::nothing());
-        for s in self.sessions.values_mut().filter(|s| s.status != Status::Ended) {
-            let gone = match s.pid {
-                Some(pid) => self.sys.process(Pid::from_u32(pid)).is_none(),
-                None => now - s.last_event > STALE_SECS,
-            };
-            if gone {
-                s.set_status(Status::Ended, now);
-                s.detail = "process exited".into();
-                for a in s.subagents.values_mut() {
-                    a.running = false;
-                }
-            }
-        }
+        mark_exited(&mut self.sessions, &mut self.sys);
     }
 
     fn refresh_snapshots(&mut self) {
-        let dir = crate::statusline::status_dir();
-        for s in self.sessions.values_mut().filter(|s| s.status != Status::Ended || s.snapshot.is_none()) {
-            if let Some(snap) = crate::statusline::load(&dir.join(format!("{}.json", s.id))) {
-                s.snapshot = Some(snap);
-            }
-        }
+        load_snapshots(&mut self.sessions);
     }
 
     fn refresh_transcripts(&mut self) {

@@ -164,7 +164,7 @@ pub fn schema() {
     println!("{}", store::SCHEMA.trim());
 }
 
-fn print(r: &QueryResult, format: Format) {
+pub fn print(r: &QueryResult, format: Format) {
     match format {
         Format::Json => {
             let rows: Vec<Value> = r

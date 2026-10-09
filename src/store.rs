@@ -467,6 +467,45 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    fn total_tokens(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COALESCE(SUM(total), 0) FROM usage_daily", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn sync_handles_corrupt_appended_and_rewritten_transcripts() {
+        let root = std::env::temp_dir().join(format!("marsad-store-inc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let proj = root.join("projects").join("-p-api");
+        std::fs::create_dir_all(&proj).unwrap();
+        let file = proj.join("s2.jsonl");
+        let ts = chrono::Utc::now().to_rfc3339();
+        let msg = |id: &str, out: u64| {
+            format!(r#"{{"type":"assistant","timestamp":"{ts}","message":{{"id":"{id}","usage":{{"output_tokens":{out}}}}}}}"#)
+        };
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        let projects = root.join("projects");
+
+        // Corrupt and partial lines are skipped; valid ones still count.
+        std::fs::write(&file, format!("{}\nnot json at all\n{{\"type\":\n{}\n", msg("a", 10), msg("b", 5))).unwrap();
+        let r = sync_dir(&mut conn, &projects).unwrap();
+        assert_eq!((r.updated, r.failed), (1, 0));
+        assert_eq!(total_tokens(&conn), 15);
+
+        // Appending re-indexes the file without double counting.
+        let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writeln!(f, "{}", msg("c", 100)).unwrap();
+        drop(f);
+        assert_eq!(sync_dir(&mut conn, &projects).unwrap().updated, 1);
+        assert_eq!(total_tokens(&conn), 115);
+
+        // A rewritten, shorter file replaces the old rows rather than adding to them.
+        std::fs::write(&file, format!("{}\n", msg("z", 7))).unwrap();
+        assert_eq!(sync_dir(&mut conn, &projects).unwrap().updated, 1);
+        assert_eq!(total_tokens(&conn), 7);
+        std::fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn readonly_connection_rejects_every_write() {
         let root = std::env::temp_dir().join(format!("marsad-ro-{}", std::process::id()));

@@ -1,6 +1,6 @@
 ---
 name: marsad-usage
-description: Analyze Claude Code token usage from the last 30 days (by day, session, skill, project, model or subagent) using marsad's usage history. Use when the user asks which sessions, skills, projects or models used the most tokens, how usage changed over days, or wants a usage report.
+description: Analyze Claude Code token usage from the last 30 days (by day, session, skill, project, model or subagent) and check live sessions (status, context left before auto-compact, 5h/7d usage limits) using marsad. Use when the user asks which sessions, skills, projects or models used the most tokens, how usage changed over days, how much context or usage limit is left, which sessions need attention, or wants a usage report.
 ---
 
 # Claude Code usage history (marsad)
@@ -8,6 +8,20 @@ description: Analyze Claude Code token usage from the last 30 days (by day, sess
 `marsad` keeps a 30-day SQLite history of every Claude Code session on this machine, built from
 transcripts. Each command below indexes new transcript data first (add `--no-sync` to skip).
 If `marsad` is not on PATH, run it by its full path: `"{{MARSAD_EXE}}"`.
+
+## Live sessions (right now)
+
+```sh
+marsad status --format json        # running sessions: status, activity, context left, usage limits
+marsad status --all                # include sessions that have ended
+```
+
+Each session has `status` (`permission`, `question`, `error`, `active`, `idle`, `ended`),
+`activity`, `context_used` / `context_limit` / `context_left` / `context_pct` (tokens until
+auto-compact; `context_estimated: true` means the window size was inferred from the model id), and
+`tokens_total`. The top-level `rate_limits.five_hour` / `seven_day` give `used_pct` and `resets_at`
+(Unix seconds), from the most recent status line report (claude.ai Pro/Max only; null otherwise).
+Live data is not in the usage database; use `marsad status` for it.
 
 ## Ready-made reports
 

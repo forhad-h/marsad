@@ -108,12 +108,15 @@ marsad report --by session --date 2026-10-04
 marsad report --by day --format json       # also: project, model, agent; csv
 marsad sql "SELECT skill, SUM(total) FROM skill_runs GROUP BY skill" --format json
 marsad schema
+marsad status                              # live: status, activity, context left, usage limits
+marsad status --format json --all          # include ended sessions
 ```
 
 **For Claude:** `marsad install` adds a personal `marsad-usage` skill
 (`~/.claude/skills/marsad-usage/SKILL.md`). Ask any Claude Code session things like "which
-skills used the most tokens this week?" and it will use `marsad report` / `marsad sql`.
-`marsad sql` is read-only.
+skills used the most tokens this week?" or "how much context is left in my other sessions?" and
+it will use `marsad report` / `marsad sql` / `marsad status`. `marsad sql` accepts only read-only
+statements.
 
 ### Known limitations
 
