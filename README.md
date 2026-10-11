@@ -6,10 +6,10 @@ doing, which ones are waiting on you, which skills they ran, and how many tokens
 ```
  marsad   3 sessions · 1 active · 2 need you                                    Σ 2.0M tokens
 ╭ Sessions ───────────────────────────────────────────────────────────────────────────────────╮
-│ PROJECT        ACTIVITY                                         TIME   TOKENS    STATUS     │
+│ PROJECT        ACTIVITY                                         TIME   TOKENS        STATUS │
 │ marsad         Bash: cargo test --all                            37s     2.0M  PERMISSION ● │
-│ notes          Which database should we use?                     37s     8.1k  QUESTION ?   │
-│ web         +2 › add dark mode to the settings page              12s   414.8k  ACTIVE ◐     │
+│ notes          Which database should we use?                     37s     8.1k    QUESTION ? │
+│ web         +2 › add dark mode to the settings page              12s   414.8k      ACTIVE ◐ │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ web · Dark mode settings ───────────────────────────────────────────────────────────────────╮
 │session  ~/Projects/web   model claude-opus-5-5   mode auto   id 1fe612e4                    │
