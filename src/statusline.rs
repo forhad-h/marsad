@@ -143,7 +143,8 @@ fn default_line(snap: &StatusSnapshot) -> String {
     }
     for (label, w) in [("5h", snap.five_hour), ("7d", snap.seven_day)] {
         if let Some(w) = w {
-            parts.push(format!("{}{label} {:.0}%{RESET}", color(w.used_pct / 100.0), w.used_pct));
+            let reset = w.resets_at.map(|t| format!(" {DIM}↻{}{RESET}", crate::model::fmt_reset(t))).unwrap_or_default();
+            parts.push(format!("{}{label} {:.0}%{RESET}{reset}", color(w.used_pct / 100.0), w.used_pct));
         }
     }
     parts.join(&format!(" {DIM}·{RESET} "))
@@ -168,6 +169,21 @@ mod tests {
         let line = default_line(&snap);
         assert!(line.contains("ctx 90%") && line.contains("\x1b[31m"), "{line}");
         assert!(!line.contains("5h") && !line.contains("7d"));
+    }
+
+    #[test]
+    fn default_line_shows_rate_limit_reset_times() {
+        let now = crate::now();
+        let snap = StatusSnapshot {
+            five_hour: Some(RateWindow { used_pct: 42.0, resets_at: Some(now + 2.0 * 3600.0) }),
+            seven_day: Some(RateWindow { used_pct: 18.0, resets_at: Some(now + 3.0 * 86400.0) }),
+            ..Default::default()
+        };
+        let line = default_line(&snap);
+        let five = crate::model::fmt_reset(now + 2.0 * 3600.0);
+        let seven = crate::model::fmt_reset(now + 3.0 * 86400.0);
+        assert!(line.contains(&format!("↻{five}")) && line.contains(&format!("↻{seven}")), "{line}");
+        assert!(seven.contains(' '), "a reset days away names the day: {seven}");
     }
 
     #[test]

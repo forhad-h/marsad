@@ -183,6 +183,20 @@ pub fn fmt_tokens(n: u64) -> String {
     }
 }
 
+/// Local wall-clock time a rate-limit window resets: `16:30` today,
+/// `Tue 09:00` within the week, `Oct 21 09:00` beyond.
+pub fn fmt_reset(ts: f64) -> String {
+    use chrono::{Local, TimeZone};
+    let Some(t) = Local.timestamp_opt(ts as i64, 0).single() else { return "—".into() };
+    let days = (t.date_naive() - Local::now().date_naive()).num_days();
+    match days {
+        ..=0 => t.format("%H:%M"),
+        1..7 => t.format("%a %H:%M"),
+        _ => t.format("%b %d %H:%M"),
+    }
+    .to_string()
+}
+
 /// The user's auto-compact window, from `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or the
 /// `autoCompactWindow` setting. Accepts `200000`, `500k`, `1M` or a bare `200` (thousands).
 pub fn auto_compact_window() -> Option<u64> {

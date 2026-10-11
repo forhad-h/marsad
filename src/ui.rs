@@ -111,16 +111,6 @@ fn fmt_age(secs: f64) -> String {
     }
 }
 
-/// Time left until a unix timestamp, e.g. "2h13m" or "3d4h".
-fn fmt_until(ts: f64) -> String {
-    let s = (ts - crate::now()).max(0.0) as u64;
-    match s {
-        0..3600 => format!("{}m", s / 60),
-        3600..86400 => format!("{}h{:02}m", s / 3600, s % 3600 / 60),
-        _ => format!("{}d{}h", s / 86400, s % 86400 / 3600),
-    }
-}
-
 /// Local wall-clock time for an ISO-8601 transcript timestamp.
 fn fmt_local(iso: Option<&str>) -> String {
     let Some(t) = iso.and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()) else { return "—".into() };
@@ -176,7 +166,7 @@ fn rate_spans(label: &str, w: RateWindow) -> Vec<Span<'static>> {
     let style = Style::new().fg(ratio_color(w.used_pct / 100.0));
     let mut spans = vec![Span::raw(format!("{label} ")), Span::styled(format!("{:.0}%", w.used_pct), style.bold())];
     if let Some(reset) = w.resets_at {
-        spans.push(Span::styled(format!(" ↻{}", fmt_until(reset)), Style::new().dark_gray()));
+        spans.push(Span::styled(format!(" ↻{}", crate::model::fmt_reset(reset)), Style::new().dark_gray()));
     }
     spans
 }
