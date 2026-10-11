@@ -11,6 +11,7 @@ GitHub release. Keep each bullet to one short line.
 - `s` / `S` sort the session list by status, project, context, age or tokens
 - Subagents for each session (`tab`): launching skill, tokens used, context left
 - Skill windows stay open when a background subagent finishes, so skill token counts are more accurate
+- Sessions waiting on a permission prompt get a slowly pulsing amber row background
 
 ## 0.2.0 - 2026-10-09
 
