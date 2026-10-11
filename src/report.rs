@@ -165,8 +165,50 @@ pub fn sql(a: SqlArgs) -> anyhow::Result<()> {
 
 #[derive(Args)]
 pub struct RetentionArgs {
-    /// Days of history to keep (e.g. 90), or `forever`. Omit to show the current setting.
+    /// Days of history to keep (default 30), or `forever`. Omit to show the current setting.
     keep: Option<String>,
+}
+
+#[derive(Args)]
+pub struct TotalArgs {
+    #[arg(long, value_enum, default_value = "table")]
+    format: Format,
+    /// Don't index new transcript data first.
+    #[arg(long)]
+    no_sync: bool,
+}
+
+/// All-time token totals, including days already pruned from the history: a shareable number
+/// with no per-session detail.
+pub fn total(a: TotalArgs) -> anyhow::Result<()> {
+    ensure_synced(a.no_sync)?;
+    let conn = store::open_readonly()?;
+    let t = store::lifetime(&conn)?;
+    match a.format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&t)?),
+        Format::Csv => {
+            println!("since,input,output,cache_read,cache_write,total");
+            let since = t.since.as_deref().unwrap_or("");
+            println!("{since},{},{},{},{},{}", t.input, t.output, t.cache_read, t.cache_write, t.total);
+        }
+        Format::Table => {
+            let Some(since) = &t.since else {
+                println!("No Claude Code usage recorded yet.");
+                return Ok(());
+            };
+            let n = |v: i64| human(&serde_json::json!(v));
+            let short = crate::model::fmt_tokens(t.total.max(0) as u64);
+            println!("Claude Code tokens since {}: {} ({short})", crate::ui::fmt_since(since), n(t.total));
+            println!(
+                "  input {}  ·  output {}  ·  cache read {}  ·  cache write {}",
+                n(t.input),
+                n(t.output),
+                n(t.cache_read),
+                n(t.cache_write)
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn retention(a: RetentionArgs) -> anyhow::Result<()> {
@@ -181,7 +223,7 @@ pub fn retention(a: RetentionArgs) -> anyhow::Result<()> {
     store::set_retention(days)?;
     println!("Keeping usage history {}.", store::retention_label(days));
     if days.is_some() {
-        println!("Older rows are deleted on the next sync (dashboard, `marsad sync`, or when a session ends).");
+        println!("Older rows are deleted on the next sync; their tokens stay in `marsad total`.");
     }
     Ok(())
 }
@@ -190,7 +232,10 @@ pub fn schema() {
     println!("-- {}", store::db_path().display());
     match store::retention() {
         None => println!("-- Local-date usage, kept forever (also for sessions whose transcripts were deleted)."),
-        Some(n) => println!("-- Local-date usage for the last {n} days. Older rows are deleted automatically."),
+        Some(n) => println!(
+            "-- Local-date usage for the last {n} days. Older rows are deleted automatically,\n\
+             -- after their tokens are added to `lifetime` (all time = lifetime + SUM(usage_daily))."
+        ),
     }
     println!("{}", store::SCHEMA.trim());
 }

@@ -117,26 +117,35 @@ so a subagent's used tokens (summed across all its turns) can be far above its c
 ### Usage history
 
 `u` opens the Usage view: totals for the period on top (tokens, sessions, average per day, busiest
-day, and a daily chart), days on the left, and the selected day's sessions and skills ranked by
-tokens on the right. `p` / `P` switch the period between the last 7, 30, 90 and 365 days and all
-time. `tab` switches pane, and `enter` on a session shows its per-day totals and every skill run.
-"Total" aggregates the whole period.
+day, a daily chart, and your all-time total), days on the left, and the selected day's sessions and
+skills ranked by tokens on the right. `p` / `P` switch the period (the last 7 days, or everything
+kept; with a longer retention also 30, 90 and 365 days). `tab` switches pane, and `enter` on a
+session shows its per-day totals and every skill run. "Total" aggregates the whole period.
 
 The history is a SQLite database at `~/.claude/marsad/usage.db`, indexed from Claude Code
 transcripts (`~/.claude/projects`). It includes sessions from before marsad was installed.
 Tokens are bucketed by the local day each API call happened, so long sessions split across days.
 
-History is kept **forever** by default, including sessions whose transcripts Claude Code has since
-deleted (it removes them after `cleanupPeriodDays`, 30 days by default). Each session is indexed
-when it ends (the `SessionEnd` hook starts a background `marsad sync`), so it is recorded even if
-the dashboard isn't open. The dashboard also re-indexes every minute while open, and
-`marsad sync` / `report` / `sql` index on demand (only changed files are re-read).
+Sessions are kept for the **last 30 days** by default; `marsad retention` changes that. Rows stay
+even after Claude Code deletes their transcripts (it does after `cleanupPeriodDays`, 30 days by
+default). Each session is indexed when it ends (the `SessionEnd` hook starts a background
+`marsad sync`), so it is recorded even if the dashboard isn't open. The dashboard also re-indexes
+every minute while open, and `marsad sync` / `report` / `sql` / `total` index on demand (only
+changed files are re-read).
+
+Before old days are deleted, their token counts are added to a single all-time total, with no
+session details. `marsad total` prints it, ready to share:
 
 ```sh
-marsad retention            # show how long history is kept
-marsad retention 365        # keep the last 365 days; older rows are deleted on the next sync
+marsad total                # Claude Code tokens since Sep 21, 2026: 112,118,227 (112.1M) + breakdown
+marsad total --format json
+marsad retention            # show how many days are kept
+marsad retention 90         # keep 90 days; older rows are deleted on the next sync
 marsad retention forever
 ```
+
+The all-time total starts from the oldest day marsad indexed, so usage that was already gone from
+Claude Code's transcripts when marsad first ran isn't included.
 
 ```sh
 marsad report --by skill --days 7          # skills by ≈tokens this week

@@ -40,8 +40,10 @@ enum Cmd {
     Uninstall,
     /// Index new transcript data into the usage history.
     Sync,
-    /// Show or set how long usage history is kept (default: forever).
+    /// Show or set how many days of usage history are kept (default 30).
     Retention(report::RetentionArgs),
+    /// Total tokens used since marsad started counting, including days no longer kept.
+    Total(report::TotalArgs),
     /// Summarize token usage (by day, session, skill, project, model, agent).
     Report(report::ReportArgs),
     /// Run a read-only SQL query against the usage history.
@@ -88,6 +90,7 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::Uninstall) => install::uninstall(),
         Some(Cmd::Sync) => report::sync_now(),
         Some(Cmd::Retention(args)) => report::retention(args),
+        Some(Cmd::Total(args)) => report::total(args),
         Some(Cmd::Report(args)) => report::report(args),
         Some(Cmd::Sql(args)) => report::sql(args),
         Some(Cmd::Schema) => {

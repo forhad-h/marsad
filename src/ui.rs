@@ -198,7 +198,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("tab", "pane".into()),
                 ("↑↓", "move".into()),
                 ("enter", "open session".into()),
-                ("p/P", format!("period: {}", app.usage.period.label())),
+                ("p/P", format!("period: {}", app.usage.period_label())),
                 ("r", "resync".into()),
                 ("esc", "back".into()),
                 ("q", "quit".into()),
@@ -722,6 +722,11 @@ fn fmt_day(day: &str) -> String {
     }
 }
 
+/// A day with its year, e.g. "Sep 21, 2026".
+pub fn fmt_since(day: &str) -> String {
+    chrono::NaiveDate::parse_from_str(day, DAY_FMT).map_or_else(|_| day.to_string(), |d| d.format("%b %-d, %Y").to_string())
+}
+
 fn weight(v: i64, max: i64) -> f64 {
     if max <= 0 { 0.0 } else { v as f64 / max as f64 }
 }
@@ -744,7 +749,18 @@ fn draw_summary(f: &mut Frame, area: Rect, u: &Usage) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().dark_gray())
-        .title(Line::from(Span::styled(format!(" Usage · {} ", u.period.label()), Style::new().fg(ACCENT).bold())));
+        .title(Line::from(Span::styled(format!(" Usage · {} ", u.period_label()), Style::new().fg(ACCENT).bold())));
+    let block = match &u.lifetime.since {
+        Some(since) => block.title(
+            Line::from(vec![
+                dim(" all time "),
+                Span::styled(fmt_tokens(u.lifetime.total as u64), Style::new().bold()),
+                dim(format!(" since {} ", fmt_since(since))),
+            ])
+            .alignment(Alignment::Right),
+        ),
+        None => block,
+    };
     let inner = block.inner(area);
     f.render_widget(block, area);
     let [text, chart] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
@@ -799,7 +815,7 @@ fn draw_usage(f: &mut Frame, area: Rect, u: &Usage) {
     let table = styled_table(rows, &widths, title);
     f.render_stateful_widget(table, left, &mut TableState::default().with_selected(Some(u.day_index())));
 
-    let scope = u.day.as_deref().map(fmt_day).unwrap_or_else(|| u.period.label());
+    let scope = u.day.as_deref().map(fmt_day).unwrap_or_else(|| u.period_label());
 
     // Sessions
     let max_s = u.sessions.first().map(|s| s.total).unwrap_or(0);

@@ -6,7 +6,8 @@ description: Analyze Claude Code token usage over any period, including past and
 # Claude Code usage history (marsad)
 
 `marsad` keeps a SQLite history of every Claude Code session on this machine, built from
-transcripts and kept after Claude Code deletes them (forever, unless `marsad retention` sets a limit). Each command below indexes new transcript data first (add `--no-sync` to skip).
+transcripts and kept after Claude Code deletes them, for the last 30 days by default (`marsad retention`).
+`marsad total` gives the all-time token total (`--format json`), which also counts pruned days. Each command below indexes new transcript data first (add `--no-sync` to skip).
 If `marsad` is not on PATH, run it by its full path: `"{{MARSAD_EXE}}"`.
 
 ## Live sessions (right now)
@@ -26,7 +27,7 @@ Live data is not in the usage database; use `marsad status` for it.
 ## Ready-made reports
 
 ```sh
-marsad report --by session            # top sessions by tokens (default: all history)
+marsad report --by session            # top sessions by tokens (default: all kept history)
 marsad report --by skill --days 7     # skills ranked by ≈tokens this week
 marsad report --by day                # daily totals, newest first
 marsad report --by project --from 2026-10-01 --to 2026-10-07
@@ -49,6 +50,8 @@ Tables:
 - `sessions(session_id, project, cwd, title, model, first_at, last_at, transcript_path)`
 - `usage_daily(session_id, agent_id, agent_type, day, input, output, cache_read, cache_write, total, turns)` —
   one row per session × agent (`main` or a subagent) × local day.
+- `lifetime(since, through, input, output, cache_read, cache_write, total)` — one row: tokens of
+  days already pruned from `usage_daily`.
 - `skill_runs(session_id, agent_id, agent_type, seq, skill, via, at, day, turns, input, output, cache_read, cache_write, total)` —
   one row per skill invocation; `via` is `tool` (Claude invoked it) or `command` (user typed `/skill`).
 
@@ -68,7 +71,8 @@ marsad sql "SELECT skill, COUNT(*) calls, SUM(total)/COUNT(*) avg_tokens
 - Skill tokens are **approximate**: each run counts the turns between the skill's invocation and the
   next user prompt or next skill, so it includes work Claude did while following that skill.
 - Days are the machine's local dates. History goes back to the first indexed transcript;
-  `marsad retention` shows whether older rows are being deleted.
+  `marsad retention` shows how many days are kept. For totals beyond that, use `marsad total`
+  or the `lifetime` table (all time = `lifetime` + `SUM(usage_daily)`).
 - Sessions that ran inside subagents appear under `agent_type` other than `main`.
 
 When reporting, lead with the answer (the top items and their share of the total), then
