@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::AddAssign;
 use std::path::PathBuf;
 
@@ -107,12 +107,16 @@ pub struct TranscriptStats {
     pub skills: BTreeMap<String, SkillStat>,
     /// Skill invocations in transcript order.
     pub runs: Vec<SkillRun>,
+    /// Agent/Task tool_use id -> skill whose window launched it (None outside any skill).
+    pub launches: HashMap<String, Option<String>>,
     /// Prompt size of the latest API call (input + cache read + cache write).
     pub context_used: Option<u64>,
     /// Unix time of the API call `context_used` came from.
     pub context_at: Option<f64>,
     pub model: Option<String>,
     pub title: Option<String>,
+    /// ISO-8601 timestamp of the first transcript entry.
+    pub started: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -237,11 +241,25 @@ pub fn model_window(model: &str, used: u64) -> u64 {
     if native_1m || used > 200_000 { 1_000_000 } else { 200_000 }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Subagent {
     pub agent_type: String,
+    /// The task description it was launched with.
+    pub description: String,
+    /// Id of the Agent tool call that launched it.
+    pub tool_use_id: Option<String>,
+    /// Whether its `.meta.json` has been read; it can appear after the transcript does.
+    pub meta_loaded: bool,
     pub running: bool,
     pub stats: TranscriptStats,
+}
+
+impl Subagent {
+    /// Context fill relative to the auto-compact point, from its own transcript.
+    pub fn context(&self, compact_window: Option<u64>) -> Option<ContextInfo> {
+        let used = self.stats.context_used?;
+        Some(context_info(used, self.stats.model.as_deref(), None, compact_window))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -334,6 +352,30 @@ impl Session {
         }
         runs.sort_by(|a, b| a.1.at.cmp(&b.1.at));
         runs
+    }
+
+    /// Subagents oldest first, each with the skill whose window launched it. Nested
+    /// subagents are launched from another subagent's transcript, so all are searched.
+    pub fn subagents_by_start(&self) -> Vec<(&Subagent, Option<&str>)> {
+        let mut list: Vec<(&Subagent, Option<&str>)> = self
+            .subagents
+            .values()
+            .map(|a| {
+                let skill = a.tool_use_id.as_deref().and_then(|id| {
+                    std::iter::once(&self.stats)
+                        .chain(self.subagents.values().map(|o| &o.stats))
+                        .find_map(|st| st.launches.get(id))
+                        .and_then(|s| s.as_deref())
+                });
+                (a, skill)
+            })
+            .collect();
+        // Not-yet-written transcripts have no start time; keep them last.
+        list.sort_by(|a, b| match (&a.0.stats.started, &b.0.stats.started) {
+            (Some(x), Some(y)) => x.cmp(y),
+            (x, y) => y.is_some().cmp(&x.is_some()),
+        });
+        list
     }
 
     /// Skills across the main agent and its subagents, by name.
@@ -463,5 +505,38 @@ mod tests {
         assert_eq!(order(SortKey::Context, false), "cab", "least left first, unknown last");
         assert_eq!(order(SortKey::Context, true), "acb", "unknown stays last when reversed");
         assert_eq!(order(SortKey::Tokens, false), "abc", "ties keep first-seen order");
+    }
+
+    #[test]
+    fn subagents_link_to_launching_skill() {
+        let mut s = Session::new("s", 0.0);
+        s.stats.launches.insert("t1".into(), Some("ce-work".into()));
+        s.stats.launches.insert("t2".into(), None);
+        let agent = |tool: &str, started: Option<&str>| {
+            let mut a = Subagent { tool_use_id: Some(tool.into()), ..Default::default() };
+            a.stats.started = started.map(str::to_string);
+            a
+        };
+        s.subagents.insert("a".into(), agent("t2", Some("2026-10-11T10:05:00Z")));
+        s.subagents.insert("b".into(), agent("t1", Some("2026-10-11T10:00:00Z")));
+        s.subagents.insert("c".into(), agent("t3", None));
+        // A nested subagent, launched from inside subagent "b" while it ran ce-debug.
+        s.subagents.get_mut("b").unwrap().stats.launches.insert("t3".into(), Some("ce-debug".into()));
+
+        let list: Vec<_> = s.subagents_by_start().into_iter().map(|(a, k)| (a.tool_use_id.clone().unwrap(), k)).collect();
+        assert_eq!(
+            list,
+            [("t1".to_string(), Some("ce-work")), ("t2".to_string(), None), ("t3".to_string(), Some("ce-debug"))]
+        );
+    }
+
+    #[test]
+    fn subagent_context_uses_its_own_model() {
+        let mut a = Subagent::default();
+        assert!(a.context(None).is_none());
+        a.stats.context_used = Some(50_000);
+        a.stats.model = Some("claude-haiku-4-5".into());
+        let ctx = a.context(None).unwrap();
+        assert_eq!((ctx.limit, ctx.left()), (200_000, 150_000));
     }
 }

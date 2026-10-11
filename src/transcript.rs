@@ -25,6 +25,10 @@ pub struct TranscriptReader {
     /// (name, timestamp, via) per invocation, in transcript order.
     runs: Vec<(String, Option<String>, Via)>,
     current_run: Option<usize>,
+    /// Agent/Task tool_use id -> skill whose window it ran in, for linking subagents to skills.
+    launches: HashMap<String, Option<String>>,
+    /// True for a subagent's own transcript, where every entry is marked `isSidechain`.
+    sidechain: bool,
     context_used: Option<u64>,
     context_at: Option<f64>,
     model: Option<String>,
@@ -54,6 +58,8 @@ impl TranscriptReader {
             messages: HashMap::new(),
             runs: Vec::new(),
             current_run: None,
+            launches: HashMap::new(),
+            sidechain: false,
             context_used: None,
             context_at: None,
             model: None,
@@ -62,6 +68,11 @@ impl TranscriptReader {
             first_at: None,
             last_at: None,
         }
+    }
+
+    /// Reader for a subagent transcript, whose entries all count toward its own context.
+    pub fn subagent(path: PathBuf) -> Self {
+        Self { sidechain: true, ..Self::new(path) }
     }
 
     /// Reads newly appended lines. Returns true if anything was read.
@@ -102,7 +113,7 @@ impl TranscriptReader {
         }
         let usage = parse_usage(&msg["usage"]);
         let prompt = usage.input + usage.cache_read + usage.cache_write;
-        if prompt > 0 && e["isSidechain"] != true {
+        if prompt > 0 && e["isSidechain"].as_bool().unwrap_or(false) == self.sidechain {
             self.context_used = Some(prompt);
             self.context_at = e["timestamp"]
                 .as_str()
@@ -118,10 +129,23 @@ impl TranscriptReader {
             .or_insert((usage, run, day));
 
         for block in msg["content"].as_array().into_iter().flatten() {
-            if block["type"] == "tool_use" && block["name"] == "Skill"
-                && let Some(name) = block["input"]["skill"].as_str() {
-                    self.open_skill(name, e, Via::Tool);
+            if block["type"] != "tool_use" {
+                continue;
+            }
+            match block["name"].as_str() {
+                Some("Skill") => {
+                    if let Some(name) = block["input"]["skill"].as_str() {
+                        self.open_skill(name, e, Via::Tool);
+                    }
                 }
+                Some("Agent" | "Task") => {
+                    if let Some(id) = block["id"].as_str() {
+                        let skill = self.current_run.map(|i| self.runs[i].0.clone());
+                        self.launches.insert(id.to_string(), skill);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -140,6 +164,10 @@ impl TranscriptReader {
             }
             _ => return,
         };
+        // A background agent finishing is reported as a user entry, but the skill keeps running.
+        if e["origin"]["kind"] == "task-notification" || text.starts_with("<task-notification>") {
+            return;
+        }
         // A new real prompt closes the skill window; a typed /skill opens a new one.
         self.current_run = None;
         if let Some(cmd) = slash_command(text)
@@ -184,10 +212,12 @@ impl TranscriptReader {
             tokens,
             skills,
             runs,
+            launches: self.launches.clone(),
             context_used: self.context_used,
             context_at: self.context_at,
             model: self.model.clone(),
             title: self.title.clone(),
+            started: self.first_at.clone(),
         }
     }
 
@@ -248,11 +278,22 @@ pub fn subagent_files(dir: &std::path::Path) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// Reads `agentType` from a subagent's `.meta.json`, if present.
-pub fn subagent_type(dir: &std::path::Path, agent_id: &str) -> Option<String> {
+/// What Claude Code records about a subagent in its `.meta.json`.
+#[derive(Debug, Default, PartialEq)]
+pub struct SubagentMeta {
+    pub agent_type: Option<String>,
+    /// The short task description passed to the Agent tool.
+    pub description: Option<String>,
+    /// Id of the Agent tool call that launched it, in the parent's transcript.
+    pub tool_use_id: Option<String>,
+}
+
+/// Reads a subagent's `.meta.json`, if present.
+pub fn subagent_meta(dir: &std::path::Path, agent_id: &str) -> Option<SubagentMeta> {
     let text = std::fs::read_to_string(dir.join(format!("agent-{agent_id}.meta.json"))).ok()?;
     let v: Value = serde_json::from_str(&text).ok()?;
-    v["agentType"].as_str().map(str::to_string)
+    let s = |k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
+    Some(SubagentMeta { agent_type: s("agentType"), description: s("description"), tool_use_id: s("toolUseId") })
 }
 
 #[cfg(test)]
@@ -261,7 +302,9 @@ mod tests {
     use std::io::Write;
 
     fn reader_for(lines: &[&str]) -> TranscriptReader {
-        let dir = std::env::temp_dir().join(format!("marsad-tr-{}-{}", std::process::id(), lines.len()));
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("marsad-tr-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.jsonl");
         let mut f = std::fs::File::create(&path).unwrap();
@@ -309,5 +352,50 @@ mod tests {
         let s = r.stats();
         assert!(!s.skills.contains_key("clear"));
         assert_eq!(s.skills["code-review"].tokens.output, 9);
+    }
+
+    #[test]
+    fn records_which_skill_launched_each_agent() {
+        let r = reader_for(&[
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t0","name":"Agent","input":{}}]}}"#,
+            r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","name":"Skill","input":{"skill":"ce-work"}}]}}"#,
+            r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"tool_use","id":"t1","name":"Agent","input":{}}]}}"#,
+        ]);
+        let s = r.stats();
+        assert_eq!(s.launches["t0"], None);
+        assert_eq!(s.launches["t1"].as_deref(), Some("ce-work"));
+    }
+
+    #[test]
+    fn background_agent_notification_keeps_skill_window_open() {
+        let r = reader_for(&[
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","name":"Skill","input":{"skill":"ce-code-review"}}]}}"#,
+            r#"{"type":"user","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>\n<status>completed</status>"}}"#,
+            r#"{"type":"assistant","message":{"id":"m2","usage":{"output_tokens":4},"content":[{"type":"tool_use","id":"t1","name":"Agent","input":{}}]}}"#,
+        ]);
+        let s = r.stats();
+        assert_eq!(s.launches["t1"].as_deref(), Some("ce-code-review"));
+        assert_eq!(s.skills["ce-code-review"].tokens.output, 4);
+    }
+
+    #[test]
+    fn subagent_reader_counts_sidechain_context() {
+        let lines = [r#"{"type":"assistant","isSidechain":true,"message":{"id":"m1","usage":{"input_tokens":7,"cache_read_input_tokens":3}}}"#];
+        assert_eq!(reader_for(&lines).stats().context_used, None);
+
+        let dir = std::env::temp_dir().join(format!("marsad-sub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent-a1.jsonl");
+        std::fs::write(&path, format!("{}\n", lines[0])).unwrap();
+        std::fs::write(dir.join("agent-a1.meta.json"), r#"{"agentType":"Explore","description":"Map code","toolUseId":"t1"}"#).unwrap();
+        let mut r = TranscriptReader::subagent(path);
+        r.poll();
+        let meta = subagent_meta(&dir, "a1");
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(r.stats().context_used, Some(10));
+        let meta = meta.unwrap();
+        assert_eq!(meta.agent_type.as_deref(), Some("Explore"));
+        assert_eq!(meta.description.as_deref(), Some("Map code"));
+        assert_eq!(meta.tool_use_id.as_deref(), Some("t1"));
     }
 }

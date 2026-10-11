@@ -63,6 +63,8 @@ const STALE_SECS: f64 = 12.0 * 3600.0;
 pub enum View {
     List,
     History,
+    /// One session's subagents: launching skill, tokens used, context left.
+    Agents,
     Usage,
 }
 
@@ -157,6 +159,15 @@ impl App {
         self.selected = Some(ids[next].clone());
     }
 
+    /// Opens a full-screen view of the highlighted session, scrolled to the top.
+    fn open(&mut self, view: View) {
+        if let Some(id) = self.selected_session().map(|s| s.id.clone()) {
+            self.selected = Some(id);
+            self.view = view;
+            self.history_scroll = 0;
+        }
+    }
+
     /// Changes the sort order while keeping the highlighted session selected.
     fn set_sort(&mut self, key: SortKey, reversed: bool) {
         self.selected = self.selected_session().map(|s| s.id.clone());
@@ -165,7 +176,11 @@ impl App {
     }
 
     fn scroll(&mut self, delta: isize) {
-        let len = self.selected_session().map(|s| s.skill_runs().len()).unwrap_or(0);
+        let len = match (self.view, self.selected_session()) {
+            (View::Agents, Some(s)) => s.subagents.len() + 1,
+            (_, Some(s)) => s.skill_runs().len(),
+            _ => 0,
+        };
         let max = len.saturating_sub(1) as isize;
         self.history_scroll = (self.history_scroll as isize + delta).clamp(0, max) as usize;
     }
@@ -211,15 +226,20 @@ impl App {
 
             let dir = transcript::subagent_dir(&path);
             for (agent_id, file) in transcript::subagent_files(&dir) {
-                let agent = session.subagents.entry(agent_id.clone()).or_insert_with(|| Subagent {
-                    agent_type: String::new(),
-                    running: false,
-                    stats: Default::default(),
-                });
-                if agent.agent_type.is_empty() || agent.agent_type == "agent" {
-                    agent.agent_type = transcript::subagent_type(&dir, &agent_id).unwrap_or_else(|| "agent".into());
+                let agent = session.subagents.entry(agent_id.clone()).or_insert_with(Subagent::default);
+                if !agent.meta_loaded
+                    && let Some(meta) = transcript::subagent_meta(&dir, &agent_id) {
+                        agent.meta_loaded = true;
+                        if let Some(t) = meta.agent_type {
+                            agent.agent_type = t;
+                        }
+                        agent.description = meta.description.unwrap_or_default();
+                        agent.tool_use_id = meta.tool_use_id;
+                    }
+                if agent.agent_type.is_empty() {
+                    agent.agent_type = "agent".into();
                 }
-                let reader = self.readers.entry(file.clone()).or_insert_with(|| TranscriptReader::new(file));
+                let reader = self.readers.entry(file.clone()).or_insert_with(|| TranscriptReader::subagent(file));
                 if reader.poll() {
                     agent.stats = reader.stats();
                 }
@@ -257,22 +277,18 @@ pub fn run() -> anyhow::Result<()> {
                             (View::List, KeyCode::Char('a')) => app.show_ended = !app.show_ended,
                             (View::List, KeyCode::Char('s')) => app.set_sort(app.sort.next(), false),
                             (View::List, KeyCode::Char('S')) => app.set_sort(app.sort, !app.sort_reversed),
-                            (View::List, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) => {
-                                if let Some(id) = app.selected_session().map(|s| s.id.clone()) {
-                                    app.selected = Some(id);
-                                    app.view = View::History;
-                                    app.history_scroll = 0;
-                                }
-                            }
-                            (View::History, KeyCode::Esc | KeyCode::Enter | KeyCode::Left | KeyCode::Char('h')) => {
+                            (View::List, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) => app.open(View::History),
+                            (View::List | View::History, KeyCode::Tab) => app.open(View::Agents),
+                            (View::Agents, KeyCode::Tab) => app.open(View::History),
+                            (View::History | View::Agents, KeyCode::Esc | KeyCode::Enter | KeyCode::Left | KeyCode::Char('h')) => {
                                 app.view = View::List
                             }
-                            (View::History, KeyCode::Down | KeyCode::Char('j')) => app.scroll(1),
-                            (View::History, KeyCode::Up | KeyCode::Char('k')) => app.scroll(-1),
-                            (View::History, KeyCode::PageDown | KeyCode::Char(' ')) => app.scroll(10),
-                            (View::History, KeyCode::PageUp) => app.scroll(-10),
-                            (View::History, KeyCode::Home | KeyCode::Char('g')) => app.history_scroll = 0,
-                            (View::History, KeyCode::End | KeyCode::Char('G')) => app.scroll(isize::MAX / 2),
+                            (View::History | View::Agents, KeyCode::Down | KeyCode::Char('j')) => app.scroll(1),
+                            (View::History | View::Agents, KeyCode::Up | KeyCode::Char('k')) => app.scroll(-1),
+                            (View::History | View::Agents, KeyCode::PageDown | KeyCode::Char(' ')) => app.scroll(10),
+                            (View::History | View::Agents, KeyCode::PageUp) => app.scroll(-10),
+                            (View::History | View::Agents, KeyCode::Home | KeyCode::Char('g')) => app.history_scroll = 0,
+                            (View::History | View::Agents, KeyCode::End | KeyCode::Char('G')) => app.scroll(isize::MAX / 2),
                             _ => {}
                         }
                     }

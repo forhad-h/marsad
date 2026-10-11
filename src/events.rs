@@ -1,6 +1,6 @@
 //! Turns hook events into per-session state.
 
-use crate::model::{Session, Status, Subagent, TranscriptStats};
+use crate::model::{Session, Status, Subagent};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -98,7 +98,7 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
                 session.subagents.entry(aid.to_string()).or_insert_with(|| Subagent {
                     agent_type: s("agent_type").unwrap_or("agent").to_string(),
                     running: true,
-                    stats: TranscriptStats::default(),
+                    ..Default::default()
                 });
             }
             if !session.status.needs_user() {
