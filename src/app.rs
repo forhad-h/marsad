@@ -78,6 +78,8 @@ pub struct App {
     pub tick: u64,
     pub hooks_installed: bool,
     pub usage: crate::usage::Usage,
+    pub update: Option<crate::update::Notice>,
+    update_rx: std::sync::mpsc::Receiver<crate::update::Notice>,
     log: JsonlTail,
     readers: HashMap<PathBuf, TranscriptReader>,
     sys: System,
@@ -106,6 +108,8 @@ impl App {
             tick: 0,
             hooks_installed,
             usage: crate::usage::Usage::new(),
+            update: None,
+            update_rx: crate::update::background(),
             log: JsonlTail::new(dir.join("events.jsonl")),
             readers: HashMap::new(),
             sys: System::new(),
@@ -168,6 +172,9 @@ impl App {
 
     fn refresh(&mut self) {
         self.usage.tick();
+        if let Ok(notice) = self.update_rx.try_recv() {
+            self.update = Some(notice);
+        }
         for ev in self.log.read_new() {
             events::apply(&mut self.sessions, &ev);
         }
