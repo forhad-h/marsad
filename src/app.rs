@@ -1,6 +1,6 @@
 use crate::events;
 use crate::jsonl::JsonlTail;
-use crate::model::{RateWindow, Session, SortKey, Status, Subagent};
+use crate::model::{EventKind, RateWindow, Session, SortKey, Status, Subagent, TimelineEntry};
 use crate::transcript::{self, TranscriptReader};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use std::collections::HashMap;
@@ -68,6 +68,53 @@ pub enum View {
     Usage,
 }
 
+/// Which events the history shows; `f` cycles through them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HistoryFilter {
+    #[default]
+    All,
+    Prompts,
+    Replies,
+    Skills,
+    Agents,
+    Questions,
+}
+
+impl HistoryFilter {
+    pub fn next(self) -> Self {
+        match self {
+            HistoryFilter::All => HistoryFilter::Prompts,
+            HistoryFilter::Prompts => HistoryFilter::Replies,
+            HistoryFilter::Replies => HistoryFilter::Skills,
+            HistoryFilter::Skills => HistoryFilter::Agents,
+            HistoryFilter::Agents => HistoryFilter::Questions,
+            HistoryFilter::Questions => HistoryFilter::All,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            HistoryFilter::All => "all",
+            HistoryFilter::Prompts => "prompts",
+            HistoryFilter::Replies => "replies",
+            HistoryFilter::Skills => "skills",
+            HistoryFilter::Agents => "subagents",
+            HistoryFilter::Questions => "questions",
+        }
+    }
+
+    pub fn matches(self, kind: &EventKind) -> bool {
+        match self {
+            HistoryFilter::All => true,
+            HistoryFilter::Prompts => matches!(kind, EventKind::Prompt(_)),
+            HistoryFilter::Replies => matches!(kind, EventKind::Response(_)),
+            HistoryFilter::Skills => matches!(kind, EventKind::Skill(_)),
+            HistoryFilter::Agents => matches!(kind, EventKind::Agent { .. }),
+            HistoryFilter::Questions => matches!(kind, EventKind::Question { .. }),
+        }
+    }
+}
+
 pub struct App {
     pub sessions: HashMap<String, Session>,
     pub selected: Option<String>,
@@ -76,6 +123,9 @@ pub struct App {
     pub sort_reversed: bool,
     pub view: View,
     pub history_scroll: usize,
+    pub history_filter: HistoryFilter,
+    /// Lines scrolled in the selected history event's detail pane.
+    pub detail_scroll: u16,
     pub compact_window: Option<u64>,
     pub tick: u64,
     pub hooks_installed: bool,
@@ -106,6 +156,8 @@ impl App {
             sort_reversed: false,
             view: View::List,
             history_scroll: 0,
+            history_filter: HistoryFilter::default(),
+            detail_scroll: 0,
             compact_window: crate::model::auto_compact_window(),
             tick: 0,
             hooks_installed,
@@ -165,6 +217,7 @@ impl App {
             self.selected = Some(id);
             self.view = view;
             self.history_scroll = 0;
+            self.detail_scroll = 0;
         }
     }
 
@@ -175,14 +228,36 @@ impl App {
         self.sort_reversed = reversed;
     }
 
+    /// The selected session's history events that pass the filter.
+    pub fn history<'a>(&self, s: &'a Session) -> Vec<TimelineEntry<'a>> {
+        let mut list = s.timeline();
+        list.retain(|e| self.history_filter.matches(&e.event.kind));
+        list
+    }
+
+    /// Scrolls the detail pane, stopping near the end of the selected event's text.
+    fn scroll_detail(&mut self, delta: i32) {
+        let lines = self.selected_session().map_or(0, |s| {
+            let events = self.history(s);
+            events.get(self.history_scroll.min(events.len().saturating_sub(1))).map_or(0, |e| match &e.event.kind {
+                EventKind::Prompt(t) | EventKind::Response(t) => t.lines().count(),
+                EventKind::Agent { result, .. } => result.as_deref().map_or(0, |r| r.lines().count()) + 6,
+                EventKind::Question { question, answer } => question.lines().count() + answer.as_deref().map_or(1, |a| a.lines().count()) + 3,
+                EventKind::Skill(_) => 0,
+            })
+        });
+        self.detail_scroll = (self.detail_scroll as i32 + delta).clamp(0, lines as i32) as u16;
+    }
+
     fn scroll(&mut self, delta: isize) {
         let len = match (self.view, self.selected_session()) {
             (View::Agents, Some(s)) => s.subagents.len() + 1,
-            (_, Some(s)) => s.skill_runs().len(),
+            (_, Some(s)) => self.history(s).len(),
             _ => 0,
         };
         let max = len.saturating_sub(1) as isize;
         self.history_scroll = (self.history_scroll as isize + delta).clamp(0, max) as usize;
+        self.detail_scroll = 0;
     }
 
     fn refresh(&mut self) {
@@ -278,6 +353,13 @@ pub fn run() -> anyhow::Result<()> {
                             (View::List, KeyCode::Char('s')) => app.set_sort(app.sort.next(), false),
                             (View::List, KeyCode::Char('S')) => app.set_sort(app.sort, !app.sort_reversed),
                             (View::List, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) => app.open(View::History),
+                            (View::History, KeyCode::Char('f')) => {
+                                app.history_filter = app.history_filter.next();
+                                app.history_scroll = 0;
+                                app.detail_scroll = 0;
+                            }
+                            (View::History, KeyCode::Char('J')) => app.scroll_detail(3),
+                            (View::History, KeyCode::Char('K')) => app.scroll_detail(-3),
                             (View::List | View::History, KeyCode::Tab) => app.open(View::Agents),
                             (View::Agents, KeyCode::Tab) => app.open(View::History),
                             (View::History | View::Agents, KeyCode::Esc | KeyCode::Enter | KeyCode::Left | KeyCode::Char('h')) => {
@@ -287,7 +369,7 @@ pub fn run() -> anyhow::Result<()> {
                             (View::History | View::Agents, KeyCode::Up | KeyCode::Char('k')) => app.scroll(-1),
                             (View::History | View::Agents, KeyCode::PageDown | KeyCode::Char(' ')) => app.scroll(10),
                             (View::History | View::Agents, KeyCode::PageUp) => app.scroll(-10),
-                            (View::History | View::Agents, KeyCode::Home | KeyCode::Char('g')) => app.history_scroll = 0,
+                            (View::History | View::Agents, KeyCode::Home | KeyCode::Char('g')) => app.scroll(isize::MIN / 2),
                             (View::History | View::Agents, KeyCode::End | KeyCode::Char('G')) => app.scroll(isize::MAX / 2),
                             _ => {}
                         }

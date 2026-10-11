@@ -100,6 +100,30 @@ pub struct SkillRun {
     pub turns: u32,
 }
 
+/// What happened at one point of a session, for the history timeline.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EventKind {
+    /// Something the user typed: a prompt, a `/command` or a `!` shell command.
+    Prompt(String),
+    /// A skill invocation; index into `TranscriptStats::runs`.
+    Skill(usize),
+    /// A subagent launch, with its final report once it has returned.
+    Agent { agent_type: String, description: String, tool_use_id: String, result: Option<String> },
+    /// One AskUserQuestion question, with the user's answer once given.
+    Question { question: String, answer: Option<String> },
+    /// Claude's reply that ended a turn.
+    Response(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Event {
+    /// ISO-8601 UTC timestamp from the transcript.
+    pub at: Option<String>,
+    pub kind: EventKind,
+    /// Tokens of the turn a prompt started; zero for other events.
+    pub tokens: TokenUsage,
+}
+
 /// Token and skill figures derived from one transcript file.
 #[derive(Clone, Debug, Default)]
 pub struct TranscriptStats {
@@ -107,6 +131,8 @@ pub struct TranscriptStats {
     pub skills: BTreeMap<String, SkillStat>,
     /// Skill invocations in transcript order.
     pub runs: Vec<SkillRun>,
+    /// Prompts, skills, subagents, questions and replies in transcript order.
+    pub timeline: Vec<Event>,
     /// Agent/Task tool_use id -> skill whose window launched it (None outside any skill).
     pub launches: HashMap<String, Option<String>>,
     /// Prompt size of the latest API call (input + cache read + cache write).
@@ -276,6 +302,23 @@ impl Subagent {
     }
 }
 
+/// One event of a session's history, with the agent and transcript it came from.
+pub struct TimelineEntry<'a> {
+    pub agent: &'a str,
+    /// The agent's transcript figures, which a `Skill` event indexes into.
+    pub stats: &'a TranscriptStats,
+    pub event: &'a Event,
+}
+
+impl TimelineEntry<'_> {
+    pub fn skill_run(&self) -> Option<&SkillRun> {
+        match self.event.kind {
+            EventKind::Skill(i) => self.stats.runs.get(i),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Session {
     pub id: String,
@@ -356,16 +399,32 @@ impl Session {
         Some(context_info(used, model.as_deref(), snap.and_then(|s| s.window), compact_window))
     }
 
-    /// Every skill invocation across the main agent and subagents, oldest first,
-    /// paired with the agent that ran it.
-    pub fn skill_runs(&self) -> Vec<(String, &SkillRun)> {
-        let mut runs: Vec<(String, &SkillRun)> =
-            self.stats.runs.iter().map(|r| (MAIN_AGENT.to_string(), r)).collect();
+    /// The session's history, oldest first, each event with the agent that produced it.
+    /// Subagents contribute their skills and questions; their prompts and replies are
+    /// already on the main agent's launch event.
+    pub fn timeline(&self) -> Vec<TimelineEntry<'_>> {
+        let mut list: Vec<TimelineEntry> = self
+            .stats
+            .timeline
+            .iter()
+            .map(|event| TimelineEntry { agent: MAIN_AGENT, stats: &self.stats, event })
+            .collect();
         for a in self.subagents.values() {
-            runs.extend(a.stats.runs.iter().map(|r| (a.agent_type.clone(), r)));
+            list.extend(
+                a.stats
+                    .timeline
+                    .iter()
+                    .filter(|e| matches!(e.kind, EventKind::Skill(_) | EventKind::Question { .. }))
+                    .map(|event| TimelineEntry { agent: &a.agent_type, stats: &a.stats, event }),
+            );
         }
-        runs.sort_by(|a, b| a.1.at.cmp(&b.1.at));
-        runs
+        list.sort_by(|a, b| a.event.at.cmp(&b.event.at));
+        list
+    }
+
+    /// The subagent an Agent tool call launched.
+    pub fn subagent_for(&self, tool_use_id: &str) -> Option<&Subagent> {
+        self.subagents.values().find(|a| a.tool_use_id.as_deref() == Some(tool_use_id))
     }
 
     /// Subagents oldest first, each with the skill whose window launched it. Nested

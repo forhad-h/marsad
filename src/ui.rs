@@ -1,7 +1,7 @@
-use crate::app::{App, View};
+use crate::app::{App, HistoryFilter, View};
 use crate::update::Notice;
 use crate::usage::{Pane, Usage};
-use crate::model::{ContextInfo, DAY_FMT, Level, fmt_tokens, MAIN_AGENT, RateWindow, Session, SortKey, Status, TokenUsage, Via};
+use crate::model::{ContextInfo, DAY_FMT, EventKind, Level, fmt_tokens, MAIN_AGENT, RateWindow, Session, SortKey, Status, TimelineEntry, TokenUsage, Via};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -198,6 +198,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             draw_history(f, body, app, s);
             vec![
                 ("↑↓", "scroll".into()),
+                ("f", format!("filter: {}", app.history_filter.label())),
                 ("g/G", "top/bottom".into()),
                 ("tab", "subagents".into()),
                 ("esc", "back".into()),
@@ -209,7 +210,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             vec![
                 ("↑↓", "scroll".into()),
                 ("g/G", "top/bottom".into()),
-                ("tab", "skill history".into()),
+                ("tab", "history".into()),
                 ("esc", "back".into()),
                 ("q", "quit".into()),
             ]
@@ -490,63 +491,221 @@ fn draw_details(f: &mut Frame, area: Rect, s: &Session, app: &App) {
         .border_style(Style::new().dark_gray())
         .title(session_heading(s))
         .title_bottom(
-            Line::from(vec![dim(" enter "), Span::raw("skill history "), dim(" tab "), Span::raw("subagents ")])
+            Line::from(vec![dim(" enter "), Span::raw("history "), dim(" tab "), Span::raw("subagents ")])
                 .alignment(Alignment::Right),
         );
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
 }
 
-/// Full-screen, scrollable timeline of every skill invocation in a session.
-fn draw_history(f: &mut Frame, area: Rect, app: &App, s: &Session) {
-    let runs = s.skill_runs();
-    let in_skills: u64 = runs.iter().map(|(_, r)| r.tokens.total()).sum();
-    let total = s.total_tokens();
-    let [summary, list] = Layout::vertical([Constraint::Length(5), Constraint::Min(3)]).areas(area);
+const EVENT_WIDTHS: [Constraint; 6] = [
+    Constraint::Length(3),
+    Constraint::Length(12),
+    Constraint::Length(16),
+    Constraint::Length(9),
+    Constraint::Fill(1),
+    Constraint::Length(8),
+];
+const EVENT_HEADER: [&str; 6] = ["  #", "TIME", "AGENT", "EVENT", "DETAIL", "TOKENS"];
 
-    let share = if total.total() > 0 { in_skills as f64 / total.total() as f64 * 100.0 } else { 0.0 };
+/// Label and color of an event kind.
+fn event_style(kind: &EventKind) -> (&'static str, Style) {
+    match kind {
+        EventKind::Prompt(_) => ("› prompt", Style::new().fg(Color::Green).bold()),
+        EventKind::Response(_) => ("‹ reply", Style::new().fg(Color::Blue)),
+        EventKind::Skill(_) => ("skill", Style::new().fg(Color::Magenta).bold()),
+        EventKind::Agent { .. } => ("agent", Style::new().fg(ACCENT)),
+        EventKind::Question { .. } => ("question", Style::new().fg(Color::Yellow)),
+    }
+}
+
+/// Text on one line, for a table cell.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn agent_state(s: &Session, tool_use_id: &str, result: &Option<String>, tick: u64) -> Span<'static> {
+    // Once its report is in it's done; before that, trust the subagent's own hooks.
+    let running = result.is_none() && s.subagent_for(tool_use_id).map_or(s.status != Status::Ended, |a| a.running);
+    if running {
+        Span::styled(format!("{} running", SPINNER[(tick / 2 % 4) as usize]), Style::new().fg(Color::Green))
+    } else {
+        dim("✓ done")
+    }
+}
+
+/// One-line summary of an event, for the DETAIL column.
+fn event_summary(e: &TimelineEntry, s: &Session, tick: u64) -> Line<'static> {
+    match &e.event.kind {
+        EventKind::Prompt(text) | EventKind::Response(text) => Line::from(one_line(text)),
+        EventKind::Skill(_) => match e.skill_run() {
+            Some(r) => Line::from(vec![
+                Span::styled(r.name.clone(), Style::new().fg(Color::Magenta)),
+                Span::raw(" "),
+                via_span(r.via),
+                dim(format!("  {} turns · out {}", r.turns, fmt_tokens(r.tokens.output))),
+            ]),
+            None => Line::from(""),
+        },
+        EventKind::Agent { agent_type, description, tool_use_id, result } => Line::from(vec![
+            Span::styled(format!("{agent_type} "), Style::new().fg(ACCENT)),
+            Span::raw(format!("{description}  ")),
+            agent_state(s, tool_use_id, result, tick),
+        ]),
+        EventKind::Question { question, answer } => Line::from(vec![
+            Span::raw(format!("{} ", one_line(question))),
+            match answer {
+                Some(a) => Span::styled(format!("→ {}", one_line(a)), Style::new().fg(Color::Yellow)),
+                None => Span::styled("… waiting", Style::new().fg(Color::Yellow).bold()),
+            },
+        ]),
+    }
+}
+
+/// Tokens shown for an event: a prompt's turn, a skill's window, or a subagent's own transcript.
+fn event_tokens(e: &TimelineEntry, s: &Session) -> String {
+    let n = match &e.event.kind {
+        EventKind::Prompt(_) => e.event.tokens.total(),
+        EventKind::Skill(_) => return e.skill_run().map(|r| format!("≈{}", fmt_tokens(r.tokens.total()))).unwrap_or_default(),
+        EventKind::Agent { tool_use_id, .. } => s.subagent_for(tool_use_id).map_or(0, |a| a.stats.tokens.total()),
+        _ => 0,
+    };
+    if n > 0 { fmt_tokens(n) } else { String::new() }
+}
+
+/// Everything known about one event, for the pane under the timeline.
+fn event_detail(e: &TimelineEntry, s: &Session, app: &App) -> Vec<Line<'static>> {
+    let text = |t: &str| t.lines().map(|l| Line::from(l.to_string())).collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    match &e.event.kind {
+        EventKind::Prompt(prompt) => {
+            let t = &e.event.tokens;
+            if t.total() > 0 {
+                lines.push(Line::from(vec![label("turn"), dim("tokens "), Span::raw(fmt_tokens(t.total())), dim("   out "), Span::raw(fmt_tokens(t.output))]));
+                lines.push(Line::from(""));
+            }
+            lines.extend(text(prompt));
+        }
+        EventKind::Response(reply) => lines.extend(text(reply)),
+        EventKind::Skill(_) => {
+            if let Some(r) = e.skill_run() {
+                let how = match r.via {
+                    Via::Tool => "Claude called the Skill tool",
+                    Via::Command => "you typed the command",
+                };
+                lines.push(Line::from(vec![label("skill"), Span::styled(r.name.clone(), Style::new().fg(Color::Magenta).bold()), dim(format!("   {how}"))]));
+                lines.push(Line::from(vec![label("turns"), Span::raw(r.turns.to_string())]));
+                let mut tokens = vec![label("tokens")];
+                tokens.extend(usage_spans(&r.tokens));
+                lines.push(Line::from(tokens));
+                lines.push(Line::from(dim("≈ tokens of the turns run inside the skill's window")));
+            }
+        }
+        EventKind::Agent { agent_type, description, tool_use_id, result } => {
+            lines.push(Line::from(vec![label("agent"), Span::styled(agent_type.clone(), Style::new().fg(ACCENT).bold()), Span::raw("  "), agent_state(s, tool_use_id, result, app.tick)]));
+            lines.push(Line::from(vec![label("task"), Span::raw(description.clone())]));
+            if let Some(a) = s.subagent_for(tool_use_id) {
+                let mut tokens = vec![label("tokens")];
+                tokens.extend(usage_spans(&a.stats.tokens));
+                lines.push(Line::from(tokens));
+                if !a.stats.skills.is_empty() {
+                    lines.push(Line::from(vec![label("skills"), Span::styled(skill_names(&a.stats), Style::new().fg(Color::Magenta))]));
+                }
+            }
+            lines.push(Line::from(""));
+            match result {
+                Some(r) => {
+                    lines.push(Line::from(Span::styled("report", Style::new().fg(ACCENT))));
+                    lines.extend(text(r));
+                }
+                None => lines.push(Line::from(dim("No report yet."))),
+            }
+        }
+        EventKind::Question { question, answer } => {
+            lines.push(Line::from(Span::styled("question", Style::new().fg(Color::Yellow))));
+            lines.extend(text(question));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("answer", Style::new().fg(Color::Yellow))));
+            match answer {
+                Some(a) => lines.extend(text(a)),
+                None => lines.push(Line::from(dim("Waiting for an answer."))),
+            }
+        }
+    }
+    lines
+}
+
+/// Full-screen, scrollable history of a session: prompts, replies, skills, subagents,
+/// and questions with their answers, with the selected event in full underneath.
+fn draw_history(f: &mut Frame, area: Rect, app: &App, s: &Session) {
+    let all = s.timeline();
+    let events = app.history(s);
+    let total = s.total_tokens();
+    let [summary, list, detail] =
+        Layout::vertical([Constraint::Length(5), Constraint::Min(6), Constraint::Percentage(40)]).areas(area);
+
     let mut tokens = vec![label("tokens")];
     tokens.extend(usage_spans(&total));
-    let lines = vec![
-        context_line(s, app),
-        Line::from(tokens),
-        Line::from(vec![
-            label("skills"),
-            Span::styled(
-                format!("{} invocation{}", runs.len(), if runs.len() == 1 { "" } else { "s" }),
-                Style::new().bold(),
-            ),
-            dim("   ≈"),
-            Span::raw(fmt_tokens(in_skills)),
-            dim(format!(" tokens inside skill windows ({share:.0}% of session)")),
-        ]),
-    ];
+    let mut counts = vec![label("history")];
+    let mut filter = HistoryFilter::All.next();
+    while filter != HistoryFilter::All {
+        if counts.len() > 1 {
+            counts.push(dim("  ·  "));
+        }
+        let n = all.iter().filter(|e| filter.matches(&e.event.kind)).count();
+        counts.extend([Span::styled(n.to_string(), Style::new().bold()), dim(format!(" {}", filter.label()))]);
+        filter = filter.next();
+    }
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().dark_gray())
         .title(session_heading(s));
-    f.render_widget(Paragraph::new(lines).block(block), summary);
+    f.render_widget(Paragraph::new(vec![context_line(s, app), Line::from(tokens), Line::from(counts)]).block(block), summary);
 
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().dark_gray())
-        .title(Line::from(" Skill history ").fg(ACCENT))
-        .title(Line::from(dim(" ≈ tokens of the turns run inside each skill's window ")).alignment(Alignment::Right));
-    if runs.is_empty() {
-        let msg = Paragraph::new(dim("No skills invoked in this session yet.")).alignment(Alignment::Center).block(block);
-        f.render_widget(msg, list);
+        .title(Line::from(" History ").fg(ACCENT))
+        .title(Line::from(dim(format!(" showing {} · {} events ", app.history_filter.label(), events.len()))).alignment(Alignment::Right));
+    let detail_block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().dark_gray());
+    if events.is_empty() {
+        let msg = if all.is_empty() { "Nothing in this session yet." } else { "No events of this kind. Press f to change the filter." };
+        f.render_widget(Paragraph::new(dim(msg)).alignment(Alignment::Center).block(block), list);
+        f.render_widget(detail_block, detail);
         return;
     }
 
-    let max = runs.iter().map(|(_, r)| r.tokens.total()).max().unwrap_or(0);
-    let rows = runs
+    let rows: Vec<Row> = events
         .iter()
         .enumerate()
-        .map(|(i, (agent, r))| {
-            run_row(i, r.at.as_deref(), agent, &r.name, r.via, r.turns, r.tokens.output, r.tokens.total(), max)
+        .map(|(i, e)| {
+            let (kind, kind_style) = event_style(&e.event.kind);
+            let agent_style = if e.agent == MAIN_AGENT { Style::new() } else { Style::new().fg(ACCENT) };
+            Row::new(vec![
+                Cell::from(dim(format!("{:>3}", i + 1))),
+                Cell::from(Span::raw(fmt_local(e.event.at.as_deref()))),
+                Cell::from(Span::styled(e.agent.to_string(), agent_style)),
+                Cell::from(Span::styled(kind, kind_style)),
+                Cell::from(event_summary(e, s, app.tick)),
+                right_cell(event_tokens(e, s)),
+            ])
         })
         .collect();
-    let table = runs_table(rows, block);
-    render_scrolled(f, table, list, runs.len(), app.history_scroll);
+    let len = rows.len();
+    let table = styled_table(rows, &EVENT_WIDTHS, block).header(Row::new(EVENT_HEADER).style(Style::new().dark_gray()));
+    let scroll = app.history_scroll.min(len - 1);
+    render_scrolled(f, table, list, len, scroll);
+
+    let e = &events[scroll];
+    let (kind, kind_style) = event_style(&e.event.kind);
+    let detail_block = detail_block.title(Line::from(vec![
+        Span::styled(format!(" {kind} "), kind_style),
+        dim(format!("· {} · {} ", e.agent, fmt_local(e.event.at.as_deref()))),
+    ]));
+    let lines = event_detail(e, s, app);
+    // Rough bound: wrapped lines can only add to this, so it never hides the end.
+    let scroll = app.detail_scroll.min(lines.len().saturating_sub(1) as u16);
+    let detail_block = detail_block.title_bottom(Line::from(vec![dim(" J/K "), Span::raw("scroll ")]).alignment(Alignment::Right));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((scroll, 0)).block(detail_block), detail);
 }
 
 /// Renders a bordered table with a header, selecting row `scroll`, plus a scrollbar
