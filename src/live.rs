@@ -105,10 +105,7 @@ pub fn status(a: StatusArgs) -> anyhow::Result<()> {
             if let Some((five, seven)) = limits {
                 let fmt = |label: &str, w: Option<RateWindow>| {
                     w.map(|w| match w.resets_at {
-                        Some(r) => {
-                            let mins = ((r - now).max(0.0) / 60.0) as i64;
-                            format!("{label} {:.0}% (resets in {}h{:02}m)", w.used_pct, mins / 60, mins % 60)
-                        }
+                        Some(r) => format!("{label} {:.0}% (resets {})", w.used_pct, crate::model::fmt_reset(r)),
                         None => format!("{label} {:.0}%", w.used_pct),
                     })
                 };
