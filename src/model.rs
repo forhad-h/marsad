@@ -251,6 +251,8 @@ pub struct Session {
     pub transcript_path: Option<PathBuf>,
     pub status: Status,
     pub status_since: f64,
+    /// When marsad first saw the session; a stable tie-breaker for sorting.
+    pub started: f64,
     pub last_event: f64,
     /// What the session is doing right now, e.g. "Bash: cargo test".
     pub detail: String,
@@ -271,6 +273,7 @@ impl Session {
             transcript_path: None,
             status: Status::Idle,
             status_since: ts,
+            started: ts,
             last_event: ts,
             detail: String::new(),
             permission_mode: None,
@@ -347,6 +350,65 @@ impl Session {
     }
 }
 
+/// Column the live session list is sorted by; `s` cycles through them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SortKey {
+    /// Most urgent first, then most recent activity.
+    #[default]
+    Status,
+    /// Alphabetical; stays put while sessions work, which keeps selection steady.
+    Project,
+    /// Least context left first.
+    Context,
+    /// Most recent status change first.
+    Age,
+    /// Most tokens first.
+    Tokens,
+}
+
+impl SortKey {
+    pub fn next(self) -> Self {
+        match self {
+            SortKey::Status => SortKey::Project,
+            SortKey::Project => SortKey::Context,
+            SortKey::Context => SortKey::Age,
+            SortKey::Age => SortKey::Tokens,
+            SortKey::Tokens => SortKey::Status,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SortKey::Status => "status",
+            SortKey::Project => "project",
+            SortKey::Context => "context",
+            SortKey::Age => "age",
+            SortKey::Tokens => "tokens",
+        }
+    }
+}
+
+/// Sorts sessions by `key` (reversed if asked). Sessions without a context reading
+/// always go last; ties fall back to first-seen order so rows don't shuffle.
+pub fn sort_sessions(list: &mut [&Session], key: SortKey, reversed: bool, compact_window: Option<u64>) {
+    let left = |s: &Session| s.context(compact_window).map(|c| c.left());
+    list.sort_by(|a, b| {
+        let ord = match key {
+            SortKey::Status => a.status.cmp(&b.status).then(b.last_event.total_cmp(&a.last_event)),
+            SortKey::Project => a.project().to_lowercase().cmp(&b.project().to_lowercase()),
+            SortKey::Context => match (left(a), left(b)) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (x, y) => x.is_none().cmp(&y.is_none()),
+            },
+            SortKey::Age => b.status_since.total_cmp(&a.status_since),
+            SortKey::Tokens => b.total_tokens().total().cmp(&a.total_tokens().total()),
+        };
+        let unknown_last = key == SortKey::Context && left(a).is_none() != left(b).is_none();
+        let ord = if reversed && !unknown_last { ord.reverse() } else { ord };
+        ord.then(a.started.total_cmp(&b.started)).then_with(|| a.id.cmp(&b.id))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +437,31 @@ mod tests {
         s.snapshot = Some(StatusSnapshot { window: Some(200_000), ..Default::default() });
         let c = s.context(None).unwrap();
         assert_eq!((c.limit, c.left(), c.estimated), (200_000, 0, false));
+    }
+
+    #[test]
+    fn sorting() {
+        let mk = |id: &str, cwd: &str, status: Status, started: f64, used: Option<u64>| {
+            let mut s = Session::new(id, started);
+            s.cwd = cwd.into();
+            s.status = status;
+            s.model = Some("claude-haiku-4-5".into());
+            s.stats.context_used = used;
+            s
+        };
+        let a = mk("a", "/x/beta", Status::Idle, 1.0, Some(50_000));
+        let b = mk("b", "/x/Alpha", Status::Permission, 2.0, None);
+        let c = mk("c", "/x/gamma", Status::Active, 3.0, Some(150_000));
+        let order = |key, reversed| {
+            let mut list = vec![&a, &b, &c];
+            sort_sessions(&mut list, key, reversed, None);
+            list.iter().map(|s| s.id.as_str()).collect::<String>()
+        };
+        assert_eq!(order(SortKey::Status, false), "bca");
+        assert_eq!(order(SortKey::Project, false), "bac", "case-insensitive");
+        assert_eq!(order(SortKey::Project, true), "cab");
+        assert_eq!(order(SortKey::Context, false), "cab", "least left first, unknown last");
+        assert_eq!(order(SortKey::Context, true), "acb", "unknown stays last when reversed");
+        assert_eq!(order(SortKey::Tokens, false), "abc", "ties keep first-seen order");
     }
 }

@@ -47,7 +47,7 @@ marsad uninstall   # removes only marsad's hooks
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` skill history · `u` 30-day usage · `a` show/hide ended sessions · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` skill history · `u` 30-day usage · `a` show/hide ended sessions · `s` cycle sort column (status → project → context → age → tokens) · `S` reverse sort · `q` quit.
 In skill history: `↑↓` scroll · `g`/`G` top/bottom · `esc` back.
 
 ### Context and usage limits

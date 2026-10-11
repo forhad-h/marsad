@@ -1,6 +1,6 @@
 use crate::app::{App, View};
 use crate::usage::{Pane, Usage};
-use crate::model::{ContextInfo, DAY_FMT, Level, fmt_tokens, MAIN_AGENT, RateWindow, Session, Status, TokenUsage, Via};
+use crate::model::{ContextInfo, DAY_FMT, Level, fmt_tokens, MAIN_AGENT, RateWindow, Session, SortKey, Status, TokenUsage, Via};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -201,6 +201,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("enter", "history".into()),
                 ("u", "30-day usage".into()),
                 ("a", ended.into()),
+                ("s/S", format!("sort: {}", app.sort.label())),
                 ("q", "quit".into()),
             ]
         }
@@ -321,8 +322,20 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
         Constraint::Length(5),
         Constraint::Length(8),
     ];
-    let header = Row::new(["  STATUS", "PROJECT", "", "ACTIVITY", "CONTEXT LEFT", "AGE", "TOKENS"])
-        .style(Style::new().dark_gray());
+    let sorted_col = match app.sort {
+        SortKey::Status => 0,
+        SortKey::Project => 1,
+        SortKey::Context => 4,
+        SortKey::Age => 5,
+        SortKey::Tokens => 6,
+    };
+    let arrow = if app.sort_reversed { "▴" } else { "▾" };
+    let header = Row::new(["  STATUS", "PROJECT", "", "ACTIVITY", "CONTEXT LEFT", "AGE", "TOKENS"].into_iter().enumerate().map(
+        |(i, h)| {
+            if i == sorted_col { Cell::from(Span::styled(format!("{h}{arrow}"), Style::new().fg(ACCENT))) } else { Cell::from(h) }
+        },
+    ))
+    .style(Style::new().dark_gray());
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().dark_gray())
