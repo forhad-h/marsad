@@ -8,10 +8,11 @@ GitHub release. Keep each bullet to one short line.
 - `marsad update` installs the latest release and shows what changed
 - Automatic updates: `marsad update --auto on`
 - The dashboard shows a yellow notice when a new version is out
-- `s` / `S` sort the session list by status, project, context, age or tokens
+- `s` / `S` sort the session list by status, project, context, time or tokens
 - Subagents for each session (`tab`): launching skill, tokens used, context left
 - Skill windows stay open when a background subagent finishes, so skill token counts are more accurate
 - Session status sits at the right edge, so it stays visible when another window covers the left
+- TIME shows how long each session has spent working, idle time excluded, across resumes
 - Usage history outlives Claude Code's transcripts; sessions are recorded as soon as they end
 - `marsad retention` sets how many days of history to keep (default 30)
 - `marsad total`: all-time token total, kept after old days are pruned
