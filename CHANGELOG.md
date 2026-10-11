@@ -3,6 +3,10 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## 0.3.2 - 2026-10-11
+
+- Session status is right-aligned against the table's right edge
+
 ## 0.3.1 - 2026-10-11
 
 - Session status shows its label first and the icon after it (`ACTIVE ◐`)
