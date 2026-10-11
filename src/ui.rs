@@ -15,6 +15,18 @@ const ACCENT: Color = Color::Cyan;
 
 const HIGHLIGHT: Style = Style::new().bg(Color::Indexed(236)).add_modifier(Modifier::BOLD);
 
+/// Background for a row waiting on a permission prompt: a faint amber wash that
+/// slowly pulses, so the row stands out even when its text is covered, while
+/// staying dark enough that yellow and gray text on it keep their contrast.
+/// `lift` brightens it for the selected row.
+fn permission_bg(tick: u64, lift: u8) -> Color {
+    const PERIOD: u64 = 12; // ticks are ~250ms, so one pulse is ~3s
+    let phase = tick % PERIOD;
+    let t = (phase.min(PERIOD - phase) * 2) as f32 / PERIOD as f32; // 0 → 1 → 0
+    let mix = |lo: u8, hi: u8| (lo as f32 + (hi - lo) as f32 * t).round() as u8 + lift;
+    Color::Rgb(mix(30, 58), mix(24, 44), mix(8, 12))
+}
+
 /// A table with the dashboard's standard spacing and selection highlight.
 fn styled_table<'a>(rows: impl IntoIterator<Item = Row<'a>>, widths: &[Constraint], block: Block<'a>) -> Table<'a> {
     Table::new(rows, widths.to_vec()).column_spacing(1).row_highlight_style(HIGHLIGHT).block(block)
@@ -342,7 +354,11 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
             right_cell(fmt_age(now - s.status_since)),
             right_cell(fmt_tokens(s.total_tokens().total())),
         ]);
-        if s.status == Status::Ended { row.style(Style::new().dark_gray()) } else { row }
+        match s.status {
+            Status::Ended => row.style(Style::new().dark_gray()),
+            Status::Permission => row.style(Style::new().bg(permission_bg(app.tick, 0))),
+            _ => row,
+        }
     });
     let widths = [
         Constraint::Length(14),
@@ -371,7 +387,11 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
         .border_type(BorderType::Rounded)
         .border_style(Style::new().dark_gray())
         .title(Line::from(" Sessions ").fg(ACCENT));
-    let table = styled_table(rows, &widths, block).header(header);
+    let mut table = styled_table(rows, &widths, block).header(header);
+    // Keep the warning wash on a selected permission row instead of the plain gray highlight.
+    if app.selected_session().is_some_and(|s| s.status == Status::Permission) {
+        table = table.row_highlight_style(HIGHLIGHT.bg(permission_bg(app.tick, 18)));
+    }
     let mut state = TableState::default().with_selected(app.selected_index());
     f.render_stateful_widget(table, area, &mut state);
 }
