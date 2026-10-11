@@ -332,8 +332,9 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
             right_cell(fmt_tokens(s.total_tokens().total())),
             Cell::from(Line::from(vec![
                 Span::styled(label, style),
-                Span::styled(format!(" {}", status_glyph(s.status, app.tick)), style),
-            ])),
+                Span::styled(format!(" {} ", status_glyph(s.status, app.tick)), style),
+            ])
+            .alignment(Alignment::Right)),
         ]);
         if s.status == Status::Ended { row.style(Style::new().dark_gray()) } else { row }
     });
@@ -354,9 +355,11 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
         SortKey::Status => 6,
     };
     let arrow = if app.sort_reversed { "▴" } else { "▾" };
-    let header = Row::new([" PROJECT", "", "ACTIVITY", "CONTEXT LEFT", "TIME", "TOKENS", "  STATUS"].into_iter().enumerate().map(
+    let header = Row::new([" PROJECT", "", "ACTIVITY", "CONTEXT LEFT", "TIME", "TOKENS", "STATUS"].into_iter().enumerate().map(
         |(i, h)| {
-            if i == sorted_col { Cell::from(Span::styled(format!("{h}{arrow}"), Style::new().fg(ACCENT))) } else { Cell::from(h) }
+            let span = if i == sorted_col { Span::styled(format!("{h}{arrow}"), Style::new().fg(ACCENT)) } else { Span::raw(h) };
+            // Status hugs the right edge, so its header does too.
+            if i == 6 { Cell::from(Line::from(vec![span, Span::raw(" ")]).alignment(Alignment::Right)) } else { Cell::from(span) }
         },
     ))
     .style(Style::new().dark_gray());
