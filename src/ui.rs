@@ -331,8 +331,8 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
             right_cell(fmt_duration(s.running_secs(now))),
             right_cell(fmt_tokens(s.total_tokens().total())),
             Cell::from(Line::from(vec![
-                Span::styled(format!("{} ", status_glyph(s.status, app.tick)), style),
                 Span::styled(label, style),
+                Span::styled(format!(" {}", status_glyph(s.status, app.tick)), style),
             ])),
         ]);
         if s.status == Status::Ended { row.style(Style::new().dark_gray()) } else { row }
@@ -507,9 +507,9 @@ fn agent_state(s: &Session, tool_use_id: &str, result: &Option<String>, tick: u6
     // Once its report is in it's done; before that, trust the subagent's own hooks.
     let running = result.is_none() && s.subagent_for(tool_use_id).map_or(s.status != Status::Ended, |a| a.running);
     if running {
-        Span::styled(format!("{} running", SPINNER[(tick / 2 % 4) as usize]), Style::new().fg(Color::Green))
+        Span::styled(format!("running {}", SPINNER[(tick / 2 % 4) as usize]), Style::new().fg(Color::Green))
     } else {
-        dim("✓ done")
+        dim("done ✓")
     }
 }
 
@@ -794,7 +794,7 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &App, s: &Session) {
             Cell::from(dim(s.title.clone().or_else(|| s.stats.title.clone()).unwrap_or_default())),
             Cell::from(dim("—")),
             Cell::from(Span::styled(skill_names(&s.stats), Style::new().fg(Color::Magenta))),
-            Cell::from(Span::styled(format!("{} {}", status_glyph(s.status, app.tick), s.status.as_str()), main_style)),
+            Cell::from(Span::styled(format!("{} {}", s.status.as_str(), status_glyph(s.status, app.tick)), main_style)),
             right_cell(fmt_tokens(s.stats.tokens.total())),
         ]
         .into_iter()
@@ -803,9 +803,9 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &App, s: &Session) {
     )];
     for (i, (a, launched_by)) in agents.iter().enumerate() {
         let status = if a.running {
-            Span::styled(format!("{} running", SPINNER[(app.tick / 2 % 4) as usize]), Style::new().fg(Color::Green))
+            Span::styled(format!("running {}", SPINNER[(app.tick / 2 % 4) as usize]), Style::new().fg(Color::Green))
         } else {
-            dim("✓ done")
+            dim("done ✓")
         };
         let launched_by = match launched_by {
             Some(skill) => Span::styled(short_skill(skill).to_string(), Style::new().fg(Color::Magenta).bold()),
