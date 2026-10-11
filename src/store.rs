@@ -123,7 +123,9 @@ impl Unit {
     fn agent_type(&self) -> String {
         match &self.meta_dir {
             None => MAIN_AGENT.into(),
-            Some(dir) => transcript::subagent_type(dir, &self.agent_id).unwrap_or_else(|| "agent".into()),
+            Some(dir) => transcript::subagent_meta(dir, &self.agent_id)
+                .and_then(|m| m.agent_type)
+                .unwrap_or_else(|| "agent".into()),
         }
     }
 }

@@ -192,7 +192,23 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         (View::History, Some(s)) => {
             draw_history(f, body, app, s);
-            vec![("↑↓", "scroll".into()), ("g/G", "top/bottom".into()), ("esc", "back".into()), ("q", "quit".into())]
+            vec![
+                ("↑↓", "scroll".into()),
+                ("g/G", "top/bottom".into()),
+                ("tab", "subagents".into()),
+                ("esc", "back".into()),
+                ("q", "quit".into()),
+            ]
+        }
+        (View::Agents, Some(s)) => {
+            draw_agents(f, body, app, s);
+            vec![
+                ("↑↓", "scroll".into()),
+                ("g/G", "top/bottom".into()),
+                ("tab", "skill history".into()),
+                ("esc", "back".into()),
+                ("q", "quit".into()),
+            ]
         }
         _ => {
             draw_list(f, body, app, &visible);
@@ -200,6 +216,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             vec![
                 ("↑↓", "select".into()),
                 ("enter", "history".into()),
+                ("tab", "subagents".into()),
                 ("u", "30-day usage".into()),
                 ("a", ended.into()),
                 ("s/S", format!("sort: {}", app.sort.label())),
@@ -460,7 +477,10 @@ fn draw_details(f: &mut Frame, area: Rect, s: &Session, app: &App) {
         .border_type(BorderType::Rounded)
         .border_style(Style::new().dark_gray())
         .title(session_heading(s))
-        .title_bottom(Line::from(vec![dim(" enter "), Span::raw("skill history ")]).alignment(Alignment::Right));
+        .title_bottom(
+            Line::from(vec![dim(" enter "), Span::raw("skill history "), dim(" tab "), Span::raw("subagents ")])
+                .alignment(Alignment::Right),
+        );
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
 }
 
@@ -514,20 +534,153 @@ fn draw_history(f: &mut Frame, area: Rect, app: &App, s: &Session) {
         })
         .collect();
     let table = runs_table(rows, block);
-    let scroll = app.history_scroll.min(runs.len() - 1);
-    let mut state = TableState::default().with_selected(Some(scroll));
-    f.render_stateful_widget(table, list, &mut state);
+    render_scrolled(f, table, list, runs.len(), app.history_scroll);
+}
 
-    // Borders and header take three rows; only show a scrollbar when the list overflows.
-    if runs.len() <= list.height.saturating_sub(3) as usize {
+/// Renders a bordered table with a header, selecting row `scroll`, plus a scrollbar
+/// when the rows overflow.
+fn render_scrolled(f: &mut Frame, table: Table<'static>, area: Rect, len: usize, scroll: usize) {
+    let scroll = scroll.min(len.saturating_sub(1));
+    let mut state = TableState::default().with_selected(Some(scroll));
+    f.render_stateful_widget(table, area, &mut state);
+
+    // Borders and header take three rows.
+    if len <= area.height.saturating_sub(3) as usize {
         return;
     }
-    let mut sb = ScrollbarState::new(runs.len()).position(scroll);
+    let mut sb = ScrollbarState::new(len).position(scroll);
     f.render_stateful_widget(
         Scrollbar::new(ScrollbarOrientation::VerticalRight).style(Style::new().dark_gray()),
-        list.inner(Margin { vertical: 1, horizontal: 0 }),
+        area.inner(Margin { vertical: 1, horizontal: 0 }),
         &mut sb,
     );
+}
+
+const AGENT_WIDTHS: [Constraint; 10] = [
+    Constraint::Length(3),
+    Constraint::Length(12),
+    Constraint::Length(16),
+    Constraint::Fill(2),
+    Constraint::Length(18),
+    Constraint::Fill(1),
+    Constraint::Length(9),
+    Constraint::Length(7),
+    Constraint::Length(13),
+    Constraint::Length(7),
+];
+const AGENT_HEADER: [&str; 10] =
+    ["  #", "STARTED", "AGENT", "TASK", "LAUNCHED BY", "SKILLS RUN", "STATUS", "USED", "CONTEXT", "LEFT"];
+
+/// Skill name without its plugin prefix, so `compound-engineering:ce-plan` fits as `ce-plan`.
+fn short_skill(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
+}
+
+/// `ce-plan, ce-work ×2` for the skills one agent invoked itself.
+fn skill_names(stats: &crate::model::TranscriptStats) -> String {
+    let names: Vec<String> = stats
+        .skills
+        .iter()
+        .map(|(name, st)| {
+            let name = short_skill(name);
+            if st.calls > 1 { format!("{name} ×{}", st.calls) } else { name.to_string() }
+        })
+        .collect();
+    if names.is_empty() { "—".into() } else { names.join(", ") }
+}
+
+/// Gauge and tokens-left cells; context is measured against each agent's own auto-compact point.
+fn context_cells(ctx: Option<ContextInfo>) -> [Cell<'static>; 2] {
+    match ctx {
+        Some(ctx) => {
+            let style = Style::new().fg(ratio_color(ctx.used_ratio()));
+            let approx = if ctx.estimated { "≈" } else { "" };
+            [
+                Cell::from(Line::from(vec![
+                    Span::styled(bar(ctx.used_ratio(), 6), style),
+                    Span::styled(format!(" {approx}{:.0}%", ctx.used_ratio() * 100.0), style.bold()),
+                ])),
+                right_cell(fmt_tokens(ctx.left())),
+            ]
+        }
+        None => [Cell::from(dim("—")), right_cell("—")],
+    }
+}
+
+/// Full-screen list of a session's subagents: what launched each one, what it ran,
+/// how many tokens it used and how much context it has left.
+fn draw_agents(f: &mut Frame, area: Rect, app: &App, s: &Session) {
+    let agents = s.subagents_by_start();
+    let total = s.total_tokens().total();
+    let in_agents: u64 = agents.iter().map(|(a, _)| a.stats.tokens.total()).sum();
+    let running = agents.iter().filter(|(a, _)| a.running).count();
+    let [summary, list] = Layout::vertical([Constraint::Length(5), Constraint::Min(3)]).areas(area);
+
+    let share = if total > 0 { in_agents as f64 / total as f64 * 100.0 } else { 0.0 };
+    let mut tokens = vec![label("tokens")];
+    tokens.extend(usage_spans(&s.total_tokens()));
+    let mut count = vec![
+        label("agents"),
+        Span::styled(format!("{} launched", agents.len()), Style::new().bold()),
+    ];
+    if running > 0 {
+        count.push(Span::styled(format!(" · {running} running"), Style::new().fg(Color::Green)));
+    }
+    count.extend([dim("   "), Span::raw(fmt_tokens(in_agents)), dim(format!(" tokens ({share:.0}% of session)"))]);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().dark_gray())
+        .title(session_heading(s));
+    f.render_widget(Paragraph::new(vec![context_line(s, app), Line::from(tokens), Line::from(count)]).block(block), summary);
+
+    // The main agent comes first so each subagent can be compared against it.
+    let (main_style, _) = status_style(s.status);
+    let mut rows = vec![Row::new(
+        [
+            Cell::from(dim(format!("{:>3}", 0))),
+            Cell::from(Span::raw(fmt_local(s.stats.started.as_deref()))),
+            Cell::from(Span::styled(MAIN_AGENT, Style::new().bold())),
+            Cell::from(dim(s.title.clone().or_else(|| s.stats.title.clone()).unwrap_or_default())),
+            Cell::from(dim("—")),
+            Cell::from(Span::styled(skill_names(&s.stats), Style::new().fg(Color::Magenta))),
+            Cell::from(Span::styled(format!("{} {}", status_glyph(s.status, app.tick), s.status.as_str()), main_style)),
+            right_cell(fmt_tokens(s.stats.tokens.total())),
+        ]
+        .into_iter()
+        .chain(context_cells(s.context(app.compact_window)))
+        .collect::<Vec<_>>(),
+    )];
+    for (i, (a, launched_by)) in agents.iter().enumerate() {
+        let status = if a.running {
+            Span::styled(format!("{} running", SPINNER[(app.tick / 2 % 4) as usize]), Style::new().fg(Color::Green))
+        } else {
+            dim("✓ done")
+        };
+        let launched_by = match launched_by {
+            Some(skill) => Span::styled(short_skill(skill).to_string(), Style::new().fg(Color::Magenta).bold()),
+            None => dim("—"),
+        };
+        let cells = [
+            Cell::from(dim(format!("{:>3}", i + 1))),
+            Cell::from(Span::raw(fmt_local(a.stats.started.as_deref()))),
+            Cell::from(Span::styled(a.agent_type.clone(), Style::new().fg(ACCENT))),
+            Cell::from(Span::raw(a.description.clone())),
+            Cell::from(launched_by),
+            Cell::from(Span::styled(skill_names(&a.stats), Style::new().fg(Color::Magenta))),
+            Cell::from(status),
+            right_cell(fmt_tokens(a.stats.tokens.total())),
+        ];
+        rows.push(Row::new(cells.into_iter().chain(context_cells(a.context(app.compact_window))).collect::<Vec<_>>()));
+    }
+
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().dark_gray())
+        .title(Line::from(" Subagents ").fg(ACCENT))
+        .title(Line::from(dim(" context left = tokens before each agent's auto-compact ")).alignment(Alignment::Right));
+    let len = rows.len();
+    let table = styled_table(rows, &AGENT_WIDTHS, block).header(Row::new(AGENT_HEADER).style(Style::new().dark_gray()));
+    render_scrolled(f, table, list, len, app.history_scroll);
 }
 
 fn pane_block(title: &'static str, focused: bool) -> Block<'static> {

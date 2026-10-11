@@ -48,8 +48,8 @@ marsad update      # install the latest version (shows current → latest and wh
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` skill history · `u` 30-day usage · `a` show/hide ended sessions · `s` cycle sort column (status → project → context → age → tokens) · `S` reverse sort · `q` quit.
-In skill history: `↑↓` scroll · `g`/`G` top/bottom · `esc` back.
+Keys: `↑↓`/`jk` select · `enter` skill history · `tab` subagents · `u` 30-day usage · `a` show/hide ended sessions · `s` cycle sort column (status → project → context → age → tokens) · `S` reverse sort · `q` quit.
+In skill history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 
 ### Updates
 
@@ -87,6 +87,13 @@ Auto-compact point: 967K on native 1M-context models, otherwise the full window,
 `enter` on a session opens a scrollable timeline of every skill invocation (main agent and
 subagents): time, agent, skill, whether Claude called it (`tool`) or you typed it (`/cmd`), turns,
 output tokens and ≈ total tokens in its window.
+
+### Subagents
+
+`tab` on a session lists the main agent and every subagent it launched, oldest first: agent type,
+task description, the skill that launched it, skills it ran itself, running or done, tokens used,
+and context left before that agent's own auto-compact. Each subagent has its own context window,
+so a subagent's used tokens (summed across all its turns) can be far above its context fill.
 
 ## How it works
 

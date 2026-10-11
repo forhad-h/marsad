@@ -9,6 +9,8 @@ GitHub release. Keep each bullet to one short line.
 - Automatic updates: `marsad update --auto on`
 - The dashboard shows a yellow notice when a new version is out
 - `s` / `S` sort the session list by status, project, context, age or tokens
+- Subagents for each session (`tab`): launching skill, tokens used, context left
+- Skill windows stay open when a background subagent finishes, so skill token counts are more accurate
 
 ## 0.2.0 - 2026-10-09
 
