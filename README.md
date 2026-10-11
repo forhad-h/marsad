@@ -48,8 +48,9 @@ marsad update      # install the latest version (shows current → latest and wh
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` skill history · `tab` subagents · `u` usage history · `a` show/hide ended sessions · `s` cycle sort column (status → project → context → age → tokens) · `S` reverse sort · `q` quit.
-In skill history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
+Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `a` show/hide ended sessions · `s` cycle sort column (status → project → context → age → tokens) · `S` reverse sort · `q` quit.
+In session history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
+In session history also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
 
 ### Updates
 
@@ -82,11 +83,21 @@ model id (marked `≈`) and usage limits are not shown.
 Auto-compact point: 967K on native 1M-context models, otherwise the full window, or your
 `autoCompactWindow` / `CLAUDE_CODE_AUTO_COMPACT_WINDOW` if set.
 
-### Skill history
+### Session history
 
-`enter` on a session opens a scrollable timeline of every skill invocation (main agent and
-subagents): time, agent, skill, whether Claude called it (`tool`) or you typed it (`/cmd`), turns,
-output tokens and ≈ total tokens in its window.
+`enter` on a session opens a scrollable timeline of what happened in it, oldest first:
+
+| Event | Shows |
+|---|---|
+| prompt | what you typed (including `/commands` and `!` shell commands), and the tokens of the turn it started |
+| reply | Claude's reply that ended the turn |
+| skill | the skill, whether Claude called it (`tool`) or you typed it (`/cmd`), turns, output and ≈ tokens in its window |
+| agent | the subagent's type and task, running or done, its tokens, and its final report |
+| question | each AskUserQuestion question and your answer (or the note you left when declining) |
+
+Skills and questions from subagents are included, marked with the subagent's type. The pane
+under the list shows the selected event in full; `J`/`K` scroll it, and `f` filters the list to
+one kind of event. Prompts, replies and reports are kept up to 4,000 characters each.
 
 ### Subagents
 

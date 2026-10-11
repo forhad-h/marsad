@@ -17,6 +17,8 @@ GitHub release. Keep each bullet to one short line.
 - `marsad total`: all-time token total, kept after old days are pruned
 - Usage view: totals, daily chart and all-time total; `p` switches the period
 - 5h / 7d usage limits show the local time they reset (header, status line, `marsad status`)
+- Session history (`enter`): prompts, replies, skills, subagents with their reports, questions with answers
+- A subagent handing back its report no longer closes the current skill window
 
 ## 0.2.0 - 2026-10-09
 
