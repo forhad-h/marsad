@@ -12,10 +12,10 @@ GitHub release. Keep each bullet to one short line.
 - Subagents for each session (`tab`): launching skill, tokens used, context left
 - Skill windows stay open when a background subagent finishes, so skill token counts are more accurate
 - Sessions waiting on a permission prompt get a slowly pulsing amber row background
-- Usage history is kept forever (was 30 days), even after Claude Code deletes transcripts
-- Sessions are recorded in the history as soon as they end
-- `marsad retention` shows or limits how long history is kept
-- Usage view: `p` switches between 7, 30, 90, 365 days and all time, with totals and a daily chart
+- Usage history outlives Claude Code's transcripts; sessions are recorded as soon as they end
+- `marsad retention` sets how many days of history to keep (default 30)
+- `marsad total`: all-time token total, kept after old days are pruned
+- Usage view: totals, daily chart and all-time total; `p` switches the period
 
 ## 0.2.0 - 2026-10-09
 
