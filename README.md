@@ -48,7 +48,7 @@ marsad update      # install the latest version (shows current → latest and wh
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` skill history · `tab` subagents · `u` 30-day usage · `a` show/hide ended sessions · `s` cycle sort column (status → project → context → age → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` skill history · `tab` subagents · `u` usage history · `a` show/hide ended sessions · `s` cycle sort column (status → project → context → age → tokens) · `S` reverse sort · `q` quit.
 In skill history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 
 ### Updates
@@ -114,17 +114,29 @@ so a subagent's used tokens (summed across all its turns) can be far above its c
 - **Per-skill tokens (≈)** are approximate: after a skill is invoked (Skill tool or a typed
   `/skill`), each assistant turn is charged to it until the next user prompt or the next skill.
 
-### 30-day usage history
+### Usage history
 
-`u` opens the Usage view: days on the left, and the selected day's sessions and skills ranked by
-tokens on the right (`tab` switches pane, `enter` on a session shows its per-day totals and every
-skill run). "All 30 days" aggregates the whole window.
+`u` opens the Usage view: totals for the period on top (tokens, sessions, average per day, busiest
+day, and a daily chart), days on the left, and the selected day's sessions and skills ranked by
+tokens on the right. `p` / `P` switch the period between the last 7, 30, 90 and 365 days and all
+time. `tab` switches pane, and `enter` on a session shows its per-day totals and every skill run.
+"Total" aggregates the whole period.
 
 The history is a SQLite database at `~/.claude/marsad/usage.db`, indexed from Claude Code
 transcripts (`~/.claude/projects`). It includes sessions from before marsad was installed.
 Tokens are bucketed by the local day each API call happened, so long sessions split across days.
-Rows older than 30 days are deleted automatically. The dashboard re-indexes every minute while open, and
+
+History is kept **forever** by default, including sessions whose transcripts Claude Code has since
+deleted (it removes them after `cleanupPeriodDays`, 30 days by default). Each session is indexed
+when it ends (the `SessionEnd` hook starts a background `marsad sync`), so it is recorded even if
+the dashboard isn't open. The dashboard also re-indexes every minute while open, and
 `marsad sync` / `report` / `sql` index on demand (only changed files are re-read).
+
+```sh
+marsad retention            # show how long history is kept
+marsad retention 365        # keep the last 365 days; older rows are deleted on the next sync
+marsad retention forever
+```
 
 ```sh
 marsad report --by skill --days 7          # skills by ≈tokens this week

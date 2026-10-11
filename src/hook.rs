@@ -4,6 +4,7 @@
 use serde_json::{Map, Value, json};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+use std::process::Stdio;
 
 /// Rotate the log once it grows past this size.
 const MAX_LOG_BYTES: u64 = 20 * 1024 * 1024;
@@ -40,7 +41,29 @@ pub fn run() -> anyhow::Result<()> {
     line.push(b'\n');
     // Single write on an O_APPEND handle so concurrent hooks don't interleave.
     OpenOptions::new().create(true).append(true).open(log)?.write_all(&line)?;
+
+    // Record a finished session in the usage history right away, so it is kept even if
+    // the dashboard isn't opened before Claude Code deletes the transcript. Detached, so
+    // the hook returns at once and the sync survives Claude Code exiting.
+    if raw.get("hook_event_name").and_then(Value::as_str) == Some("SessionEnd") {
+        let _ = detached(std::process::Command::new(std::env::current_exe()?).arg("sync")).spawn();
+    }
     Ok(())
+}
+
+/// No stdio and its own process group, so Claude Code cleaning up its hooks on exit
+/// doesn't take the child with it (and on Windows, no console window).
+fn detached(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(cmd, 0);
+    #[cfg(windows)]
+    {
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        std::os::windows::process::CommandExt::creation_flags(cmd, DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    cmd
 }
 
 fn trim(raw: &Value) -> Value {
