@@ -43,12 +43,29 @@ marsad install     # registers async hooks + status line in ~/.claude/settings.j
 marsad install --no-statusline   # hooks only; context size is then estimated from transcripts
 marsad             # open the dashboard
 marsad uninstall   # removes only marsad's hooks
+marsad update      # install the latest version (shows current → latest and what's new)
 ```
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
 Keys: `↑↓`/`jk` select · `enter` skill history · `u` 30-day usage · `a` show/hide ended sessions · `s` cycle sort column (status → project → context → age → tokens) · `S` reverse sort · `q` quit.
 In skill history: `↑↓` scroll · `g`/`G` top/bottom · `esc` back.
+
+### Updates
+
+The dashboard checks GitHub for a new release once a day and shows a yellow
+``v0.3.0 available · run `marsad update` `` notice in the bottom right. `marsad update` shows your
+current and the latest version, a short "What's new", and installs it with the release's installer
+(into the same directory as the running binary). `marsad update --check` only shows the versions.
+
+```sh
+marsad update --auto on    # the dashboard installs new versions in the background
+marsad update --auto off
+```
+
+With automatic updates on, the notice changes to `updated to v0.3.0 · restart marsad`. Set
+`MARSAD_NO_UPDATE_CHECK=1` to turn off the daily check. Builds from source (`cargo install`, or a
+binary outside a `bin` directory) can't update themselves; reinstall them the same way instead.
 
 ### Context and usage limits
 
@@ -136,7 +153,9 @@ MARSAD_HOME=/tmp/marsad-dev cargo run          # use a separate event log
 
 Releases are built by [`dist`](https://opensource.axo.dev/cargo-dist/) in
 `.github/workflows/release.yml` for macOS (arm64, x64), Linux (arm64, x64) and Windows (x64).
-Bump `version` in `Cargo.toml`, commit, then:
+Bump `version` in `Cargo.toml`, rename `## Unreleased` in `CHANGELOG.md` to `## X.Y.Z - date`
+(dist puts that section in the release notes, and `marsad update` shows it as "What's new"),
+commit, then:
 
 ```sh
 git tag v0.1.0 && git push origin v0.1.0

@@ -1,4 +1,5 @@
 use crate::app::{App, View};
+use crate::update::Notice;
 use crate::usage::{Pane, Usage};
 use crate::model::{ContextInfo, DAY_FMT, Level, fmt_tokens, MAIN_AGENT, RateWindow, Session, SortKey, Status, TokenUsage, Via};
 use ratatui::Frame;
@@ -211,6 +212,19 @@ pub fn draw(f: &mut Frame, app: &App) {
         spans.push(k.to_string().bold());
         spans.push(format!(" {label}  ").dark_gray());
     }
+    let footer = match &app.update {
+        Some(notice) => {
+            let text = match notice {
+                Notice::Available(v) => format!("v{v} available · run `marsad update` "),
+                Notice::Installed(v) => format!("updated to v{v} · restart marsad "),
+            };
+            let [keys, note] =
+                Layout::horizontal([Constraint::Min(0), Constraint::Length(text.chars().count() as u16)]).areas(footer);
+            f.render_widget(Paragraph::new(Span::styled(text, Style::new().fg(Color::Yellow))), note);
+            keys
+        }
+        None => footer,
+    };
     f.render_widget(Paragraph::new(Line::from(spans)), footer);
 }
 

@@ -10,6 +10,7 @@ mod statusline;
 mod store;
 mod transcript;
 mod ui;
+mod update;
 mod usage;
 
 use clap::{Parser, Subcommand};
@@ -47,6 +48,8 @@ enum Cmd {
     Schema,
     /// Show live sessions: status, current activity, context left, and usage limits.
     Status(live::StatusArgs),
+    /// Update marsad to the latest release (or turn automatic updates on/off with --auto).
+    Update(update::UpdateArgs),
 }
 
 /// Where marsad keeps its event log. Override with MARSAD_HOME.
@@ -89,6 +92,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Cmd::Status(args)) => live::status(args),
+        Some(Cmd::Update(args)) => update::run(args),
         None => app::run(),
     }
 }
