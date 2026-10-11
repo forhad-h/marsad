@@ -59,6 +59,12 @@ pub struct TranscriptReader {
     cwd: Option<String>,
     first_at: Option<String>,
     last_at: Option<String>,
+    /// Seconds spent working: finished turns plus turns closed without a recorded duration.
+    busy_secs: f64,
+    /// Part of `busy_secs` estimated since the last recorded turn duration, which replaces it.
+    estimated_secs: f64,
+    /// Unix start and latest entry time of the turn in progress.
+    open_turn: Option<(f64, f64)>,
 }
 
 /// Tokens and assistant turns for one local calendar day.
@@ -66,6 +72,12 @@ pub struct TranscriptReader {
 pub struct DayUsage {
     pub tokens: TokenUsage,
     pub turns: u32,
+}
+
+/// Unix time of an entry's timestamp.
+fn unix_ts(e: &Value) -> Option<f64> {
+    let t = chrono::DateTime::parse_from_rfc3339(e["timestamp"].as_str()?).ok()?;
+    Some(t.timestamp_millis() as f64 / 1000.0)
 }
 
 /// Local calendar day (YYYY-MM-DD) of an ISO-8601 timestamp.
@@ -94,6 +106,9 @@ impl TranscriptReader {
             cwd: None,
             first_at: None,
             last_at: None,
+            busy_secs: 0.0,
+            estimated_secs: 0.0,
+            open_turn: None,
         }
     }
 
@@ -129,7 +144,17 @@ impl TranscriptReader {
                     self.title = Some(t.to_string());
                 }
             }
+            Some("system") if e["subtype"] == "turn_duration" => {
+                // Claude Code's own measure of the turn replaces anything estimated for it.
+                let ms = e["durationMs"].as_f64().unwrap_or(0.0);
+                self.busy_secs += ms / 1000.0 - self.estimated_secs;
+                self.estimated_secs = 0.0;
+                self.open_turn = None;
+            }
             _ => {}
+        }
+        if let (Some((_, last)), Some(t)) = (&mut self.open_turn, unix_ts(e)) {
+            *last = t;
         }
     }
 
@@ -314,15 +339,35 @@ impl TranscriptReader {
             self.task_notification(text);
             return;
         }
+        // An interrupted turn usually gets its duration recorded next; until then, estimate it.
+        if text.starts_with("[Request interrupted") {
+            self.close_turn();
+        }
         // Output of a local command, or an interruption marker: not something the user typed.
         let Some(prompt) = prompt_text(text) else { return };
         // A new real prompt closes the skill window and starts a turn; a typed /skill opens a new window.
         self.current_run = None;
         self.turn = Some(self.push(EventKind::Prompt(clip(&prompt)), e));
+        // A message sent mid-turn: estimate the turn so far, until its duration is recorded.
+        // Otherwise the last turn is over and nothing will replace its estimate any more.
+        if self.open_turn.is_some() {
+            self.close_turn();
+        } else {
+            self.estimated_secs = 0.0;
+        }
+        self.open_turn = unix_ts(e).map(|t| (t, t));
         if let Some(cmd) = slash_command(text)
             && !BUILTIN_COMMANDS.contains(&cmd) {
                 self.open_skill(cmd, e, Via::Command);
             }
+    }
+
+    /// Counts the open turn up to its last entry, as an estimate a recorded duration replaces.
+    fn close_turn(&mut self) {
+        if let Some((start, last)) = self.open_turn.take() {
+            self.busy_secs += last - start;
+            self.estimated_secs += last - start;
+        }
     }
 
     fn open_skill(&mut self, name: &str, entry: &Value, via: Via) {
@@ -373,6 +418,8 @@ impl TranscriptReader {
             model: self.model.clone(),
             title: self.title.clone(),
             started: self.first_at.clone(),
+            busy_secs: self.busy_secs,
+            turn_started: self.open_turn.map(|(start, _)| start),
         }
     }
 
@@ -509,6 +556,35 @@ mod tests {
         r.poll();
         std::fs::remove_dir_all(dir).ok();
         r
+    }
+
+    #[test]
+    fn busy_time_skips_idle_gaps() {
+        let r = reader_for(&[
+            // A finished turn: Claude Code's recorded duration counts, not the gap after it.
+            r#"{"type":"user","timestamp":"2026-10-11T10:00:00Z","message":{"content":"first"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-10-11T10:00:30Z","message":{"id":"m1"}}"#,
+            r#"{"type":"system","subtype":"turn_duration","durationMs":40000,"timestamp":"2026-10-11T10:00:40Z"}"#,
+            // An interrupted turn with no recorded duration counts up to its last entry.
+            r#"{"type":"user","timestamp":"2026-11-11T09:00:00Z","message":{"content":"a month later"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-11T09:00:20Z","message":{"id":"m2"}}"#,
+            r#"{"type":"user","timestamp":"2026-11-11T09:00:21Z","message":{"content":"[Request interrupted by user]"}}"#,
+            // An interrupted turn whose duration is recorded uses that duration.
+            r#"{"type":"user","timestamp":"2026-11-11T09:30:00Z","message":{"content":"try again"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-11T09:30:05Z","message":{"id":"m4"}}"#,
+            r#"{"type":"user","timestamp":"2026-11-11T09:30:06Z","message":{"content":"[Request interrupted by user]"}}"#,
+            r#"{"type":"system","subtype":"turn_duration","durationMs":7000,"timestamp":"2026-11-11T09:30:06Z"}"#,
+            // A message sent mid-turn: the turn's recorded duration replaces the estimate.
+            r#"{"type":"user","timestamp":"2026-11-11T10:00:00Z","message":{"content":"go"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-11-11T10:00:10Z","message":{"id":"m3"}}"#,
+            r#"{"type":"user","timestamp":"2026-11-11T10:00:15Z","message":{"content":"also this"}}"#,
+            r#"{"type":"system","subtype":"turn_duration","durationMs":60000,"timestamp":"2026-11-11T10:01:00Z"}"#,
+            r#"{"type":"user","timestamp":"2026-11-11T11:00:00Z","message":{"content":"still running"}}"#,
+        ]);
+        let s = r.stats();
+        assert_eq!(s.busy_secs, 40.0 + 20.0 + 7.0 + 60.0);
+        let open = chrono::DateTime::parse_from_rfc3339("2026-11-11T11:00:00Z").unwrap().timestamp() as f64;
+        assert_eq!(s.turn_started, Some(open));
     }
 
     #[test]

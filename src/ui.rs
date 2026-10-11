@@ -88,11 +88,10 @@ fn status_glyph(s: Status, tick: u64) -> &'static str {
     }
 }
 
-fn fmt_age(secs: f64) -> String {
+fn fmt_duration(secs: f64) -> String {
     let s = secs.max(0.0) as u64;
     match s {
-        0..5 => "now".into(),
-        5..60 => format!("{s}s"),
+        0..60 => format!("{s}s"),
         60..3600 => format!("{}m", s / 60),
         3600..86400 => format!("{}h", s / 3600),
         _ => format!("{}d", s / 86400),
@@ -329,7 +328,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
             Cell::from(Span::styled(agents, Style::new().fg(ACCENT))),
             Cell::from(Line::from(activity)),
             Cell::from(context),
-            right_cell(fmt_age(now - s.status_since)),
+            right_cell(fmt_duration(s.running_secs(now))),
             right_cell(fmt_tokens(s.total_tokens().total())),
             Cell::from(Line::from(vec![
                 Span::styled(format!("{} ", status_glyph(s.status, app.tick)), style),
@@ -355,7 +354,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
         SortKey::Status => 6,
     };
     let arrow = if app.sort_reversed { "▴" } else { "▾" };
-    let header = Row::new([" PROJECT", "", "ACTIVITY", "CONTEXT LEFT", "AGE", "TOKENS", "  STATUS"].into_iter().enumerate().map(
+    let header = Row::new([" PROJECT", "", "ACTIVITY", "CONTEXT LEFT", "TIME", "TOKENS", "  STATUS"].into_iter().enumerate().map(
         |(i, h)| {
             if i == sorted_col { Cell::from(Span::styled(format!("{h}{arrow}"), Style::new().fg(ACCENT))) } else { Cell::from(h) }
         },

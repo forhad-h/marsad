@@ -143,6 +143,10 @@ pub struct TranscriptStats {
     pub title: Option<String>,
     /// ISO-8601 timestamp of the first transcript entry.
     pub started: Option<String>,
+    /// Seconds of finished work, idle time between turns excluded.
+    pub busy_secs: f64,
+    /// Unix time the turn in progress started, if one is open.
+    pub turn_started: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -368,6 +372,16 @@ impl Session {
         }
     }
 
+    /// Time spent working across the whole session, including earlier runs of a resumed one.
+    /// Idle time between turns doesn't count; the turn in progress counts while it runs.
+    pub fn running_secs(&self, now: f64) -> f64 {
+        let live = match (self.status, self.stats.turn_started) {
+            (Status::Idle | Status::Ended, _) | (_, None) => 0.0,
+            (_, Some(start)) => (now - start).max(0.0),
+        };
+        self.stats.busy_secs + live
+    }
+
     pub fn project(&self) -> String {
         std::path::Path::new(&self.cwd)
             .file_name()
@@ -475,7 +489,7 @@ pub enum SortKey {
     Project,
     /// Least context left first.
     Context,
-    /// Most recent status change first.
+    /// Least time worked first.
     Age,
     /// Most tokens first.
     Tokens,
@@ -497,7 +511,7 @@ impl SortKey {
             SortKey::Status => "status",
             SortKey::Project => "project",
             SortKey::Context => "context",
-            SortKey::Age => "age",
+            SortKey::Age => "time",
             SortKey::Tokens => "tokens",
         }
     }
@@ -507,6 +521,7 @@ impl SortKey {
 /// always go last; ties fall back to first-seen order so rows don't shuffle.
 pub fn sort_sessions(list: &mut [&Session], key: SortKey, reversed: bool, compact_window: Option<u64>) {
     let left = |s: &Session| s.context(compact_window).map(|c| c.left());
+    let now = crate::now();
     list.sort_by(|a, b| {
         let ord = match key {
             SortKey::Status => a.status.cmp(&b.status).then(b.last_event.total_cmp(&a.last_event)),
@@ -515,7 +530,7 @@ pub fn sort_sessions(list: &mut [&Session], key: SortKey, reversed: bool, compac
                 (Some(x), Some(y)) => x.cmp(&y),
                 (x, y) => x.is_none().cmp(&y.is_none()),
             },
-            SortKey::Age => b.status_since.total_cmp(&a.status_since),
+            SortKey::Age => a.running_secs(now).total_cmp(&b.running_secs(now)),
             SortKey::Tokens => b.total_tokens().total().cmp(&a.total_tokens().total()),
         };
         let unknown_last = key == SortKey::Context && left(a).is_none() != left(b).is_none();
@@ -578,6 +593,22 @@ mod tests {
         assert_eq!(order(SortKey::Context, false), "cab", "least left first, unknown last");
         assert_eq!(order(SortKey::Context, true), "acb", "unknown stays last when reversed");
         assert_eq!(order(SortKey::Tokens, false), "abc", "ties keep first-seen order");
+        assert_eq!(order(SortKey::Age, false), "abc", "ties keep first-seen order");
+    }
+
+    #[test]
+    fn running_time_counts_only_work() {
+        let mut s = Session::new("s", 0.0);
+        s.stats.busy_secs = 100.0;
+        s.stats.turn_started = Some(1_000.0);
+        s.set_status(Status::Active, 1_000.0);
+        assert_eq!(s.running_secs(1_030.0), 130.0, "the turn in progress counts live");
+        s.set_status(Status::Permission, 1_030.0);
+        assert_eq!(s.running_secs(1_050.0), 150.0);
+        for idle in [Status::Idle, Status::Ended] {
+            s.set_status(idle, 1_060.0);
+            assert_eq!(s.running_secs(9_999.0), 100.0, "{idle:?} adds nothing");
+        }
     }
 
     #[test]

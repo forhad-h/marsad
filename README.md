@@ -6,7 +6,7 @@ doing, which ones are waiting on you, which skills they ran, and how many tokens
 ```
  marsad   3 sessions · 1 active · 2 need you                                    Σ 2.0M tokens
 ╭ Sessions ───────────────────────────────────────────────────────────────────────────────────╮
-│ PROJECT        ACTIVITY                                          AGE   TOKENS    STATUS     │
+│ PROJECT        ACTIVITY                                         TIME   TOKENS    STATUS     │
 │ marsad         Bash: cargo test --all                            37s     2.0M  ● PERMISSION │
 │ notes          Which database should we use?                     37s     8.1k  ? QUESTION   │
 │ web         +2 › add dark mode to the settings page              12s   414.8k  ◐ ACTIVE     │
@@ -48,7 +48,7 @@ marsad update      # install the latest version (shows current → latest and wh
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `a` show/hide ended sessions · `s` cycle sort column (status → project → context → age → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `a` show/hide ended sessions · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
 In session history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session history also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
 
