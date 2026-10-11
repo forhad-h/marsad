@@ -168,7 +168,14 @@ fn install(version: &str, quiet: bool) -> anyhow::Result<PathBuf> {
     let (script, ext) = if cfg!(windows) { ("marsad-installer.ps1", "ps1") } else { ("marsad-installer.sh", "sh") };
     let url = format!("https://github.com/{REPO}/releases/download/v{version}/{script}");
     let tmp = std::env::temp_dir().join(format!("marsad-installer-{}.{ext}", std::process::id()));
-    std::fs::write(&tmp, curl(&url)?)?;
+    let script_body = curl(&url)?;
+    // create_new refuses an existing path, so a file or symlink planted in a shared temp dir
+    // can't redirect the write.
+    let _ = std::fs::remove_file(&tmp);
+    std::io::Write::write_all(
+        &mut std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).context("couldn't create the installer file")?,
+        &script_body,
+    )?;
 
     // Windows can't overwrite a running .exe but can rename it, so move it out of the way.
     let parked = exe.with_extension("old.exe");
