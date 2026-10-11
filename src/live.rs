@@ -53,7 +53,7 @@ pub fn status(a: StatusArgs) -> anyhow::Result<()> {
     let now = crate::now();
 
     let mut list: Vec<&Session> = sessions.values().collect();
-    list.sort_by(|x, y| x.status.cmp(&y.status).then(y.last_event.total_cmp(&x.last_event)));
+    crate::model::sort_sessions(&mut list, crate::model::SortKey::Status, false, compact_window);
 
     let columns = [
         "session_id", "project", "status", "status_secs", "activity", "model", "context_used",

@@ -1,6 +1,6 @@
 use crate::events;
 use crate::jsonl::JsonlTail;
-use crate::model::{RateWindow, Session, Status, Subagent};
+use crate::model::{RateWindow, Session, SortKey, Status, Subagent};
 use crate::transcript::{self, TranscriptReader};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use std::collections::HashMap;
@@ -70,6 +70,8 @@ pub struct App {
     pub sessions: HashMap<String, Session>,
     pub selected: Option<String>,
     pub show_ended: bool,
+    pub sort: SortKey,
+    pub sort_reversed: bool,
     pub view: View,
     pub history_scroll: usize,
     pub compact_window: Option<u64>,
@@ -96,6 +98,8 @@ impl App {
             sessions,
             selected: None,
             show_ended: false,
+            sort: SortKey::default(),
+            sort_reversed: false,
             view: View::List,
             history_scroll: 0,
             compact_window: crate::model::auto_compact_window(),
@@ -109,7 +113,7 @@ impl App {
         }
     }
 
-    /// Sessions to show, most urgent first.
+    /// Sessions to show, in the chosen sort order (most urgent first by default).
     pub fn visible(&self) -> Vec<&Session> {
         let now = crate::now();
         let mut list: Vec<&Session> = self
@@ -117,9 +121,7 @@ impl App {
             .values()
             .filter(|s| self.show_ended || s.status != Status::Ended || now - s.status_since < ENDED_GRACE_SECS)
             .collect();
-        list.sort_by(|a, b| {
-            a.status.cmp(&b.status).then(b.last_event.total_cmp(&a.last_event))
-        });
+        crate::model::sort_sessions(&mut list, self.sort, self.sort_reversed, self.compact_window);
         list
     }
 
@@ -149,6 +151,13 @@ impl App {
         let cur = self.selected_index().unwrap_or(0) as isize;
         let next = (cur + delta).clamp(0, ids.len() as isize - 1) as usize;
         self.selected = Some(ids[next].clone());
+    }
+
+    /// Changes the sort order while keeping the highlighted session selected.
+    fn set_sort(&mut self, key: SortKey, reversed: bool) {
+        self.selected = self.selected_session().map(|s| s.id.clone());
+        self.sort = key;
+        self.sort_reversed = reversed;
     }
 
     fn scroll(&mut self, delta: isize) {
@@ -239,6 +248,8 @@ pub fn run() -> anyhow::Result<()> {
                             (View::List, KeyCode::Home | KeyCode::Char('g')) => app.move_selection(isize::MIN / 2),
                             (View::List, KeyCode::End | KeyCode::Char('G')) => app.move_selection(isize::MAX / 2),
                             (View::List, KeyCode::Char('a')) => app.show_ended = !app.show_ended,
+                            (View::List, KeyCode::Char('s')) => app.set_sort(app.sort.next(), false),
+                            (View::List, KeyCode::Char('S')) => app.set_sort(app.sort, !app.sort_reversed),
                             (View::List, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) => {
                                 if let Some(id) = app.selected_session().map(|s| s.id.clone()) {
                                     app.selected = Some(id);
