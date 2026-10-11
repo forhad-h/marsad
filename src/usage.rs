@@ -1,4 +1,4 @@
-//! State for the 30-day Usage view, plus the background sync that keeps the history current.
+//! State for the Usage view, plus the background sync that keeps the history current.
 
 use crate::store::{self, DayRow, RunRow, SessionRow, SkillRow};
 use ratatui::crossterm::event::KeyCode;
@@ -29,6 +29,58 @@ impl Pane {
     }
 }
 
+/// How far back the Usage view looks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Period {
+    Week,
+    Month,
+    Quarter,
+    Year,
+    All,
+}
+
+impl Period {
+    const ORDER: [Period; 5] = [Period::Week, Period::Month, Period::Quarter, Period::Year, Period::All];
+
+    pub fn days(self) -> Option<u32> {
+        match self {
+            Period::Week => Some(7),
+            Period::Month => Some(30),
+            Period::Quarter => Some(90),
+            Period::Year => Some(365),
+            Period::All => None,
+        }
+    }
+
+    pub fn label(self) -> String {
+        match self.days() {
+            Some(n) => format!("last {n} days"),
+            None => "all time".into(),
+        }
+    }
+
+    fn shift(self, delta: isize) -> Self {
+        let i = Self::ORDER.iter().position(|p| *p == self).unwrap_or(0) as isize;
+        Self::ORDER[(i + delta).rem_euclid(Self::ORDER.len() as isize) as usize]
+    }
+}
+
+/// Headline numbers for the selected period.
+#[derive(Default, Debug)]
+pub struct Summary {
+    pub total: i64,
+    pub sessions: i64,
+    /// Calendar days covered: the period, or less when history starts later.
+    pub span_days: i64,
+    pub busiest: Option<(String, i64)>,
+}
+
+impl Summary {
+    pub fn daily_average(&self) -> i64 {
+        if self.span_days > 0 { self.total / self.span_days } else { 0 }
+    }
+}
+
 /// One session's skill runs and per-day totals.
 pub struct Drill {
     pub session: SessionRow,
@@ -38,8 +90,11 @@ pub struct Drill {
 }
 
 pub struct Usage {
+    pub period: Period,
+    pub summary: Summary,
+    /// Days of the period with usage, newest first.
     pub days: Vec<DayRow>,
-    /// Selected local day; None = all retained days.
+    /// Selected local day; None = the whole period.
     pub day: Option<String>,
     pub sessions: Vec<SessionRow>,
     pub skills: Vec<SkillRow>,
@@ -58,6 +113,8 @@ pub struct Usage {
 impl Usage {
     pub fn new() -> Self {
         Self {
+            period: Period::Month,
+            summary: Summary::default(),
             days: Vec::new(),
             day: None,
             sessions: Vec::new(),
@@ -125,13 +182,18 @@ impl Usage {
             }
         }
         let conn = self.conn.as_ref().expect("opened above");
+        let start = self.period.days().map(store::day_n_ago);
         let result = (|| -> anyhow::Result<()> {
-            self.days = store::days(conn)?;
+            let period = store::Days::since(start.as_deref());
+            self.days = store::days(conn, period)?;
             if self.day.as_ref().is_some_and(|d| !self.days.iter().any(|r| &r.day == d)) {
                 self.day = None;
             }
-            self.sessions = store::sessions_on(conn, self.day.as_deref())?;
-            self.skills = store::skills_on(conn, self.day.as_deref())?;
+            self.summary = summarize(&self.days, start.as_deref(), store::first_day(conn)?.as_deref());
+            self.summary.sessions = store::session_count(conn, period)?;
+            let range = self.day.as_deref().map_or(period, store::Days::on);
+            self.sessions = store::sessions_in(conn, range)?;
+            self.skills = store::skills_in(conn, range)?;
             if let Some(drill) = self.drill.as_mut() {
                 drill.runs = store::session_runs(conn, &drill.session.session_id)?;
                 drill.days = store::session_days(conn, &drill.session.session_id)?;
@@ -145,7 +207,15 @@ impl Usage {
         self.skill_idx = self.skill_idx.min(self.skills.len().saturating_sub(1));
     }
 
-    /// Index of the selected day in the day list, where 0 is "all days".
+    fn set_period(&mut self, period: Period) {
+        self.period = period;
+        self.day = None;
+        self.session_idx = 0;
+        self.skill_idx = 0;
+        self.reload();
+    }
+
+    /// Index of the selected day in the day list, where 0 is the whole period.
     pub fn day_index(&self) -> usize {
         match &self.day {
             None => 0,
@@ -189,6 +259,8 @@ impl Usage {
         match code {
             KeyCode::Esc | KeyCode::Char('u') => return false,
             KeyCode::Char('r') => self.start_sync(),
+            KeyCode::Char('p') => self.set_period(self.period.shift(1)),
+            KeyCode::Char('P') => self.set_period(self.period.shift(-1)),
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => self.focus = self.focus.next(),
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => self.focus = self.focus.prev(),
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
@@ -207,6 +279,20 @@ impl Usage {
             _ => {}
         }
         true
+    }
+}
+
+/// Totals and busiest day for `days` (newest first); the span runs from the period start, or
+/// the first recorded day if later, through today.
+fn summarize(days: &[DayRow], start: Option<&str>, first: Option<&str>) -> Summary {
+    let parse = |d: &str| chrono::NaiveDate::parse_from_str(d, crate::model::DAY_FMT).ok();
+    let today = chrono::Local::now().date_naive();
+    let from = [start, first].into_iter().flatten().filter_map(parse).max();
+    Summary {
+        total: days.iter().map(|d| d.total).sum(),
+        sessions: 0,
+        span_days: from.map_or(0, |f| (today - f).num_days() + 1).max(0),
+        busiest: days.iter().max_by_key(|d| d.total).map(|d| (d.day.clone(), d.total)),
     }
 }
 
@@ -238,25 +324,26 @@ mod tests {
 
     #[test]
     fn days_filter_sessions_and_enter_drills_in() {
-        let mut u = usage_with(
+        let (d1, d2) = (store::day_n_ago(2), store::day_n_ago(3));
+        let mut u = usage_with(&format!(
             "INSERT INTO sessions (session_id, project) VALUES ('s1', 'web'), ('s2', 'api');
-             INSERT INTO usage_daily VALUES ('s1', 'main', 'main', '2026-10-09', 0, 0, 0, 0, 500, 3);
-             INSERT INTO usage_daily VALUES ('s2', 'main', 'main', '2026-10-08', 0, 0, 0, 0, 100, 1);
-             INSERT INTO skill_runs VALUES ('s1', 'main', 'main', 0, 'ce-plan', 'tool', '2026-10-09T10:00:00Z', '2026-10-09', 1, 0, 0, 0, 0, 400);",
-        );
+             INSERT INTO usage_daily VALUES ('s1', 'main', 'main', '{d1}', 0, 0, 0, 0, 500, 3);
+             INSERT INTO usage_daily VALUES ('s2', 'main', 'main', '{d2}', 0, 0, 0, 0, 100, 1);
+             INSERT INTO skill_runs VALUES ('s1', 'main', 'main', 0, 'ce-plan', 'tool', '{d1}T10:00:00Z', '{d1}', 1, 0, 0, 0, 0, 400);"
+        ));
         // "All days" first: both sessions, biggest first.
         assert_eq!(u.days.len(), 2);
         assert_eq!(u.sessions.iter().map(|s| s.project.as_str()).collect::<Vec<_>>(), ["web", "api"]);
 
         // Down selects the newest day; further moves clamp at the oldest.
         u.on_key(KeyCode::Down);
-        assert_eq!(u.day.as_deref(), Some("2026-10-09"));
+        assert_eq!(u.day.as_deref(), Some(d1.as_str()));
         assert_eq!(u.sessions.len(), 1);
         assert_eq!(u.skills[0].skill, "ce-plan");
         for _ in 0..5 {
             u.on_key(KeyCode::Down);
         }
-        assert_eq!(u.day.as_deref(), Some("2026-10-08"));
+        assert_eq!(u.day.as_deref(), Some(d2.as_str()));
         assert_eq!(u.sessions[0].project, "api");
         u.on_key(KeyCode::Up);
         u.on_key(KeyCode::Up);
@@ -269,7 +356,7 @@ mod tests {
         let drill = u.drill.as_ref().expect("drill opened");
         assert_eq!(drill.session.session_id, "s1");
         assert_eq!(drill.runs.len(), 1);
-        assert_eq!(drill.days, vec![("2026-10-09".to_string(), 500)]);
+        assert_eq!(drill.days, vec![(d1.clone(), 500)]);
 
         // Inside the drill, Esc closes it but stays in the view.
         assert!(u.on_key(KeyCode::Esc));
@@ -277,5 +364,34 @@ mod tests {
         u.on_key(KeyCode::BackTab);
         assert!(u.focus == Pane::Days);
         assert!(!u.on_key(KeyCode::Char('u')));
+    }
+
+    #[test]
+    fn period_limits_days_and_summary() {
+        let today = store::day_n_ago(1);
+        let old = store::day_n_ago(100);
+        let mut u = usage_with(&format!(
+            "INSERT INTO usage_daily VALUES ('s1', 'main', 'main', '{today}', 0, 0, 0, 0, 300, 1);
+             INSERT INTO usage_daily VALUES ('s2', 'main', 'main', '{old}', 0, 0, 0, 0, 900, 1);"
+        ));
+        assert_eq!(u.period, Period::Month);
+        assert_eq!(u.days.len(), 1, "100-day-old usage is outside the last 30 days");
+        assert_eq!((u.summary.total, u.summary.sessions, u.summary.span_days), (300, 1, 30));
+        assert_eq!(u.summary.daily_average(), 10);
+
+        u.on_key(KeyCode::Char('p'));
+        u.on_key(KeyCode::Char('p'));
+        assert_eq!(u.period, Period::Year);
+        assert_eq!(u.days.len(), 2);
+        assert_eq!(u.sessions.len(), 2);
+        assert_eq!(u.summary.busiest, Some((old.clone(), 900)));
+
+        u.on_key(KeyCode::Char('p'));
+        assert_eq!(u.period, Period::All);
+        assert_eq!(u.summary.span_days, 100, "all time starts at the first recorded day");
+        u.on_key(KeyCode::Char('p'));
+        assert_eq!(u.period, Period::Week, "wraps around");
+        u.on_key(KeyCode::Char('P'));
+        assert_eq!(u.period, Period::All);
     }
 }

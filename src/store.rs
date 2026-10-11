@@ -1,8 +1,10 @@
-//! 30-day usage history in SQLite (`~/.claude/marsad/usage.db`).
+//! Usage history in SQLite (`~/.claude/marsad/usage.db`).
 //!
 //! Built from Claude Code transcripts, re-reading a file only when its size or mtime
 //! changes. Tokens are bucketed by the local day each API call happened; skill runs by
-//! the day they started. Rows older than `RETENTION_DAYS` are deleted on every sync.
+//! the day they started. Rows outlive their transcripts (Claude Code deletes those after
+//! `cleanupPeriodDays`), so history is kept forever unless a retention is set with
+//! `marsad retention`, in which case older rows are deleted on every sync.
 
 use crate::model::{DAY_FMT, MAIN_AGENT};
 use crate::transcript::{self, TranscriptReader};
@@ -12,7 +14,6 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const RETENTION_DAYS: i64 = 30;
 
 pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS sessions (
@@ -104,9 +105,32 @@ pub fn day_n_ago(n: u32) -> String {
         .to_string()
 }
 
-/// Oldest local day kept.
-pub fn cutoff_day() -> String {
-    day_n_ago(RETENTION_DAYS as u32)
+fn retention_path() -> PathBuf {
+    crate::data_dir().join("history.json")
+}
+
+/// Days of history to keep; None keeps everything.
+pub fn retention() -> Option<u32> {
+    let text = std::fs::read_to_string(retention_path()).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    v.get("retention_days").and_then(Value::as_u64).filter(|&n| n > 0).map(|n| n as u32)
+}
+
+pub fn set_retention(days: Option<u32>) -> anyhow::Result<()> {
+    let path = retention_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, serde_json::to_vec_pretty(&json!({ "retention_days": days }))?)?;
+    Ok(())
+}
+
+/// "forever" or "the last N days", for messages.
+pub fn retention_label(days: Option<u32>) -> String {
+    match days {
+        None => "forever".into(),
+        Some(n) => format!("the last {n} days"),
+    }
 }
 
 /// One transcript file: a session's main agent or one of its subagents.
@@ -162,23 +186,24 @@ pub struct SyncReport {
     pub updated: usize,
     /// Changed files that could not be indexed; they are retried on the next sync.
     pub failed: usize,
-    /// Rows removed by the retention window.
+    /// Rows removed by the retention setting.
     pub pruned: usize,
 }
 
-/// Indexes new or changed transcripts under `~/.claude/projects`, then prunes old rows.
+/// Indexes new or changed transcripts under `~/.claude/projects`, then prunes rows
+/// older than the retention (if one is set).
 pub fn sync(conn: &mut Connection) -> anyhow::Result<SyncReport> {
-    sync_dir(conn, &crate::claude_dir().join("projects"))
+    sync_dir(conn, &crate::claude_dir().join("projects"), retention())
 }
 
-pub fn sync_dir(conn: &mut Connection, projects: &Path) -> anyhow::Result<SyncReport> {
-    let cutoff = cutoff_day();
-    let cutoff_time = crate::now() - RETENTION_DAYS as f64 * 86400.0;
+pub fn sync_dir(conn: &mut Connection, projects: &Path, retention: Option<u32>) -> anyhow::Result<SyncReport> {
+    let cutoff = retention.map(day_n_ago);
+    let cutoff_time = retention.map(|n| crate::now() - n as f64 * 86400.0);
     let mut report = SyncReport::default();
 
     for unit in units(projects) {
         let Some((size, mtime)) = file_sig(&unit.path) else { continue };
-        if mtime < cutoff_time {
+        if cutoff_time.is_some_and(|t| mtime < t) {
             continue;
         }
         report.scanned += 1;
@@ -193,13 +218,15 @@ pub fn sync_dir(conn: &mut Connection, projects: &Path) -> anyhow::Result<SyncRe
         let mut reader = TranscriptReader::new(unit.path.clone());
         reader.poll();
         // One bad file must not block indexing of the rest.
-        match write_unit(conn, &unit, &reader, &cutoff, (size, mtime)) {
+        match write_unit(conn, &unit, &reader, cutoff.as_deref(), (size, mtime)) {
             Ok(()) => report.updated += 1,
             Err(_) => report.failed += 1,
         }
     }
 
-    report.pruned = prune(conn, &cutoff, cutoff_time)?;
+    if let (Some(cutoff), Some(cutoff_time)) = (&cutoff, cutoff_time) {
+        report.pruned = prune(conn, cutoff, cutoff_time)?;
+    }
     Ok(report)
 }
 
@@ -208,7 +235,7 @@ fn write_unit(
     conn: &mut Connection,
     unit: &Unit,
     reader: &TranscriptReader,
-    cutoff: &str,
+    cutoff: Option<&str>,
     (size, mtime): (i64, f64),
 ) -> anyhow::Result<()> {
     let stats = reader.stats();
@@ -218,7 +245,7 @@ fn write_unit(
     tx.execute("DELETE FROM usage_daily WHERE session_id = ?1 AND agent_id = ?2", key)?;
     tx.execute("DELETE FROM skill_runs WHERE session_id = ?1 AND agent_id = ?2", key)?;
 
-    for (day, d) in reader.daily().iter().filter(|(day, _)| day.as_str() >= cutoff) {
+    for (day, d) in reader.daily().iter().filter(|(day, _)| cutoff.is_none_or(|c| day.as_str() >= c)) {
         let t = d.tokens;
         tx.execute(
             "INSERT INTO usage_daily VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -230,7 +257,7 @@ fn write_unit(
     }
     for (seq, run) in stats.runs.iter().enumerate() {
         let day = run.at.as_deref().and_then(transcript::local_day);
-        if day.as_deref().is_none_or(|d| d < cutoff) {
+        if day.as_deref().is_none_or(|d| cutoff.is_some_and(|c| d < c)) {
             continue;
         }
         let t = run.tokens;
@@ -318,25 +345,61 @@ pub struct RunRow {
     pub total: i64,
 }
 
-pub fn days(conn: &Connection) -> anyhow::Result<Vec<DayRow>> {
+/// An inclusive range of local days; None on either side is open-ended.
+#[derive(Clone, Copy, Default)]
+pub struct Days<'a> {
+    pub from: Option<&'a str>,
+    pub to: Option<&'a str>,
+}
+
+impl<'a> Days<'a> {
+    pub fn since(from: Option<&'a str>) -> Self {
+        Self { from, to: None }
+    }
+
+    pub fn on(day: &'a str) -> Self {
+        Self { from: Some(day), to: Some(day) }
+    }
+}
+
+/// Per-day totals, newest first.
+pub fn days(conn: &Connection, range: Days) -> anyhow::Result<Vec<DayRow>> {
     let mut stmt = conn.prepare(
-        "SELECT day, SUM(total) FROM usage_daily GROUP BY day ORDER BY day DESC",
+        "SELECT day, SUM(total) FROM usage_daily
+         WHERE (?1 IS NULL OR day >= ?1) AND (?2 IS NULL OR day <= ?2)
+         GROUP BY day ORDER BY day DESC",
     )?;
-    let rows = stmt.query_map([], |r| Ok(DayRow { day: r.get(0)?, total: r.get(1)? }))?;
+    let rows = stmt.query_map([range.from, range.to], |r| Ok(DayRow { day: r.get(0)?, total: r.get(1)? }))?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// Sessions ranked by tokens, for one day or (None) the whole retention window.
-pub fn sessions_on(conn: &Connection, day: Option<&str>) -> anyhow::Result<Vec<SessionRow>> {
+/// Oldest day with any usage.
+pub fn first_day(conn: &Connection) -> anyhow::Result<Option<String>> {
+    Ok(conn.query_row("SELECT MIN(day) FROM usage_daily", [], |r| r.get(0))?)
+}
+
+/// Number of sessions with usage in the range.
+pub fn session_count(conn: &Connection, range: Days) -> anyhow::Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(DISTINCT session_id) FROM usage_daily
+         WHERE (?1 IS NULL OR day >= ?1) AND (?2 IS NULL OR day <= ?2)",
+        [range.from, range.to],
+        |r| r.get(0),
+    )?)
+}
+
+/// Sessions ranked by tokens within the range.
+pub fn sessions_in(conn: &Connection, range: Days) -> anyhow::Result<Vec<SessionRow>> {
     let mut stmt = conn.prepare(
         "SELECT u.session_id, COALESCE(s.project, ''), COALESCE(s.title, ''), COALESCE(s.model, ''),
                 SUM(u.total), SUM(u.output), SUM(u.turns),
-                (SELECT COUNT(*) FROM skill_runs r WHERE r.session_id = u.session_id AND (?1 IS NULL OR r.day = ?1))
+                (SELECT COUNT(*) FROM skill_runs r WHERE r.session_id = u.session_id
+                   AND (?1 IS NULL OR r.day >= ?1) AND (?2 IS NULL OR r.day <= ?2))
          FROM usage_daily u LEFT JOIN sessions s USING (session_id)
-         WHERE ?1 IS NULL OR u.day = ?1
+         WHERE (?1 IS NULL OR u.day >= ?1) AND (?2 IS NULL OR u.day <= ?2)
          GROUP BY u.session_id ORDER BY SUM(u.total) DESC",
     )?;
-    let rows = stmt.query_map([day], |r| {
+    let rows = stmt.query_map([range.from, range.to], |r| {
         Ok(SessionRow {
             session_id: r.get(0)?,
             project: r.get(1)?,
@@ -351,13 +414,13 @@ pub fn sessions_on(conn: &Connection, day: Option<&str>) -> anyhow::Result<Vec<S
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-pub fn skills_on(conn: &Connection, day: Option<&str>) -> anyhow::Result<Vec<SkillRow>> {
+pub fn skills_in(conn: &Connection, range: Days) -> anyhow::Result<Vec<SkillRow>> {
     let mut stmt = conn.prepare(
         "SELECT skill, COUNT(*), SUM(total), SUM(output), COUNT(DISTINCT session_id)
-         FROM skill_runs WHERE ?1 IS NULL OR day = ?1
+         FROM skill_runs WHERE (?1 IS NULL OR day >= ?1) AND (?2 IS NULL OR day <= ?2)
          GROUP BY skill ORDER BY SUM(total) DESC",
     )?;
-    let rows = stmt.query_map([day], |r| {
+    let rows = stmt.query_map([range.from, range.to], |r| {
         Ok(SkillRow { skill: r.get(0)?, calls: r.get(1)?, total: r.get(2)?, output: r.get(3)?, sessions: r.get(4)? })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -451,20 +514,20 @@ mod tests {
 
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
-        let r = sync_dir(&mut conn, &root.join("projects")).unwrap();
+        let r = sync_dir(&mut conn, &root.join("projects"), Some(30)).unwrap();
         assert_eq!((r.scanned, r.updated), (2, 2));
 
-        let days = days(&conn).unwrap();
+        let days = days(&conn, Days::default()).unwrap();
         assert_eq!(days.len(), 1, "40-day-old usage is pruned");
         assert_eq!(days[0].total, 10 + 5 + 20 + 100 + 7);
-        let sessions = sessions_on(&conn, None).unwrap();
+        let sessions = sessions_in(&conn, Days::default()).unwrap();
         assert_eq!((sessions[0].project.as_str(), sessions[0].skill_runs), ("web", 1));
-        let skills = skills_on(&conn, Some(&days[0].day)).unwrap();
+        let skills = skills_in(&conn, Days::on(&days[0].day)).unwrap();
         assert_eq!((skills[0].skill.as_str(), skills[0].total), ("ce-plan", 120));
         let agents = query(&conn, "SELECT agent_type FROM usage_daily ORDER BY agent_type", &[]).unwrap();
         assert_eq!(agents.rows, vec![vec![json!("Explore")], vec![json!("main")]]);
 
-        let again = sync_dir(&mut conn, &root.join("projects")).unwrap();
+        let again = sync_dir(&mut conn, &root.join("projects"), Some(30)).unwrap();
         assert_eq!(again.updated, 0, "unchanged files are skipped");
         std::fs::remove_dir_all(root).ok();
     }
@@ -490,7 +553,7 @@ mod tests {
 
         // Corrupt and partial lines are skipped; valid ones still count.
         std::fs::write(&file, format!("{}\nnot json at all\n{{\"type\":\n{}\n", msg("a", 10), msg("b", 5))).unwrap();
-        let r = sync_dir(&mut conn, &projects).unwrap();
+        let r = sync_dir(&mut conn, &projects, None).unwrap();
         assert_eq!((r.updated, r.failed), (1, 0));
         assert_eq!(total_tokens(&conn), 15);
 
@@ -498,13 +561,46 @@ mod tests {
         let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
         writeln!(f, "{}", msg("c", 100)).unwrap();
         drop(f);
-        assert_eq!(sync_dir(&mut conn, &projects).unwrap().updated, 1);
+        assert_eq!(sync_dir(&mut conn, &projects, None).unwrap().updated, 1);
         assert_eq!(total_tokens(&conn), 115);
 
         // A rewritten, shorter file replaces the old rows rather than adding to them.
         std::fs::write(&file, format!("{}\n", msg("z", 7))).unwrap();
-        assert_eq!(sync_dir(&mut conn, &projects).unwrap().updated, 1);
+        assert_eq!(sync_dir(&mut conn, &projects, None).unwrap().updated, 1);
         assert_eq!(total_tokens(&conn), 7);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn without_retention_history_outlives_deleted_transcripts() {
+        let root = std::env::temp_dir().join(format!("marsad-store-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let proj = root.join("projects").join("-p-old");
+        std::fs::create_dir_all(&proj).unwrap();
+        let file = proj.join("s3.jsonl");
+        let old = (chrono::Utc::now() - chrono::Duration::days(200)).to_rfc3339();
+        let now = chrono::Utc::now().to_rfc3339();
+        let msg = |ts: &str, id: &str, out: u64| {
+            format!(r#"{{"type":"assistant","timestamp":"{ts}","message":{{"id":"{id}","usage":{{"output_tokens":{out}}}}}}}"#)
+        };
+        std::fs::write(&file, format!("{}\n{}\n", msg(&old, "a", 40), msg(&now, "b", 2))).unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        let projects = root.join("projects");
+
+        sync_dir(&mut conn, &projects, None).unwrap();
+        assert_eq!(total_tokens(&conn), 42, "200-day-old usage is kept");
+        assert_eq!(days(&conn, Days::since(Some(&day_n_ago(7)))).unwrap().len(), 1);
+        assert_eq!(session_count(&conn, Days::default()).unwrap(), 1);
+
+        // Claude Code deleting the transcript doesn't remove its history.
+        std::fs::remove_file(&file).unwrap();
+        sync_dir(&mut conn, &projects, None).unwrap();
+        assert_eq!(total_tokens(&conn), 42);
+
+        // Setting a retention prunes on the next sync.
+        sync_dir(&mut conn, &projects, Some(30)).unwrap();
+        assert_eq!(total_tokens(&conn), 2);
         std::fs::remove_dir_all(root).ok();
     }
 

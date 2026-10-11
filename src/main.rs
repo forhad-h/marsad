@@ -38,9 +38,11 @@ enum Cmd {
     },
     /// Remove marsad hooks from ~/.claude/settings.json.
     Uninstall,
-    /// Index new transcript data into the 30-day usage history.
+    /// Index new transcript data into the usage history.
     Sync,
-    /// Summarize token usage over the last 30 days (by day, session, skill, project, model, agent).
+    /// Show or set how long usage history is kept (default: forever).
+    Retention(report::RetentionArgs),
+    /// Summarize token usage (by day, session, skill, project, model, agent).
     Report(report::ReportArgs),
     /// Run a read-only SQL query against the usage history.
     Sql(report::SqlArgs),
@@ -85,6 +87,7 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::Install { no_statusline }) => install::install(!no_statusline),
         Some(Cmd::Uninstall) => install::uninstall(),
         Some(Cmd::Sync) => report::sync_now(),
+        Some(Cmd::Retention(args)) => report::retention(args),
         Some(Cmd::Report(args)) => report::report(args),
         Some(Cmd::Sql(args)) => report::sql(args),
         Some(Cmd::Schema) => {

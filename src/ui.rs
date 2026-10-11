@@ -7,7 +7,8 @@ use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState, Wrap,
+    Block, BorderType, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table,
+    TableState, Wrap,
 };
 
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
@@ -197,6 +198,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("tab", "pane".into()),
                 ("↑↓", "move".into()),
                 ("enter", "open session".into()),
+                ("p/P", format!("period: {}", app.usage.period.label())),
                 ("r", "resync".into()),
                 ("esc", "back".into()),
                 ("q", "quit".into()),
@@ -229,7 +231,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("↑↓", "select".into()),
                 ("enter", "history".into()),
                 ("tab", "subagents".into()),
-                ("u", "30-day usage".into()),
+                ("u", "usage".into()),
                 ("a", ended.into()),
                 ("s/S", format!("sort: {}", app.sort.label())),
                 ("q", "quit".into()),
@@ -724,8 +726,51 @@ fn weight(v: i64, max: i64) -> f64 {
     if max <= 0 { 0.0 } else { v as f64 / max as f64 }
 }
 
-/// 30-day browser: days on the left, that day's sessions and skills on the right.
+/// Totals for the period, and a daily chart with one column per day (oldest left).
+fn draw_summary(f: &mut Frame, area: Rect, u: &Usage) {
+    let sum = &u.summary;
+    let mut spans = vec![
+        label("tokens"),
+        Span::styled(fmt_tokens(sum.total as u64), Style::new().bold()),
+        dim("   sessions "),
+        Span::raw(sum.sessions.to_string()),
+        dim("   per day "),
+        Span::raw(fmt_tokens(sum.daily_average() as u64)),
+        dim(format!(" over {} days", sum.span_days)),
+    ];
+    if let Some((day, total)) = &sum.busiest {
+        spans.extend([dim("   busiest "), Span::raw(format!("{} ", fmt_day(day))), Span::raw(fmt_tokens(*total as u64))]);
+    }
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().dark_gray())
+        .title(Line::from(Span::styled(format!(" Usage · {} ", u.period.label()), Style::new().fg(ACCENT).bold())));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let [text, chart] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
+    f.render_widget(Paragraph::new(Line::from(spans)), text);
+
+    // Zero-filled daily totals, newest last, trimmed to the columns available; each day is
+    // repeated so a short period still spans the width.
+    let today = chrono::Local::now().date_naive();
+    let n = (sum.span_days.max(0) as usize).min(chart.width as usize);
+    let per_day = (chart.width as usize).checked_div(n).unwrap_or(1).max(1);
+    let series: Vec<u64> = (0..n)
+        .rev()
+        .flat_map(|back| {
+            let day = (today - chrono::Days::new(back as u64)).format(DAY_FMT).to_string();
+            let total = u.days.iter().find(|d| d.day == day).map_or(0, |d| d.total.max(0) as u64);
+            std::iter::repeat_n(total, per_day)
+        })
+        .collect();
+    f.render_widget(Sparkline::default().data(&series).style(Style::new().fg(ACCENT)), chart);
+}
+
+/// Usage browser: a summary of the period on top, its days on the left, and the selected
+/// day's (or whole period's) sessions and skills on the right.
 fn draw_usage(f: &mut Frame, area: Rect, u: &Usage) {
+    let [top, area] = Layout::vertical([Constraint::Length(6), Constraint::Fill(1)]).areas(area);
+    draw_summary(f, top, u);
     let [left, right] = Layout::horizontal([Constraint::Length(34), Constraint::Fill(1)]).areas(area);
     let [sessions_area, skills_area] = Layout::vertical([Constraint::Fill(3), Constraint::Fill(2)]).areas(right);
 
@@ -733,7 +778,7 @@ fn draw_usage(f: &mut Frame, area: Rect, u: &Usage) {
     let max_day = u.days.iter().map(|d| d.total).max().unwrap_or(0);
     let all_total: i64 = u.days.iter().map(|d| d.total).sum();
     let mut rows = vec![Row::new(vec![
-        Cell::from(Span::styled(format!("All {} days", crate::store::RETENTION_DAYS), Style::new().bold())),
+        Cell::from(Span::styled("Total", Style::new().bold())),
         Cell::from(""),
         right_cell(fmt_tokens(all_total as u64)),
     ])];
@@ -754,7 +799,7 @@ fn draw_usage(f: &mut Frame, area: Rect, u: &Usage) {
     let table = styled_table(rows, &widths, title);
     f.render_stateful_widget(table, left, &mut TableState::default().with_selected(Some(u.day_index())));
 
-    let scope = u.day.as_deref().map(fmt_day).unwrap_or_else(|| format!("last {} days", crate::store::RETENTION_DAYS));
+    let scope = u.day.as_deref().map(fmt_day).unwrap_or_else(|| u.period.label());
 
     // Sessions
     let max_s = u.sessions.first().map(|s| s.total).unwrap_or(0);

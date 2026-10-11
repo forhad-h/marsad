@@ -67,7 +67,12 @@ pub struct SqlArgs {
 
 pub fn sync_now() -> anyhow::Result<()> {
     let r = store::open_and_sync()?;
-    eprintln!("Indexed {} changed transcript(s) of {} from the last {} days.", r.updated, r.scanned, store::RETENTION_DAYS);
+    eprintln!(
+        "Indexed {} changed transcript(s) of {}. Keeping history {}.",
+        r.updated,
+        r.scanned,
+        store::retention_label(store::retention())
+    );
     if r.failed > 0 {
         eprintln!("{} transcript(s) could not be indexed; they will be retried on the next sync.", r.failed);
     }
@@ -158,9 +163,35 @@ pub fn sql(a: SqlArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Args)]
+pub struct RetentionArgs {
+    /// Days of history to keep (e.g. 90), or `forever`. Omit to show the current setting.
+    keep: Option<String>,
+}
+
+pub fn retention(a: RetentionArgs) -> anyhow::Result<()> {
+    let Some(keep) = a.keep else {
+        println!("Keeping usage history {}.", store::retention_label(store::retention()));
+        return Ok(());
+    };
+    let days = match keep.as_str() {
+        "forever" | "all" | "0" => None,
+        n => Some(n.parse::<u32>().map_err(|_| anyhow::anyhow!("expected a number of days or `forever`, got {n:?}"))?),
+    };
+    store::set_retention(days)?;
+    println!("Keeping usage history {}.", store::retention_label(days));
+    if days.is_some() {
+        println!("Older rows are deleted on the next sync (dashboard, `marsad sync`, or when a session ends).");
+    }
+    Ok(())
+}
+
 pub fn schema() {
     println!("-- {}", store::db_path().display());
-    println!("-- Local-date usage for the last {} days. Older rows are deleted automatically.", store::RETENTION_DAYS);
+    match store::retention() {
+        None => println!("-- Local-date usage, kept forever (also for sessions whose transcripts were deleted)."),
+        Some(n) => println!("-- Local-date usage for the last {n} days. Older rows are deleted automatically."),
+    }
     println!("{}", store::SCHEMA.trim());
 }
 
