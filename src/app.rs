@@ -172,7 +172,7 @@ impl Counter {
         }
         self.loaded = Some(Instant::now());
         if self.conn.is_none() {
-            self.conn = crate::store::open().ok();
+            self.conn = crate::store::open_readonly().ok();
         }
         let Some(conn) = &self.conn else { return };
         if let (Ok(rows), Ok(all)) = (crate::store::day_rows(conn, &today), crate::store::lifetime(conn)) {

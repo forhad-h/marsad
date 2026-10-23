@@ -151,8 +151,8 @@ fn merge_table(conn: &mut Connection, t: &Table, rows: &[Value]) -> anyhow::Resu
             };
             // Days a legacy total already counts never enter the day counter.
             if t.name == "token_days"
-                && let Some(SqlValue::Text(day)) = values.get(2)
-                && ranges.iter().any(|(since, through)| day >= since && day < through) {
+                && let Some(SqlValue::Text(day)) = t.columns.iter().position(|c| *c == "day").and_then(|i| values.get(i))
+                && store::in_legacy(&ranges, day) {
                     merged.known += 1;
                     continue;
                 }

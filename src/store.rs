@@ -108,10 +108,9 @@ pub(crate) fn open_at(path: &Path) -> anyhow::Result<Connection> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(10))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    let mut conn = conn;
     prepare(&mut conn)?;
     Ok(conn)
 }
@@ -179,7 +178,7 @@ pub fn legacy_ranges(conn: &Connection) -> anyhow::Result<Vec<(String, String)>>
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-fn in_legacy(ranges: &[(String, String)], day: &str) -> bool {
+pub(crate) fn in_legacy(ranges: &[(String, String)], day: &str) -> bool {
     ranges.iter().any(|(since, through)| day >= since.as_str() && day < through.as_str())
 }
 
@@ -349,13 +348,9 @@ fn write_unit(
     let key = params![unit.session_id, unit.agent_id];
     tx.execute("DELETE FROM usage_daily WHERE session_id = ?1 AND agent_id = ?2", key)?;
     tx.execute("DELETE FROM skill_runs WHERE session_id = ?1 AND agent_id = ?2", key)?;
-    let mut kept = tx.prepare("SELECT day FROM token_days WHERE session_id = ?1 AND agent_id = ?2")?;
-    let stale: Vec<String> = kept.query_map(key, |r| r.get(0))?.collect::<Result<_, _>>()?;
-    drop(kept);
-    // Replaced rather than merged, so usage re-bucketed after a timezone change isn't counted twice.
-    for day in stale.iter().filter(|d| !in_legacy(legacy, d)) {
-        tx.execute("DELETE FROM token_days WHERE session_id = ?1 AND agent_id = ?2 AND day = ?3", params![unit.session_id, unit.agent_id, day])?;
-    }
+    // Replaced rather than merged, so usage re-bucketed after a timezone change isn't counted
+    // twice. Days inside a legacy range never have rows here, so none are lost.
+    tx.execute("DELETE FROM token_days WHERE session_id = ?1 AND agent_id = ?2", key)?;
 
     for (day, d) in &reader.daily() {
         let t = d.tokens;

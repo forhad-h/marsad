@@ -97,6 +97,7 @@ pub fn set_context_warning(pct: Option<u32>) -> anyhow::Result<()> {
 
 /// The preferences that travel in an export.
 pub fn portable() -> Map<String, Value> {
+    // Moves a retention still in `history.json` into the settings first.
     retention_days();
     let all = load_at(&path());
     PORTABLE.iter().filter_map(|k| all.get(*k).map(|v| (k.to_string(), v.clone()))).collect()

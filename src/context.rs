@@ -119,11 +119,8 @@ fn find_session<'a>(
     env_id: Option<&str>,
     ancestors: &[u32],
 ) -> anyhow::Result<&'a Session> {
-    let by_prefix = |id: &str| {
-        let mut hits: Vec<&Session> = sessions.values().filter(|s| s.id.starts_with(id)).collect();
-        hits.sort_by(|a, b| b.last_event.total_cmp(&a.last_event));
-        hits.first().copied()
-    };
+    let latest = |hits: &mut dyn Iterator<Item = &'a Session>| hits.max_by(|a, b| a.last_event.total_cmp(&b.last_event));
+    let by_prefix = |id: &str| latest(&mut sessions.values().filter(|s| s.id.starts_with(id)));
     if let Some(id) = explicit {
         return by_prefix(id).ok_or_else(|| anyhow::anyhow!("no session matches {id:?}"));
     }
@@ -132,9 +129,7 @@ fn find_session<'a>(
     }
     // The nearest ancestor wins, so a nested `claude` reports itself rather than its parent.
     for pid in ancestors {
-        let mut hits: Vec<&Session> = sessions.values().filter(|s| s.pid == Some(*pid)).collect();
-        hits.sort_by(|a, b| b.last_event.total_cmp(&a.last_event));
-        if let Some(s) = hits.first() {
+        if let Some(s) = latest(&mut sessions.values().filter(|s| s.pid == Some(*pid))) {
             return Ok(s);
         }
     }
@@ -165,14 +160,15 @@ fn hook() -> Option<String> {
 
     let dir = warned_dir();
     let marker = dir.join(id);
-    let (emit, warned) = decide(pct, threshold, marker.exists());
-    if warned {
+    let was_warned = marker.exists();
+    let (emit, warned) = decide(pct, threshold, was_warned);
+    if warned && !was_warned {
         std::fs::create_dir_all(&dir).ok()?;
         std::fs::write(&marker, b"").ok()?;
-    } else {
+        clean_markers(&dir);
+    } else if was_warned && !warned {
         let _ = std::fs::remove_file(&marker);
     }
-    clean_markers(&dir);
     emit.then(|| {
         json!({
             "hookSpecificOutput": {
@@ -226,8 +222,12 @@ fn last_context(path: &Path) -> Option<TailContext> {
     f.read_to_end(&mut buf).ok()?;
     let text = String::from_utf8_lossy(&buf);
     // The first line may be cut in half when reading from the middle of the file.
-    let lines = text.lines().skip(usize::from(start > 0));
-    lines.collect::<Vec<_>>().into_iter().rev().find_map(|line| {
+    let text = if start > 0 { text.split_once('\n').map_or("", |(_, rest)| rest) } else { &text };
+    text.lines().rev().find_map(|line| {
+        // Skips parsing the many lines that can't carry usage.
+        if !line.contains("\"usage\"") {
+            return None;
+        }
         let e: Value = serde_json::from_str(line).ok()?;
         if e["type"] != "assistant" || e["isSidechain"].as_bool().unwrap_or(false) {
             return None;
@@ -242,14 +242,10 @@ fn last_context(path: &Path) -> Option<TailContext> {
     })
 }
 
-/// Whichever of the status line snapshot and the transcript reported more recently, as
-/// `Session::context` decides for the dashboard.
+/// Whichever of the status line snapshot and the transcript reported more recently, as the
+/// dashboard decides.
 fn fresher_context(snap: Option<&crate::model::StatusSnapshot>, tail: Option<&TailContext>) -> Option<ContextInfo> {
-    let from_snap = snap.and_then(|s| s.used.map(|u| (u, s.ts)));
-    let used = match (tail.map(|t| (t.used, t.at)), from_snap) {
-        (Some(t), Some(s)) => if s.1 > t.1 { s.0 } else { t.0 },
-        (t, s) => t.or(s)?.0,
-    };
+    let used = crate::model::fresher_used(tail.map(|t| (t.used, t.at)), snap)?;
     let model = snap.and_then(|s| s.model.clone()).or_else(|| tail.and_then(|t| t.model.clone()));
     Some(context_info(used, model.as_deref(), snap.and_then(|s| s.window), auto_compact_window()))
 }
