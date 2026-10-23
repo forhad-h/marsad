@@ -5,7 +5,7 @@ use std::path::PathBuf;
 /// Ordered by urgency: sessions that need the user sort first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Status {
-    Permission,
+    Approve,
     Question,
     Error,
     Active,
@@ -16,7 +16,7 @@ pub enum Status {
 impl Status {
     pub fn as_str(self) -> &'static str {
         match self {
-            Status::Permission => "permission",
+            Status::Approve => "approve",
             Status::Question => "question",
             Status::Error => "error",
             Status::Active => "active",
@@ -26,7 +26,7 @@ impl Status {
     }
 
     pub fn needs_user(self) -> bool {
-        matches!(self, Status::Permission | Status::Question)
+        matches!(self, Status::Approve | Status::Question)
     }
 }
 
@@ -580,7 +580,7 @@ mod tests {
             s
         };
         let a = mk("a", "/x/beta", Status::Idle, 1.0, Some(50_000));
-        let b = mk("b", "/x/Alpha", Status::Permission, 2.0, None);
+        let b = mk("b", "/x/Alpha", Status::Approve, 2.0, None);
         let c = mk("c", "/x/gamma", Status::Active, 3.0, Some(150_000));
         let order = |key, reversed| {
             let mut list = vec![&a, &b, &c];
@@ -603,7 +603,7 @@ mod tests {
         s.stats.turn_started = Some(1_000.0);
         s.set_status(Status::Active, 1_000.0);
         assert_eq!(s.running_secs(1_030.0), 130.0, "the turn in progress counts live");
-        s.set_status(Status::Permission, 1_030.0);
+        s.set_status(Status::Approve, 1_030.0);
         assert_eq!(s.running_secs(1_050.0), 150.0);
         for idle in [Status::Idle, Status::Ended] {
             s.set_status(idle, 1_060.0);

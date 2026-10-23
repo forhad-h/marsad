@@ -68,7 +68,7 @@ fn runs_table(rows: Vec<Row<'static>>, block: Block<'static>) -> Table<'static> 
 
 fn status_style(s: Status) -> (Style, &'static str) {
     match s {
-        Status::Permission => (Style::new().fg(Color::Yellow).bold(), "PERMISSION"),
+        Status::Approve => (Style::new().fg(Color::Yellow).bold(), "APPROVE"),
         Status::Question => (Style::new().fg(Color::Magenta).bold(), "QUESTION"),
         Status::Error => (Style::new().fg(Color::Red).bold(), "ERROR"),
         Status::Active => (Style::new().fg(Color::Green), "ACTIVE"),
@@ -79,7 +79,7 @@ fn status_style(s: Status) -> (Style, &'static str) {
 
 fn status_glyph(s: Status, tick: u64) -> &'static str {
     match s {
-        Status::Permission => "●",
+        Status::Approve => "●",
         Status::Question => "?",
         Status::Error => "✗",
         Status::Active => SPINNER[(tick / 2 % 4) as usize],

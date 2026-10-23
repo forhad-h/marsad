@@ -7,7 +7,7 @@ doing, which ones are waiting on you, which skills they ran, and how many tokens
  marsad   3 sessions · 1 active · 2 need you                                    Σ 2.0M tokens
 ╭ Sessions ───────────────────────────────────────────────────────────────────────────────────╮
 │ PROJECT        ACTIVITY                                         TIME   TOKENS        STATUS │
-│ marsad         Bash: cargo test --all                            37s     2.0M  PERMISSION ● │
+│ marsad         Bash: cargo test --all                            37s     2.0M     APPROVE ● │
 │ notes          Which database should we use?                     37s     8.1k    QUESTION ? │
 │ web         +2 › add dark mode to the settings page              12s   414.8k      ACTIVE ◐ │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -113,8 +113,8 @@ so a subagent's used tokens (summed across all its turns) can be far above its c
 
   | Status | Events |
   |---|---|
-  | Permission | `PermissionRequest`, `Notification[permission_prompt]` |
-  | Question | `AskUserQuestion` tool, `Elicitation`, `Notification[elicitation_dialog]` |
+  | Approve | `PermissionRequest`, `Notification[permission_prompt]` (except for questions) |
+  | Question | `AskUserQuestion` tool (including its permission request), `Elicitation`, `Notification[elicitation_dialog]` |
   | Active | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `PreCompact` |
   | Idle | `Stop`, `Notification[idle_prompt]` |
   | Error | `StopFailure` |
@@ -176,7 +176,7 @@ statements.
 
 ### Known limitations
 
-- After you approve a permission prompt, the row stays on PERMISSION until the tool finishes
+- After you approve a permission prompt, the row stays on APPROVE until the tool finishes
   (Claude Code fires no hook on approval).
 - Sessions started before `marsad install` show up only after they are restarted.
 - The event log rotates at 20 MB (`events.1.jsonl` keeps the previous one).

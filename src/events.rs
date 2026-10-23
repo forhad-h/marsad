@@ -63,13 +63,19 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
                 session.set_status(Status::Active, ts);
             }
         }
+        // Claude Code also asks permission to show a question; it is still a question.
+        "PermissionRequest" if tool == "AskUserQuestion" => {
+            session.set_status(Status::Question, ts);
+            session.detail = summary.to_string();
+        }
         "PermissionRequest" => {
-            session.set_status(Status::Permission, ts);
+            session.set_status(Status::Approve, ts);
             session.detail = tool_detail();
         }
         "Notification" => match s("notification_type").unwrap_or("") {
+            "permission_prompt" if session.status == Status::Question => {}
             "permission_prompt" => {
-                session.set_status(Status::Permission, ts);
+                session.set_status(Status::Approve, ts);
                 if session.detail.is_empty() {
                     session.detail = s("message").unwrap_or("").to_string();
                 }
@@ -157,7 +163,7 @@ mod tests {
             json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "summary": "npm test"}),
             json!({"hook_event_name": "PermissionRequest", "tool_name": "Bash", "summary": "npm test"}),
         ]);
-        assert_eq!(s.status, Status::Permission);
+        assert_eq!(s.status, Status::Approve);
         assert_eq!(s.detail, "Bash: npm test");
         assert_eq!(s.project(), "web");
         assert_eq!(s.pid, Some(42));
@@ -172,12 +178,34 @@ mod tests {
     }
 
     #[test]
-    fn subagent_tool_does_not_hide_permission() {
+    fn question_is_not_reported_as_approval() {
+        let ask = json!({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "summary": "Which?"});
+        let perm = json!({"hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion", "summary": "Which?"});
+        let note = json!({"hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs your permission"});
+        let s = run(&[ask, perm.clone(), note.clone()]);
+        assert_eq!((s.status, s.detail.as_str()), (Status::Question, "Which?"));
+        // A question's permission request alone, without its PreToolUse, still reads as a question.
+        assert_eq!(run(std::slice::from_ref(&perm)).status, Status::Question);
+        // A permission notification for anything else is an approval.
+        assert_eq!(run(&[note]).status, Status::Approve);
+    }
+
+    #[test]
+    fn later_event_supplies_a_missing_pid() {
+        let s = run(&[
+            json!({"hook_event_name": "SessionStart"}),
+            json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "pid": 7}),
+        ]);
+        assert_eq!(s.pid, Some(7));
+    }
+
+    #[test]
+    fn subagent_tool_does_not_hide_approval() {
         let s = run(&[
             json!({"hook_event_name": "PermissionRequest", "tool_name": "Bash"}),
             json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "agent_id": "a1"}),
         ]);
-        assert_eq!(s.status, Status::Permission);
+        assert_eq!(s.status, Status::Approve);
     }
 
     #[test]
