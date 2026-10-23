@@ -466,6 +466,42 @@ pub fn lifetime(conn: &Connection) -> anyhow::Result<Lifetime> {
     )?)
 }
 
+/// Tokens over one stretch of days, with the per-day average over its calendar days.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct PeriodTotal {
+    pub period: &'static str,
+    pub days: i64,
+    pub total: i64,
+    pub daily_average: i64,
+}
+
+/// Totals for today, the last 7 and 30 days, and all time (which starts at the first counted day).
+pub fn periods(conn: &Connection, today: &str) -> anyhow::Result<Vec<PeriodTotal>> {
+    let parse = |d: &str| chrono::NaiveDate::parse_from_str(d, DAY_FMT);
+    let today_date = parse(today)?;
+    let since_day = |n: u64| (today_date - chrono::Days::new(n - 1)).format(DAY_FMT).to_string();
+    let sum = |from: &str| -> anyhow::Result<i64> {
+        Ok(conn.query_row(
+            "SELECT COALESCE(SUM(total), 0) FROM token_days WHERE day >= ?1 AND day <= ?2",
+            [from, today],
+            |r| r.get(0),
+        )?)
+    };
+    let all = lifetime(conn)?;
+    let all_days = all.since.as_deref().and_then(|d| parse(d).ok()).map_or(0, |d| (today_date - d).num_days() + 1);
+    let mut out = Vec::new();
+    for (period, days, total) in [
+        ("today", 1, sum(today)?),
+        ("7d", 7, sum(&since_day(7))?),
+        ("30d", 30, sum(&since_day(30))?),
+        ("all", all_days.max(0), all.total),
+    ] {
+        let daily_average = if days > 0 { total / days } else { 0 };
+        out.push(PeriodTotal { period, days, total, daily_average });
+    }
+    Ok(out)
+}
+
 #[derive(Clone, Debug)]
 pub struct DayRow {
     pub day: String,
@@ -801,6 +837,27 @@ mod tests {
         sync_dir(&mut conn, &projects, Some(30)).unwrap();
         assert_eq!((total_tokens(&conn), lifetime(&conn).unwrap().total), (8, 8));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn periods_total_and_average_over_calendar_days() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        prepare(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO token_days VALUES ('a', 'main', '2026-10-23', 0, 0, 0, 0, 10, 1);
+             INSERT INTO token_days VALUES ('b', 'main', '2026-10-20', 0, 0, 0, 0, 20, 1);
+             INSERT INTO token_days VALUES ('c', 'main', '2026-09-12', 0, 0, 0, 0, 60, 1);",
+        )
+        .unwrap();
+        let got: Vec<(&str, i64, i64, i64)> =
+            periods(&conn, "2026-10-23").unwrap().iter().map(|p| (p.period, p.days, p.total, p.daily_average)).collect();
+        assert_eq!(got, [("today", 1, 10, 10), ("7d", 7, 30, 4), ("30d", 30, 30, 1), ("all", 42, 90, 2)]);
+
+        let mut empty = Connection::open_in_memory().unwrap();
+        prepare(&mut empty).unwrap();
+        let all = periods(&empty, "2026-10-23").unwrap();
+        assert!(all.iter().all(|p| p.total == 0 && p.daily_average == 0));
+        assert_eq!(all[3].days, 0, "no usage, no start day");
     }
 
     /// A database as versions before 0.4 left it: pruned days in `lifetime`, recent ones in detail.
