@@ -211,6 +211,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("tab", "subagents".into()),
                 ("u", "usage".into()),
                 ("a", ended.into()),
+                ("m", format!("alerts: {}", if app.alerts_on { "on" } else { "off" })),
                 ("s/S", format!("sort: {}", app.sort.label())),
                 ("q", "quit".into()),
             ]

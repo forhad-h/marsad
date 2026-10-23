@@ -1,3 +1,4 @@
+mod alerts;
 mod app;
 mod events;
 mod hook;
@@ -6,6 +7,7 @@ mod jsonl;
 mod live;
 mod model;
 mod report;
+mod settings;
 mod statusline;
 mod store;
 mod transcript;
