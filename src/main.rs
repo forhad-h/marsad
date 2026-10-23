@@ -7,6 +7,7 @@ mod install;
 mod jsonl;
 mod live;
 mod model;
+mod portable;
 mod report;
 mod settings;
 mod statusline;
@@ -55,6 +56,13 @@ enum Cmd {
     Schema,
     /// Show live sessions: status, current activity, context left, and usage limits.
     Status(live::StatusArgs),
+    /// Write all marsad data (day counter, history, settings) to one file, to back up or move it.
+    Export {
+        /// Output file (default: marsad-export-YYYY-MM-DD.json).
+        file: Option<PathBuf>,
+    },
+    /// Merge a `marsad export` file into this machine's data; importing twice never double counts.
+    Import { file: PathBuf },
     /// How full this session's context is, and the automatic handoff warning (--warn).
     Context(context::ContextArgs),
     /// Update marsad to the latest release (or turn automatic updates on/off with --auto).
@@ -104,6 +112,8 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Cmd::Status(args)) => live::status(args),
         Some(Cmd::Context(args)) => context::run(args),
+        Some(Cmd::Export { file }) => portable::export(file),
+        Some(Cmd::Import { file }) => portable::import(&file),
         Some(Cmd::Update(args)) => update::run(args),
         None => app::run(),
     }

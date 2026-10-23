@@ -104,7 +104,7 @@ pub fn open() -> anyhow::Result<Connection> {
     open_at(&db_path())
 }
 
-fn open_at(path: &Path) -> anyhow::Result<Connection> {
+pub(crate) fn open_at(path: &Path) -> anyhow::Result<Connection> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
