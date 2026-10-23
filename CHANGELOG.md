@@ -17,6 +17,9 @@ GitHub release. Keep each bullet to one short line.
 - Claude is told once when a session's context passes 80%, so it can write a handoff (`marsad context --warn`)
 - `marsad export` and `marsad import` back up or move all data; importing twice never double counts
 - `marsad import --restore` brings back this machine's own data after a reinstall
+- Coordination rules let several sessions in one repo share an `AGENT-BOARD.md` and avoid editing the same files
+- `c` copies the command that starts a session with them (`marsad coordination` prints it)
+- `b` shows a repo's agent board: who is working on what, stale claims and `needs-human` conflicts
 
 ## 0.3.2 - 2026-10-11
 
