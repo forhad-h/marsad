@@ -147,6 +147,10 @@ pub struct TranscriptStats {
     pub busy_secs: f64,
     /// Unix time the turn in progress started, if one is open.
     pub turn_started: Option<f64>,
+    /// Unix time the latest turn ended, interrupted or not.
+    pub turn_ended_at: Option<f64>,
+    /// Background shells still running, oldest first, by command.
+    pub background: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
