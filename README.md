@@ -48,9 +48,22 @@ marsad update      # install the latest version (shows current → latest and wh
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `a` show/hide ended sessions · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
 In session history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session history also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
+
+### Alerts
+
+While the dashboard is open it plays a sound when a session starts waiting on you (QUESTION or
+APPROVE) and another when a session finishes its work, and shows a desktop notification naming the
+project and what it is waiting on. Pressing Esc or interrupting a turn doesn't count as finishing,
+and a session that leaves a background shell running finishes only when that work is done. `m`
+turns alerts off and on; the choice is kept in `~/.claude/marsad/settings.json`.
+
+macOS uses its Ping and Glass sounds and shows notifications on the lock screen if Script Editor
+(which `osascript` runs as) is allowed to in System Settings → Notifications. Linux uses `paplay`
+and `notify-send` when installed. Windows plays system sounds only. Without a sound player the
+terminal bell rings instead.
 
 ### Updates
 
@@ -115,10 +128,10 @@ so a subagent's used tokens (summed across all its turns) can be far above its c
   |---|---|
   | Approve | `PermissionRequest`, `Notification[permission_prompt]` (except for questions) |
   | Question | `AskUserQuestion` tool (including its permission request), `Elicitation`, `Notification[elicitation_dialog]` |
-  | Active | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `PreCompact` |
-  | Idle | `Stop`, `Notification[idle_prompt]` |
+  | Active | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `PreCompact`; or a background shell Claude started is still running |
+  | Idle | `Stop`, `Notification[idle_prompt]`; or the transcript shows the turn ended with no `Stop` (Esc on a prompt, or an interrupted turn) |
   | Error | `StopFailure` |
-  | Ended | `SessionEnd`, or the session's Claude Code process is gone |
+  | Ended | `SessionEnd`, or the session's Claude Code process is gone (every hook event records its pid) |
 
 - **Tokens** are read from each session's transcript (`message.usage`, deduped by message id),
   including subagent transcripts under `<session>/subagents/`. Hooks don't carry usage data.
@@ -175,6 +188,9 @@ it will use `marsad report` / `marsad sql` / `marsad status`. `marsad sql` accep
 statements.
 
 ### Known limitations
+
+- `/btw` side questions and `!` shell commands fire no hook and leave nothing in the transcript, so
+  they don't change a session's status.
 
 - After you approve a permission prompt, the row stays on APPROVE until the tool finishes
   (Claude Code fires no hook on approval).

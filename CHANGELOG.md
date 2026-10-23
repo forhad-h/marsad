@@ -3,6 +3,14 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- Questions show QUESTION instead of PERMISSION, and PERMISSION is now APPROVE
+- Pressing Esc on a prompt, or interrupting a turn, sets the session back to IDLE
+- Sessions stay ACTIVE while a background shell Claude started is still running
+- Sessions whose process exited show ENDED reliably
+- Sounds and desktop notifications when a session needs you or finishes; `m` toggles them
+
 ## 0.3.2 - 2026-10-11
 
 - Session status is right-aligned against the table's right edge
