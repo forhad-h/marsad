@@ -319,6 +319,12 @@ pub fn sync_dir(conn: &mut Connection, projects: &Path, retention: Option<u32>) 
         }
         let mut reader = TranscriptReader::new(unit.path.clone());
         reader.poll();
+        // A file that yields no usage although the counter has rows for it was unreadable or
+        // emptied; replacing would erase permanent tokens, so keep them and retry next sync.
+        if reader.daily().is_empty() && has_token_days(conn, &unit)? {
+            report.failed += 1;
+            continue;
+        }
         // One bad file must not block indexing of the rest.
         match write_unit(conn, &unit, &reader, cutoff.as_deref(), &legacy, (size, mtime)) {
             Ok(()) => report.updated += 1,
@@ -330,6 +336,11 @@ pub fn sync_dir(conn: &mut Connection, projects: &Path, retention: Option<u32>) 
         report.pruned = prune(conn, cutoff)?;
     }
     Ok(report)
+}
+
+fn has_token_days(conn: &Connection, unit: &Unit) -> anyhow::Result<bool> {
+    let mut stmt = conn.prepare_cached("SELECT 1 FROM token_days WHERE session_id = ?1 AND agent_id = ?2 LIMIT 1")?;
+    Ok(stmt.exists(params![unit.session_id, unit.agent_id])?)
 }
 
 /// Replaces one file's rows and records its signature, in a single transaction. Detail rows
@@ -766,6 +777,32 @@ mod tests {
         std::fs::write(&file, format!("{}\n", msg("z", 7))).unwrap();
         assert_eq!(sync_dir(&mut conn, &projects, None).unwrap().updated, 1);
         assert_eq!(total_tokens(&conn), 7);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unreadable_or_emptied_transcript_keeps_counted_tokens() {
+        let root = std::env::temp_dir().join(format!("marsad-store-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let proj = root.join("projects").join("-p-gone");
+        std::fs::create_dir_all(&proj).unwrap();
+        let file = proj.join("s5.jsonl");
+        let ts = chrono::Utc::now().to_rfc3339();
+        std::fs::write(&file, format!(r#"{{"type":"assistant","timestamp":"{ts}","message":{{"id":"a","usage":{{"output_tokens":30}}}}}}"#) + "\n").unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        prepare(&mut conn).unwrap();
+        let projects = root.join("projects");
+        sync_dir(&mut conn, &projects, None).unwrap();
+        let counted = |conn: &Connection| days(conn, Days::default()).unwrap().iter().map(|d| d.total).sum::<i64>();
+        assert_eq!(counted(&conn), 30);
+
+        // The file changed but the reader saw nothing: the counter keeps its rows and the file
+        // is retried rather than recorded as indexed.
+        std::fs::write(&file, "").unwrap();
+        let r = sync_dir(&mut conn, &projects, None).unwrap();
+        assert_eq!((r.updated, r.failed), (0, 1));
+        assert_eq!(counted(&conn), 30);
+        assert_eq!(sync_dir(&mut conn, &projects, None).unwrap().failed, 1, "retried on the next sync");
         std::fs::remove_dir_all(root).ok();
     }
 
