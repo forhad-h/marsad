@@ -1,6 +1,7 @@
 mod alerts;
 mod app;
 mod context;
+#[allow(dead_code)] mod coordination;
 mod events;
 mod hook;
 mod install;
