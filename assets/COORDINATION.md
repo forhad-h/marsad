@@ -2,10 +2,10 @@
 
 These rules apply to this conversation because it was started with them. The user's direct instructions in the conversation override them.
 
-Several Claude Code sessions may work in this repo at the same time. They coordinate only through one shared board file, `AGENT-BOARD.md`, at the root of the repo's main checkout. Resolve its absolute path once, at the start, from the directory you started in:
+Several Claude Code sessions may work in this repo at the same time. They coordinate only through one shared board file, `AGENT-BOARD.md`, at the root of the repo's main checkout (inside the git directory for a bare clone or a submodule). Resolve its absolute path once, at the start, from the directory you started in:
 
 ```bash
-d=$(git rev-parse --git-common-dir 2>/dev/null) && d=$(cd "$d" && pwd -P) && echo "$(dirname "$d")/AGENT-BOARD.md" || echo "$PWD/AGENT-BOARD.md"
+d=$(git rev-parse --git-common-dir 2>/dev/null) && d=$(cd "$d" && pwd -P) && { [ "${d##*/}" = .git ] && d=${d%/*}; echo "$d/AGENT-BOARD.md"; } || echo "$PWD/AGENT-BOARD.md"
 ```
 
 Use that absolute path for every read and write. Git worktrees each have their own root, so a relative path would create separate boards. Outside a git repo the board lives in the absolute directory you started in. If the file does not exist, create it from the template below. In a git repo, also add the line `AGENT-BOARD.md` to `<git-common-dir>/info/exclude` (the directory printed by the `git rev-parse` above) so it is never committed; skip this outside git. These rules apply to every task, however small.

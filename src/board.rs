@@ -22,7 +22,7 @@ pub enum Root {
     Gone,
 }
 
-/// Finds the board for a session's cwd: one board per repo, in the main checkout, so every worktree shares it.
+/// Finds the board for a session's cwd: one board per repo, in the main checkout (or its git dir when there is none), so every worktree shares it.
 pub fn resolve(cwd: &str) -> Root {
     resolve_with(cwd, git_common_dir)
 }
@@ -54,11 +54,21 @@ fn common_dir_from(dir: &Path, out: &str) -> Option<PathBuf> {
     dir.join(path).canonicalize().ok()
 }
 
+/// Beside a `.git` dir, in the main checkout. Any other common dir (a bare clone, a submodule's
+/// `.git/modules/<name>`) has no checkout of its own, so the board goes inside it.
+fn board_in(common: &Path) -> Option<PathBuf> {
+    if common.file_name().is_some_and(|n| n == ".git") {
+        common.parent().map(|p| p.join(FILE))
+    } else {
+        Some(common.join(FILE))
+    }
+}
+
 fn resolve_with(cwd: &str, git: impl Fn(&Path) -> Option<PathBuf>) -> Root {
     if cwd.trim().is_empty() {
         return Root::NoCwd;
     }
-    let in_repo = |dir: &Path| git(dir).and_then(|common| common.parent().map(|p| p.join(FILE)));
+    let in_repo = |dir: &Path| git(dir).and_then(|common| board_in(&common));
     let dir = Path::new(cwd);
     if dir.is_dir() {
         return Root::Board(in_repo(dir).unwrap_or_else(|| dir.join(FILE)));
@@ -396,6 +406,23 @@ Shared by all Claude Code sessions in this repo. One-line anchored edits only. N
     }
 
     #[test]
+    fn a_bare_clone_keeps_one_board_for_its_worktrees() {
+        if !has_git() {
+            return;
+        }
+        let (root, repo) = repo("bare");
+        let bare = root.join("proj.git");
+        git(&root, &["clone", "-q", "--bare", s(&repo), s(&bare)]);
+        let (a, b) = (root.join("a"), root.join("b"));
+        git(&bare, &["worktree", "add", "-q", s(&a)]);
+        git(&bare, &["worktree", "add", "-q", "-b", "other", s(&b)]);
+        let board = Root::Board(bare.canonicalize().unwrap().join(FILE));
+        assert_eq!(resolve(s(&a)), board, "never the shared parent dir");
+        assert_eq!(resolve(s(&b)), board);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn a_deleted_sibling_worktree_under_a_non_git_parent_is_gone() {
         if !has_git() {
             return;
@@ -424,6 +451,10 @@ Shared by all Claude Code sessions in this repo. One-line anchored edits only. N
         let gone = root.join("a/b");
         assert_eq!(resolve_with(s(&gone), |d| (d == root).then(|| fake.clone())), Root::Board(PathBuf::from("/x/main").join(FILE)));
         assert_eq!(resolve_with(s(&gone), |_| None), Root::Gone);
+        let bare = PathBuf::from("/x/proj.git");
+        assert_eq!(resolve_with(s(&root), |_| Some(bare.clone())), Root::Board(bare.join(FILE)), "a bare clone keeps its board inside");
+        let module = PathBuf::from("/x/main/.git/modules/sub");
+        assert_eq!(resolve_with(s(&root), |_| Some(module.clone())), Root::Board(module.join(FILE)), "each submodule has its own");
         std::fs::remove_dir_all(root).ok();
     }
 

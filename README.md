@@ -139,7 +139,7 @@ so a subagent's used tokens (summed across all its turns) can be far above its c
 
 ### Coordinating several sessions
 
-When several Claude Code sessions work in one repo, marsad's coordination rules keep them from editing the same files. Sessions that load the rules share one `AGENT-BOARD.md` at the root of the repo's main checkout (one board for all its worktrees, kept out of git through `.git/info/exclude`). On it they register, claim files before editing them, record binding decisions, message each other, and log conflicts they can't settle as `needs-human`.
+When several Claude Code sessions work in one repo, marsad's coordination rules keep them from editing the same files. Sessions that load the rules share one `AGENT-BOARD.md` at the root of the repo's main checkout (one board for all its worktrees, kept out of git through `.git/info/exclude`; a bare clone or a submodule keeps it inside its git directory). On it they register, claim files before editing them, record binding decisions, message each other, and log conflicts they can't settle as `needs-human`.
 
 `c` copies the command that starts a session with the rules:
 

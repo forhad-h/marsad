@@ -44,7 +44,7 @@ made, open questions, and the next steps, with file paths, so a fresh session ca
 marsad coordination --format json   # {command, protocol_path}: starts a session with the coordination rules
 ```
 
-Sessions started with that command coordinate on `AGENT-BOARD.md` at the root of the repo's main checkout (`dirname "$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"`). Read it to see which sessions are active and which files they have claimed; the dashboard's `b` key shows it too.
+Sessions started with that command coordinate on `AGENT-BOARD.md` at the root of the repo's main checkout: beside the absolute `git rev-parse --git-common-dir` when that is a `.git` dir, inside it otherwise (a bare clone or a submodule). Read it to see which sessions are active and which files they have claimed; the dashboard's `b` key shows it too.
 
 ## Ready-made reports
 
