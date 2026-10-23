@@ -85,11 +85,14 @@ fn trim(raw: &Value) -> Value {
             out.insert("summary".into(), json!(summary));
         }
     }
+    // Claude Code passes its pid to hooks; walking the process tree is the fallback.
     let event = raw.get("hook_event_name").and_then(Value::as_str).unwrap_or("");
-    if matches!(event, "SessionStart" | "UserPromptSubmit")
-        && let Some(pid) = claude_pid() {
-            out.insert("pid".into(), json!(pid));
-        }
+    let pid = std::env::var("CLAUDE_PID").ok().and_then(|p| p.parse::<u32>().ok()).or_else(|| {
+        matches!(event, "SessionStart" | "UserPromptSubmit").then(claude_pid).flatten()
+    });
+    if let Some(pid) = pid {
+        out.insert("pid".into(), json!(pid));
+    }
     Value::Object(out)
 }
 
@@ -149,4 +152,21 @@ fn claude_pid() -> Option<u32> {
         pid = parent;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_event_carries_the_claude_pid() {
+        // SAFETY: no other test reads or writes CLAUDE_PID.
+        unsafe { std::env::set_var("CLAUDE_PID", "4242") };
+        let ev = trim(&json!({"session_id": "s", "hook_event_name": "PreToolUse", "tool_name": "Bash"}));
+        assert_eq!(ev["pid"], 4242);
+        unsafe { std::env::set_var("CLAUDE_PID", "not a pid") };
+        let ev = trim(&json!({"session_id": "s", "hook_event_name": "PreToolUse"}));
+        assert!(ev.get("pid").is_none());
+        unsafe { std::env::remove_var("CLAUDE_PID") };
+    }
 }
