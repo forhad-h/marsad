@@ -13,6 +13,7 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
     session.last_event = session.last_event.max(ts);
     if ev.get("agent_id").is_none() {
         session.last_hook = session.last_hook.max(ts);
+        session.stopped = matches!(event, "Stop" | "SessionStart");
     }
 
     if let Some(cwd) = s("cwd") {
@@ -43,6 +44,10 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
 
     match event {
         "SessionStart" => {
+            // Compaction restarts the session inside the same process; startup and resume don't.
+            if s("source") != Some("compact") {
+                session.run_started = ts;
+            }
             session.set_idle(IdleCause::Other, ts);
             session.detail.clear();
         }
@@ -231,7 +236,7 @@ mod tests {
         // Stop with a background shell open, then the follow-up turn after it finishes.
         let mut s = run(&[turn[0].clone(), turn[1].clone(), stop]);
         s.stats.turn_ended_at = Some(2.4);
-        s.stats.background = vec!["cargo build".into()];
+        s.stats.background = vec![(1.0, "cargo build".into())];
         s.reconcile(10.0);
         assert_eq!((s.status, s.detail.as_str()), (Status::Active, "background: cargo build"));
         s.stats.background.clear();
@@ -247,6 +252,49 @@ mod tests {
         }
         s.reconcile(30.0);
         assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Finished));
+    }
+
+    #[test]
+    fn subagent_work_between_stop_and_turn_end_is_not_an_interrupt() {
+        // A refresh lands after the subagent's call but before the transcript's turn end is read.
+        let mut s = run(&[
+            json!({"hook_event_name": "UserPromptSubmit", "prompt": "go"}),
+            json!({"hook_event_name": "Stop"}),
+            json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "agent_id": "a1"}),
+        ]);
+        s.stats.turn_ended_at = Some(2.4);
+        s.reconcile(10.0);
+        assert_eq!(s.status, Status::Active);
+        // The next main-agent hook makes interrupts count again.
+        let mut s = run(&[json!({"hook_event_name": "Stop"}), json!({"hook_event_name": "UserPromptSubmit"})]);
+        s.stats.turn_ended_at = Some(1.5);
+        s.reconcile(10.0);
+        assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Interrupted));
+    }
+
+    #[test]
+    fn idle_notification_keeps_a_finished_turn_finished() {
+        let s = run(&[json!({"hook_event_name": "Stop"}), json!({"hook_event_name": "Notification", "notification_type": "idle_prompt"})]);
+        assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Finished));
+    }
+
+    #[test]
+    fn shells_from_before_a_resume_are_ignored() {
+        let start = |source: &str| json!({"hook_event_name": "SessionStart", "source": source});
+        // Shell launched at 0.5, then the session restarts at 1.
+        let mut s = run(&[json!({"hook_event_name": "Stop"}), start("resume")]);
+        s.stats.background = vec![(0.5, "npm run dev".into())];
+        s.reconcile(10.0);
+        assert_eq!(s.status, Status::Idle);
+        // A shell from the resumed process still counts.
+        s.stats.background.push((5.0, "cargo build".into()));
+        s.reconcile(11.0);
+        assert_eq!((s.status, s.detail.as_str()), (Status::Active, "background: cargo build"));
+        // Compaction keeps the same process, so its shells keep running.
+        let mut s = run(&[json!({"hook_event_name": "Stop"}), start("compact")]);
+        s.stats.background = vec![(0.5, "npm run dev".into())];
+        s.reconcile(10.0);
+        assert_eq!(s.status, Status::Active);
     }
 
     #[test]

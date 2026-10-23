@@ -133,6 +133,8 @@ pub struct App {
     pub update: Option<crate::update::Notice>,
     /// Sounds and notifications for sessions that need the user or finish; `m` toggles.
     pub alerts_on: bool,
+    /// A failure to show in the footer, such as settings that couldn't be saved; the next key clears it.
+    pub error: Option<String>,
     alerts: crate::alerts::Detector,
     update_rx: std::sync::mpsc::Receiver<crate::update::Notice>,
     log: JsonlTail,
@@ -167,6 +169,7 @@ impl App {
             usage: crate::usage::Usage::new(),
             update: None,
             alerts_on: crate::settings::alerts(),
+            error: None,
             alerts: crate::alerts::Detector::default(),
             update_rx: crate::update::background(),
             log: JsonlTail::new(dir.join("events.jsonl")),
@@ -347,6 +350,7 @@ pub fn run() -> anyhow::Result<()> {
             if event::poll(Duration::from_millis(250))?
                 && let Event::Key(key) = event::read()?
                     && key.kind == KeyEventKind::Press {
+                        app.error = None;
                         match (app.view, key.code) {
                             (_, KeyCode::Char('q')) => return Ok(()),
                             (View::Usage, code) => {
@@ -366,7 +370,9 @@ pub fn run() -> anyhow::Result<()> {
                             (View::List, KeyCode::Char('a')) => app.show_ended = !app.show_ended,
                             (View::List, KeyCode::Char('m')) => {
                                 app.alerts_on = !app.alerts_on;
-                                let _ = crate::settings::set_alerts(app.alerts_on);
+                                if let Err(e) = crate::settings::set_alerts(app.alerts_on) {
+                                    app.error = Some(format!("couldn't save alerts setting: {e}"));
+                                }
                             }
                             (View::List, KeyCode::Char('s')) => app.set_sort(app.sort.next(), false),
                             (View::List, KeyCode::Char('S')) => app.set_sort(app.sort, !app.sort_reversed),

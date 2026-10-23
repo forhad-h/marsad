@@ -222,15 +222,17 @@ pub fn draw(f: &mut Frame, app: &App) {
         spans.push(k.to_string().bold());
         spans.push(format!(" {label}  ").dark_gray());
     }
-    let footer = match &app.update {
-        Some(notice) => {
-            let text = match notice {
-                Notice::Available(v) => format!("v{v} available · run `marsad update` "),
-                Notice::Installed(v) => format!("updated to v{v} · restart marsad "),
-            };
+    let note = match (&app.error, &app.update) {
+        (Some(e), _) => Some((format!("{e} "), Color::Red)),
+        (None, Some(Notice::Available(v))) => Some((format!("v{v} available · run `marsad update` "), Color::Yellow)),
+        (None, Some(Notice::Installed(v))) => Some((format!("updated to v{v} · restart marsad "), Color::Yellow)),
+        (None, None) => None,
+    };
+    let footer = match note {
+        Some((text, color)) => {
             let [keys, note] =
                 Layout::horizontal([Constraint::Min(0), Constraint::Length(text.chars().count() as u16)]).areas(footer);
-            f.render_widget(Paragraph::new(Span::styled(text, Style::new().fg(Color::Yellow))), note);
+            f.render_widget(Paragraph::new(Span::styled(text, Style::new().fg(color))), note);
             keys
         }
         None => footer,

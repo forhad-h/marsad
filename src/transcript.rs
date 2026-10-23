@@ -68,8 +68,8 @@ pub struct TranscriptReader {
     turn_ended_at: Option<f64>,
     /// Bash tool_use id -> its command, until its result says whether it went to the background.
     bash: HashMap<String, String>,
-    /// (task id, command) of background shells not yet reported finished.
-    background: Vec<(String, String)>,
+    /// (task id, unix launch time, command) of background shells not yet reported finished.
+    background: Vec<(String, f64, String)>,
 }
 
 /// Tokens and assistant turns for one local calendar day.
@@ -313,7 +313,7 @@ impl TranscriptReader {
     /// A finished background task's notification names it by task id.
     fn close_task(&mut self, text: &str) {
         if let (Some(id), Some(_)) = (tag(text, "task-id"), tag(text, "status")) {
-            self.background.retain(|(task, _)| task != id);
+            self.background.retain(|(task, _, _)| task != id);
         }
     }
 
@@ -354,7 +354,7 @@ impl TranscriptReader {
                     // A Bash command Claude ran in the background, or one moved there on timeout.
                     let tool = blocks.iter().find_map(|b| b["tool_use_id"].as_str()).unwrap_or_default();
                     if let (Some(label), Some(task)) = (self.bash.remove(tool), e["toolUseResult"]["backgroundTaskId"].as_str()) {
-                        self.background.push((task.to_string(), label));
+                        self.background.push((task.to_string(), unix_ts(e).unwrap_or(0.0), label));
                     }
                     for b in blocks.iter().filter(|b| b["type"] == "tool_result") {
                         self.tool_result(b, e);
@@ -453,7 +453,7 @@ impl TranscriptReader {
             busy_secs: self.busy_secs,
             turn_started: self.open_turn.map(|(start, _)| start),
             turn_ended_at: self.turn_ended_at,
-            background: self.background.iter().map(|(_, label)| label.clone()).collect(),
+            background: self.background.iter().map(|(_, at, label)| (*at, label.clone())).collect(),
         }
     }
 
@@ -601,7 +601,8 @@ mod tests {
 
     #[test]
     fn background_shells_stay_open_until_notified() {
-        assert_eq!(reader_for(&[BASH, LAUNCHED]).stats().background, ["cargo build --release"]);
+        let launched = unix_ts(&serde_json::json!({"timestamp": "2026-10-11T10:00:01Z"})).unwrap();
+        assert_eq!(reader_for(&[BASH, LAUNCHED]).stats().background, [(launched, "cargo build --release".to_string())]);
         for status in ["completed", "failed", "killed"] {
             let done = serde_json::json!({"type": "user", "timestamp": "2026-10-11T10:05:00Z", "origin": {"kind": "task-notification"}, "message": {"content": notification(status)}}).to_string();
             assert!(reader_for(&[BASH, LAUNCHED, &done]).stats().background.is_empty(), "{status} closes it");

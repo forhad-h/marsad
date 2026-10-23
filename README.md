@@ -128,7 +128,7 @@ so a subagent's used tokens (summed across all its turns) can be far above its c
   |---|---|
   | Approve | `PermissionRequest`, `Notification[permission_prompt]` (except for questions) |
   | Question | `AskUserQuestion` tool (including its permission request), `Elicitation`, `Notification[elicitation_dialog]` |
-  | Active | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `PreCompact`; or a background shell Claude started is still running |
+  | Active | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `PreCompact`; or a background shell Claude started since the session last launched or resumed is still running |
   | Idle | `Stop`, `Notification[idle_prompt]`; or the transcript shows the turn ended with no `Stop` (Esc on a prompt, or an interrupted turn) |
   | Error | `StopFailure` |
   | Ended | `SessionEnd`, or the session's Claude Code process is gone (every hook event records its pid) |

@@ -164,8 +164,8 @@ pub struct TranscriptStats {
     pub turn_started: Option<f64>,
     /// Unix time the latest turn ended, interrupted or not.
     pub turn_ended_at: Option<f64>,
-    /// Background shells still running, oldest first, by command.
-    pub background: Vec<String>,
+    /// Background shells still running, oldest first, as (unix launch time, command).
+    pub background: Vec<(f64, String)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -355,6 +355,12 @@ pub struct Session {
     /// Time of the latest hook event from the main agent (not a subagent).
     pub last_hook: f64,
     pub idle_cause: IdleCause,
+    /// True after the main agent's Stop or SessionStart until its next hook: the turn closed with a
+    /// hook, so a transcript turn end landing just after it is not an interrupt.
+    pub stopped: bool,
+    /// Time of the latest SessionStart from a new process (not a compaction); background shells
+    /// launched before it belonged to an earlier process and never report finishing.
+    pub run_started: f64,
     /// What the session is doing right now, e.g. "Bash: cargo test".
     pub detail: String,
     pub permission_mode: Option<String>,
@@ -378,6 +384,8 @@ impl Session {
             last_event: ts,
             last_hook: ts,
             idle_cause: IdleCause::Other,
+            stopped: false,
+            run_started: 0.0,
             detail: String::new(),
             permission_mode: None,
             model: None,
@@ -407,10 +415,10 @@ impl Session {
         if self.status == Status::Ended {
             return;
         }
-        let running = !self.stats.background.is_empty();
+        let running = self.shells().next().is_some();
         // Only a status entered before the turn ended can be its interruption: the transcript's turn
         // end lands just after Stop, so later background-agent work or approvals are not undone.
-        let interrupted = self.stats.turn_ended_at.is_some_and(|t| {
+        let interrupted = !self.stopped && self.stats.turn_ended_at.is_some_and(|t| {
             t > self.last_hook && self.status_since <= t && now - t >= INTERRUPT_GRACE_SECS
         });
         // A session kept active by a background shell has no hook newer than its last turn end.
@@ -420,11 +428,16 @@ impl Session {
             self.detail.clear();
         }
         if self.status == Status::Idle && running {
-            let shells = &self.stats.background;
+            let shells: Vec<&str> = self.shells().collect();
             let more = if shells.len() > 1 { format!(" +{}", shells.len() - 1) } else { String::new() };
             self.detail = format!("background: {}{more}", shells[0]);
             self.set_status(Status::Active, now);
         }
+    }
+
+    /// Background shells this process launched that are still running, oldest first.
+    fn shells(&self) -> impl Iterator<Item = &str> {
+        self.stats.background.iter().filter(|(launched, _)| *launched >= self.run_started).map(|(_, cmd)| cmd.as_str())
     }
 
     /// Time spent working across the whole session, including earlier runs of a resumed one.
@@ -672,7 +685,7 @@ mod tests {
         s.set_status(status, hook);
         s.last_hook = hook;
         s.stats.turn_ended_at = ended;
-        s.stats.background = background.iter().map(|b| b.to_string()).collect();
+        s.stats.background = background.iter().map(|b| (hook, b.to_string())).collect();
         s
     }
 
