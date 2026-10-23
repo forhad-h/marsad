@@ -502,6 +502,13 @@ pub fn periods(conn: &Connection, today: &str) -> anyhow::Result<Vec<PeriodTotal
     Ok(out)
 }
 
+/// Tokens indexed for `day`, per (session, agent), for overlaying live usage.
+pub fn day_rows(conn: &Connection, day: &str) -> anyhow::Result<std::collections::HashMap<(String, String), i64>> {
+    let mut stmt = conn.prepare("SELECT session_id, agent_id, total FROM token_days WHERE day = ?1")?;
+    let rows = stmt.query_map([day], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 #[derive(Clone, Debug)]
 pub struct DayRow {
     pub day: String,

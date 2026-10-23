@@ -243,7 +243,6 @@ pub fn draw(f: &mut Frame, app: &App) {
 fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     let waiting = visible.iter().filter(|s| s.status.needs_user()).count();
     let active = visible.iter().filter(|s| s.status == Status::Active).count();
-    let total: u64 = visible.iter().map(|s| s.total_tokens().total()).sum();
     let mut left = vec![
         Span::styled(" marsad ", Style::new().fg(Color::Black).bg(ACCENT).bold()),
         Span::raw(format!("  {} sessions", visible.len())),
@@ -263,7 +262,16 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
             }
         }
     }
-    right.extend([Span::raw("Σ "), Span::styled(fmt_tokens(total), Style::new().bold()), Span::raw(" tokens ")]);
+    let (today, all_time) = app.counter.totals();
+    let tokens = |n: i64| Span::styled(fmt_tokens(n.max(0) as u64), Style::new().bold());
+    right.extend([
+        Span::raw("today "),
+        tokens(today),
+        Span::styled(" · ", Style::new().dark_gray()),
+        Span::raw("all-time "),
+        tokens(all_time),
+        Span::raw(" "),
+    ]);
     f.render_widget(Paragraph::new(Line::from(right)).alignment(Alignment::Right), area);
 }
 

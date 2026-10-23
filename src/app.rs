@@ -141,6 +141,67 @@ pub struct App {
     readers: HashMap<PathBuf, TranscriptReader>,
     sys: System,
     last_slow_refresh: Instant,
+    pub counter: Counter,
+}
+
+/// Indexed (session, agent) key -> tokens.
+type DayTotals = HashMap<(String, String), i64>;
+
+/// Today's and all-time tokens for the header: the indexed counter, topped up with live usage
+/// the background sync hasn't indexed yet.
+#[derive(Default)]
+pub struct Counter {
+    conn: Option<rusqlite::Connection>,
+    loaded: Option<Instant>,
+    /// Local day the indexed figures below are for.
+    day: String,
+    indexed: DayTotals,
+    all_time: i64,
+    /// Live readers' tokens per (session, agent), with the day they were counted for.
+    live: HashMap<(String, String), (String, i64)>,
+}
+
+/// How often the header re-reads the indexed counter.
+const COUNTER_RELOAD: Duration = Duration::from_secs(10);
+
+impl Counter {
+    fn reload_if_due(&mut self) {
+        let today = crate::store::day_n_ago(1);
+        if self.loaded.is_some_and(|t| t.elapsed() < COUNTER_RELOAD) && self.day == today {
+            return;
+        }
+        self.loaded = Some(Instant::now());
+        if self.conn.is_none() {
+            self.conn = crate::store::open().ok();
+        }
+        let Some(conn) = &self.conn else { return };
+        if let (Ok(rows), Ok(all)) = (crate::store::day_rows(conn, &today), crate::store::lifetime(conn)) {
+            self.indexed = rows;
+            self.all_time = all.total;
+            self.day = today;
+        }
+    }
+
+    fn set_live(&mut self, session: &str, agent: &str, reader: &TranscriptReader) {
+        let today = crate::store::day_n_ago(1);
+        let tokens = reader.daily().get(&today).map_or(0, |d| d.tokens.total() as i64);
+        self.live.insert((session.to_string(), agent.to_string()), (today, tokens));
+    }
+
+    /// (today, all time).
+    pub fn totals(&self) -> (i64, i64) {
+        merge_live(&self.indexed, self.all_time, &self.day, &self.live)
+    }
+}
+
+/// Adds live usage that is ahead of the index, per (session, agent), to both totals.
+fn merge_live(indexed: &DayTotals, all_time: i64, day: &str, live: &HashMap<(String, String), (String, i64)>) -> (i64, i64) {
+    let extra: i64 = live
+        .iter()
+        .filter(|(_, (d, _))| d == day)
+        .map(|(key, (_, tokens))| (tokens - indexed.get(key).copied().unwrap_or(0)).max(0))
+        .sum();
+    (indexed.values().sum::<i64>() + extra, all_time + extra)
 }
 
 impl App {
@@ -176,6 +237,7 @@ impl App {
             readers: HashMap::new(),
             sys: System::new(),
             last_slow_refresh: Instant::now() - Duration::from_secs(60),
+            counter: Counter::default(),
         }
     }
 
@@ -281,6 +343,7 @@ impl App {
             self.check_processes();
             self.refresh_transcripts();
             self.refresh_snapshots();
+            self.counter.reload_if_due();
         }
         // Every refresh, so a Stop that leaves a background shell never shows as idle.
         let now = crate::now();
@@ -308,8 +371,11 @@ impl App {
             let Some(session) = self.sessions.get_mut(&id) else { continue };
             let Some(path) = session.transcript_path.clone() else { continue };
 
+            // Keyed like the indexer: the transcript's file name and the agent id.
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
             let reader = self.readers.entry(path.clone()).or_insert_with(|| TranscriptReader::new(path.clone()));
             if reader.poll() {
+                self.counter.set_live(&stem, crate::model::MAIN_AGENT, reader);
                 session.stats = reader.stats();
                 if session.model.is_none() {
                     session.model = session.stats.model.clone();
@@ -333,6 +399,7 @@ impl App {
                 }
                 let reader = self.readers.entry(file.clone()).or_insert_with(|| TranscriptReader::subagent(file));
                 if reader.poll() {
+                    self.counter.set_live(&stem, &agent_id, reader);
                     agent.stats = reader.stats();
                 }
             }
@@ -404,4 +471,31 @@ pub fn run() -> anyhow::Result<()> {
     })();
     ratatui::restore();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(s: &str, a: &str) -> (String, String) {
+        (s.to_string(), a.to_string())
+    }
+
+    #[test]
+    fn live_usage_tops_up_the_indexed_counter() {
+        let day = "2026-10-23";
+        let indexed: DayTotals = HashMap::from([(key("s1", "main"), 1_000), (key("s2", "main"), 500)]);
+        let live = HashMap::from([
+            // Covers AE3: ahead of the index by 200.
+            (key("s1", "main"), (day.to_string(), 1_200)),
+            // Not indexed yet at all.
+            (key("s3", "a1"), (day.to_string(), 50)),
+            // Behind the index: the index wins.
+            (key("s2", "main"), (day.to_string(), 400)),
+            // Yesterday's figure from a reader that hasn't polled since midnight.
+            (key("s4", "main"), ("2026-10-22".to_string(), 999)),
+        ]);
+        assert_eq!(merge_live(&indexed, 10_000, day, &live), (1_500 + 250, 10_000 + 250));
+        assert_eq!(merge_live(&DayTotals::new(), 0, day, &HashMap::new()), (0, 0));
+    }
 }
