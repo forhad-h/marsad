@@ -1,5 +1,6 @@
 mod alerts;
 mod app;
+#[allow(dead_code)] mod clipboard;
 mod context;
 #[allow(dead_code)] mod coordination;
 mod events;
