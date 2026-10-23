@@ -462,12 +462,62 @@ fn draw_board(f: &mut Frame, area: Rect, app: &App) {
         lines.extend(board.other.iter().map(|o| Line::from(dim(format!("  {o}")))));
     }
 
-    // Wrapped height, so scrolling stops at the last line.
-    let width = inner.width.max(1) as usize;
-    let rows: usize = lines.iter().map(|l| l.width().max(1).div_ceil(width)).sum();
-    state.max_scroll.set(rows.saturating_sub(inner.height as usize));
+    // Wrapped here rather than by the Paragraph, so the scroll limit counts exactly the rows drawn.
+    let rows: Vec<Line> = lines.into_iter().flat_map(|l| wrap_line(l, inner.width as usize)).collect();
+    state.max_scroll.set(rows.len().saturating_sub(inner.height as usize));
     let scroll = state.scroll.min(state.max_scroll.get()) as u16;
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((scroll, 0)), inner);
+    f.render_widget(Paragraph::new(rows).scroll((scroll, 0)), inner);
+}
+
+/// Splits a line into rows of at most `width` columns, breaking after whitespace where it can and
+/// mid-word only when a word is wider than a row. Whitespace that falls at a break is dropped.
+fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let base = line.style;
+    let mut rows: Vec<Vec<(String, Style, usize)>> = vec![Vec::new()];
+    let (mut used, mut brk) = (0, None);
+    for g in line.spans.iter().flat_map(|s| s.styled_graphemes(base)) {
+        let w = Span::raw(g.symbol).width();
+        let space = g.symbol.chars().all(char::is_whitespace);
+        if used + w > width && used > 0 {
+            if space {
+                (used, brk) = (0, None);
+                rows.push(Vec::new());
+                continue;
+            }
+            // Carry the word in progress to the next row when the row has a break before it.
+            let row = rows.last_mut().unwrap();
+            let carry = match brk {
+                Some(i) if i < row.len() => row.split_off(i),
+                _ => Vec::new(),
+            };
+            used = carry.iter().map(|c| c.2).sum();
+            brk = None;
+            rows.push(carry);
+            if used + w > width && used > 0 {
+                used = 0;
+                rows.push(Vec::new());
+            }
+        }
+        used += w;
+        let row = rows.last_mut().unwrap();
+        row.push((g.symbol.to_string(), g.style, w));
+        if space {
+            brk = Some(row.len());
+        }
+    }
+    rows.into_iter()
+        .map(|row| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (sym, style, _) in row {
+                match spans.last_mut() {
+                    Some(last) if last.style == style => last.content.to_mut().push_str(&sym),
+                    _ => spans.push(Span::styled(sym, style)),
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// A board section's heading with its count, and `(none)` under it when empty.
@@ -1241,4 +1291,32 @@ fn draw_drill(f: &mut Frame, area: Rect, u: &Usage) {
         .collect();
     let table = runs_table(rows, block);
     f.render_stateful_widget(table, list, &mut TableState::default().with_selected(Some(d.scroll)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(rows: &[Line]) -> Vec<String> {
+        rows.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect()).collect()
+    }
+
+    #[test]
+    fn wrapping_breaks_at_spaces_and_counts_every_row() {
+        // Width alone would say two rows; word wrapping needs three.
+        let rows = wrap_line(Line::from("aaaaaa bbbbbb cccccc"), 10);
+        assert_eq!(text(&rows), ["aaaaaa ", "bbbbbb ", "cccccc"]);
+        assert_eq!(text(&wrap_line(Line::from("abcdefghijkl"), 5)), ["abcde", "fghij", "kl"], "a long word breaks mid-word");
+        assert_eq!(text(&wrap_line(Line::from("short"), 10)), ["short"]);
+        assert_eq!(text(&wrap_line(Line::from(""), 10)), [""], "an empty line still takes a row");
+        assert_eq!(text(&wrap_line(Line::from("ab cd"), 0)), ["a", "b", "c", "d"], "a zero width still makes progress");
+    }
+
+    #[test]
+    fn wrapping_keeps_each_span_style() {
+        let rows = wrap_line(Line::from(vec![Span::raw("  "), "name".bold(), Span::raw(" task text")]), 8);
+        assert_eq!(text(&rows), ["  name ", "task ", "text"]);
+        assert_eq!(rows[0].spans[1], "name".bold());
+        assert!(rows.iter().all(|r| r.width() <= 8));
+    }
 }

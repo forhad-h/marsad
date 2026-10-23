@@ -31,7 +31,7 @@ fn git_common_dir(dir: &Path) -> Option<PathBuf> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .args(["rev-parse", "--git-common-dir"])
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .stdin(Stdio::null())
@@ -41,9 +41,17 @@ fn git_common_dir(dir: &Path) -> Option<PathBuf> {
     if !out.status.success() {
         return None;
     }
-    let path = String::from_utf8(out.stdout).ok()?;
-    let path = path.trim_end_matches(['\n', '\r']);
-    (!path.is_empty()).then(|| PathBuf::from(path))
+    common_dir_from(dir, &String::from_utf8(out.stdout).ok()?)
+}
+
+/// The absolute common dir from `git rev-parse --git-common-dir` output, which may be relative to `dir`.
+/// Anything but one path line (git echoes flags it doesn't know) is no answer.
+fn common_dir_from(dir: &Path, out: &str) -> Option<PathBuf> {
+    let path = out.trim_end_matches(['\n', '\r']);
+    if path.is_empty() || path.starts_with('-') || path.contains(['\n', '\r']) {
+        return None;
+    }
+    dir.join(path).canonicalize().ok()
 }
 
 fn resolve_with(cwd: &str, git: impl Fn(&Path) -> Option<PathBuf>) -> Root {
@@ -63,7 +71,11 @@ fn resolve_with(cwd: &str, git: impl Fn(&Path) -> Option<PathBuf>) -> Root {
 }
 
 /// Reads at most `READ_CAP` bytes as lossy UTF-8, and says whether the file was longer.
+/// Only a regular file is read: a FIFO or a device (a committed symlink can point at one) would block the UI.
 pub fn read(path: &Path) -> std::io::Result<(String, bool)> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"));
+    }
     let mut buf = Vec::new();
     std::fs::File::open(path)?.take(READ_CAP as u64 + 1).read_to_end(&mut buf)?;
     let truncated = buf.len() > READ_CAP;
@@ -427,6 +439,37 @@ Shared by all Claude Code sessions in this repo. One-line anchored edits only. N
         std::fs::write(&path, b"small \xff board").unwrap();
         assert_eq!(read(&path).unwrap(), ("small \u{fffd} board".to_string(), false));
         assert!(read(&root.join("missing.md")).is_err());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn only_a_regular_file_is_read() {
+        let root = std::env::temp_dir().join(format!("marsad-board-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("dir")).unwrap();
+        assert_eq!(read(&root.join("dir")).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+        #[cfg(unix)]
+        {
+            let fifo = root.join("fifo");
+            if Command::new("mkfifo").arg(&fifo).status().is_ok_and(|s| s.success()) {
+                std::os::unix::fs::symlink(&fifo, root.join(FILE)).unwrap();
+                assert_eq!(read(&root.join(FILE)).unwrap_err().kind(), std::io::ErrorKind::InvalidInput, "must not block on a FIFO");
+            }
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn git_output_must_be_one_path() {
+        let root = std::env::temp_dir().join(format!("marsad-board-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let real = root.canonicalize().unwrap();
+        assert_eq!(common_dir_from(&root, ".git\n"), Some(real.join(".git")), "relative to the dir");
+        assert_eq!(common_dir_from(&root, &format!("{}\n", real.join(".git").display())), Some(real.join(".git")));
+        assert_eq!(common_dir_from(&root, "--path-format=absolute\n.git\n"), None, "old git echoes unknown flags");
+        assert_eq!(common_dir_from(&root, "-x\n"), None);
+        assert_eq!(common_dir_from(&root, "\n"), None);
         std::fs::remove_dir_all(root).ok();
     }
 

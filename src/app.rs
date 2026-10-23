@@ -655,4 +655,84 @@ mod tests {
         assert_eq!(merge_live(&indexed, 10_000, day, &live), (1_500 + 250, 10_000 + 250));
         assert_eq!(merge_live(&DayTotals::new(), 0, day, &HashMap::new()), (0, 0));
     }
+
+    const ONE_AGENT: &str = "## Agents\n| agent | task | branch/worktree | status | started | last seen |\n|---|---|---|---|---|---|\n| agent-a | fix | a | active | 2026-10-23 10:00 | 2026-10-23 10:00 |\n";
+
+    fn agents(state: &BoardState) -> Vec<String> {
+        state.board.as_ref().map(|b| b.agents.iter().map(|a| a.name.clone()).collect()).unwrap_or_default()
+    }
+
+    #[test]
+    fn the_board_view_follows_the_file() {
+        let root = std::env::temp_dir().join(format!("marsad-app-board-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let cwd = root.to_str().unwrap();
+        let mut state = BoardState::default();
+
+        state.refresh(cwd).unwrap();
+        let path = state.path.clone().unwrap();
+        assert!(state.missing && state.board.is_none(), "no file yet");
+
+        std::fs::write(&path, ONE_AGENT).unwrap();
+        state.refresh(cwd).unwrap();
+        assert!(!state.missing);
+        assert_eq!(agents(&state), ["agent-a"]);
+
+        std::fs::write(&path, format!("{ONE_AGENT}| agent-bb | docs | b | active | 2026-10-23 10:00 | 2026-10-23 10:00 |\n")).unwrap();
+        state.refresh(cwd).unwrap();
+        assert_eq!(agents(&state), ["agent-a", "agent-bb"], "a changed file is re-read");
+
+        // Same modified time and length: the parse is reused, not re-read.
+        state.board = None;
+        state.refresh(cwd).unwrap();
+        assert!(state.board.is_none());
+        state.key = None;
+        state.refresh(cwd).unwrap();
+        assert_eq!(agents(&state).len(), 2);
+
+        // A failed read keeps the last good parse.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        state.refresh(cwd).unwrap();
+        assert!(state.read_error.is_some());
+        assert_eq!(agents(&state).len(), 2);
+
+        std::fs::remove_dir(&path).unwrap();
+        state.refresh(cwd).unwrap();
+        assert!(state.missing && state.board.is_none() && state.read_error.is_none(), "deleted again");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn the_board_view_resets_when_the_session_moves() {
+        let root = std::env::temp_dir().join(format!("marsad-app-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (a, b) = (root.join("a"), root.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join(crate::board::FILE), ONE_AGENT).unwrap();
+        let mut state = BoardState::default();
+        state.refresh(a.to_str().unwrap()).unwrap();
+        state.max_scroll.set(50);
+        state.scroll(10);
+        assert_eq!((state.scroll, agents(&state).len()), (10, 1));
+        state.refresh(b.to_str().unwrap()).unwrap();
+        assert_eq!(state.scroll, 0);
+        assert!(state.missing && state.board.is_none());
+
+        assert_eq!(state.refresh(""), Err("this session has no working directory yet"));
+        assert_eq!(state.refresh(root.join("gone").to_str().unwrap()), Err("this session's directory no longer exists"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn board_scrolling_is_clamped() {
+        let mut state = BoardState::default();
+        state.max_scroll.set(7);
+        state.scroll(isize::MAX / 2);
+        assert_eq!(state.scroll, 7);
+        state.scroll(isize::MIN / 2);
+        assert_eq!(state.scroll, 0);
+    }
 }
