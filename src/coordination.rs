@@ -71,6 +71,36 @@ pub fn launch_command(path: &Path) -> String {
     format!("claude --append-system-prompt-file {}", quote_arg(&path.to_string_lossy()))
 }
 
+#[derive(clap::Args)]
+pub struct CoordinationArgs {
+    #[arg(long, value_enum, default_value = "table")]
+    format: crate::report::Format,
+}
+
+/// `marsad coordination`: refreshes the protocol file and prints the command that loads it.
+pub fn run(args: CoordinationArgs) -> anyhow::Result<()> {
+    let path = ensure_protocol()?;
+    println!("{}", render(args.format, &launch_command(&path), &path));
+    Ok(())
+}
+
+fn render(format: crate::report::Format, command: &str, path: &Path) -> String {
+    use crate::report::Format;
+    let path = path.display().to_string();
+    match format {
+        // The command alone on the first line, so it can be copied or piped as is.
+        Format::Table => format!(
+            "{command}\nProtocol: {path}\nStart new Claude Code sessions with this command; resumed conversations keep their old prompt."
+        ),
+        Format::Json => serde_json::to_string_pretty(&serde_json::json!({ "command": command, "protocol_path": path }))
+            .unwrap_or_default(),
+        Format::Csv => {
+            let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+            format!("command,protocol_path\n{},{}", quote(command), quote(&path))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,6 +115,23 @@ mod tests {
         let mut v: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         v.sort();
         v
+    }
+
+    #[test]
+    fn cli_output_puts_the_command_first() {
+        use crate::report::Format;
+        let path = Path::new("/d/coordination.md");
+        let cmd = launch_command(path);
+        let table = render(Format::Table, &cmd, path);
+        assert_eq!(table.lines().next(), Some("claude --append-system-prompt-file /d/coordination.md"));
+        assert!(table.contains("Protocol: /d/coordination.md"));
+        let json: serde_json::Value = serde_json::from_str(&render(Format::Json, &cmd, path)).unwrap();
+        assert_eq!(json["command"], cmd.as_str());
+        assert_eq!(json["protocol_path"], "/d/coordination.md");
+        assert_eq!(
+            render(Format::Csv, &cmd, path),
+            "command,protocol_path\n\"claude --append-system-prompt-file /d/coordination.md\",\"/d/coordination.md\""
+        );
     }
 
     #[test]

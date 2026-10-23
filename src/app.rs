@@ -207,6 +207,8 @@ fn merge_live(indexed: &DayTotals, all_time: i64, day: &str, live: &HashMap<(Str
 impl App {
     fn new() -> Self {
         let dir = crate::data_dir();
+        // `marsad update` only swaps the binary, so refresh the rules this build ships.
+        let _ = crate::coordination::ensure_protocol();
         let mut sessions = HashMap::new();
         // Replay the rotated log first so long-running sessions keep their history.
         for ev in JsonlTail::new(dir.join("events.1.jsonl")).read_new() {
