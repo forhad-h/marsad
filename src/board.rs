@@ -282,7 +282,6 @@ pub fn staleness(board: &Board, now: NaiveDateTime) -> Staleness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{Command, Stdio};
 
     const TEMPLATE: &str = "# AGENT BOARD
 Shared by all Claude Code sessions in this repo. One-line anchored edits only. Never edit another agent's entries.

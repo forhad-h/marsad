@@ -423,9 +423,9 @@ fn draw_board(f: &mut Frame, area: Rect, app: &App) {
         ]));
     }
     heading(&mut lines, "Claims", board.claims.len());
-    for (i, c) in board.claims.iter().enumerate() {
-        let (is_stale, orphan) = (stale.claims.get(i) == Some(&true), stale.orphans.get(i) == Some(&true));
-        let path = if is_stale || orphan { dim(c.path.clone()) } else { c.path.clone().bold() };
+    // An orphan claim is always stale too.
+    for ((c, &is_stale), &orphan) in board.claims.iter().zip(&stale.claims).zip(&stale.orphans) {
+        let path = if is_stale { dim(c.path.clone()) } else { c.path.clone().bold() };
         lines.push(Line::from(vec![
             Span::raw("  "),
             path,
