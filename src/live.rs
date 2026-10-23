@@ -22,7 +22,7 @@ pub struct StatusArgs {
 
 /// Rebuilds session state the same way the dashboard does: replay the hook log, drop
 /// sessions whose process is gone, attach status line reports, then read transcripts.
-fn load_sessions(include_ended: bool) -> HashMap<String, Session> {
+pub(crate) fn load_sessions(include_ended: bool) -> HashMap<String, Session> {
     let dir = crate::data_dir();
     let mut sessions = HashMap::new();
     for log in ["events.1.jsonl", "events.jsonl"] {

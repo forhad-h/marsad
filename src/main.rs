@@ -1,5 +1,6 @@
 mod alerts;
 mod app;
+mod context;
 mod events;
 mod hook;
 mod install;
@@ -54,6 +55,8 @@ enum Cmd {
     Schema,
     /// Show live sessions: status, current activity, context left, and usage limits.
     Status(live::StatusArgs),
+    /// How full this session's context is, and the automatic handoff warning (--warn).
+    Context(context::ContextArgs),
     /// Update marsad to the latest release (or turn automatic updates on/off with --auto).
     Update(update::UpdateArgs),
 }
@@ -100,6 +103,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Cmd::Status(args)) => live::status(args),
+        Some(Cmd::Context(args)) => context::run(args),
         Some(Cmd::Update(args)) => update::run(args),
         None => app::run(),
     }
