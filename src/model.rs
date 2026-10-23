@@ -407,19 +407,20 @@ impl Session {
         if self.status == Status::Ended {
             return;
         }
-        let background = self.stats.background.clone();
+        let running = !self.stats.background.is_empty();
         let interrupted =
             self.stats.turn_ended_at.is_some_and(|t| t > self.last_hook && now - t >= INTERRUPT_GRACE_SECS);
         // A session kept active by a background shell has no hook newer than its last turn end.
-        let waiting = self.status.needs_user() || (self.status == Status::Active && background.is_empty());
+        let waiting = self.status.needs_user() || (self.status == Status::Active && !running);
         if interrupted && waiting {
             self.set_idle(IdleCause::Interrupted, now);
             self.detail.clear();
         }
-        if self.status == Status::Idle && !background.is_empty() {
+        if self.status == Status::Idle && running {
+            let shells = &self.stats.background;
+            let more = if shells.len() > 1 { format!(" +{}", shells.len() - 1) } else { String::new() };
+            self.detail = format!("background: {}{more}", shells[0]);
             self.set_status(Status::Active, now);
-            let more = if background.len() > 1 { format!(" +{}", background.len() - 1) } else { String::new() };
-            self.detail = format!("background: {}{more}", background[0]);
         }
     }
 

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::process::{Command, Stdio};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Sound {
+enum Sound {
     /// A session asks a question or wants approval.
     Attention,
     /// A session finished its turn.
@@ -48,13 +48,15 @@ impl Detector {
         let mut seen = HashMap::new();
         for s in sessions {
             let now = (s.status, s.status_since);
-            if let Some(last) = &self.last {
-                // Status and the time it was entered: an unchanged pair means nothing new happened.
-                let changed = last.get(&s.id) != Some(&now);
-                if changed && s.status.needs_user() {
+            // Status and the time it was entered: an unchanged pair means nothing new happened.
+            if let Some(last) = &self.last
+                && let prev = last.get(&s.id)
+                && prev != Some(&now)
+            {
+                if s.status.needs_user() {
                     alerts.attention.push(notification(s));
                 }
-                if changed && last.contains_key(&s.id) && s.status == Status::Idle && s.idle_cause == IdleCause::Finished {
+                if prev.is_some() && s.status == Status::Idle && s.idle_cause == IdleCause::Finished {
                     alerts.done = true;
                 }
             }
@@ -88,7 +90,7 @@ fn spawn(cmd: &str, args: &[&str]) -> bool {
 }
 
 /// The platform's own sound, or the terminal bell when there is none.
-pub fn play(sound: Sound) {
+fn play(sound: Sound) {
     if !play_system(sound) {
         use std::io::Write;
         let mut out = std::io::stdout();
@@ -130,7 +132,7 @@ fn play_system(_: Sound) -> bool {
 }
 
 /// A desktop notification. Text goes in as arguments, never through a shell.
-pub fn notify(title: &str, body: &str) {
+fn notify(title: &str, body: &str) {
     #[cfg(target_os = "macos")]
     spawn("osascript", &[
         "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run",

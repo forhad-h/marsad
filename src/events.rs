@@ -195,7 +195,6 @@ mod tests {
 
     #[test]
     fn reconcile_tells_finished_from_interrupted_turns() {
-        use crate::model::IdleCause;
         let turn = [
             json!({"hook_event_name": "UserPromptSubmit", "prompt": "go"}),
             json!({"hook_event_name": "PreToolUse", "tool_name": "Read"}),
