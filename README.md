@@ -4,7 +4,7 @@ A live terminal dashboard for every Claude Code session on your machine: what ea
 doing, which ones are waiting on you, which skills they ran, and how many tokens they used.
 
 ```
- marsad   3 sessions · 1 active · 2 need you                                    Σ 2.0M tokens
+ marsad   3 sessions · 1 active · 2 need you                    today 2.4M · all-time 133.5M 
 ╭ Sessions ───────────────────────────────────────────────────────────────────────────────────╮
 │ PROJECT        ACTIVITY                                         TIME   TOKENS        STATUS │
 │ marsad         Bash: cargo test --all                            37s     2.0M     APPROVE ● │
@@ -39,7 +39,7 @@ source with `cargo install --git https://github.com/forhad-h/marsad`.
 ## Usage
 
 ```sh
-marsad install     # registers async hooks + status line in ~/.claude/settings.json (backup saved alongside)
+marsad install     # registers hooks + status line in ~/.claude/settings.json (backup saved alongside)
 marsad install --no-statusline   # hooks only; context size is then estimated from transcripts
 marsad             # open the dashboard
 marsad uninstall   # removes only marsad's hooks
@@ -96,6 +96,24 @@ model id (marked `≈`) and usage limits are not shown.
 Auto-compact point: 967K on native 1M-context models, otherwise the full window, or your
 `autoCompactWindow` / `CLAUDE_CODE_AUTO_COMPACT_WINDOW` if set.
 
+### Handoff warning
+
+When a session's context passes **80%** of the auto-compact point, marsad tells Claude once, on
+your next prompt, that the context is nearly full and that it should consider writing a handoff
+prompt for a fresh session. `install` registers this as a synchronous `UserPromptSubmit` hook
+(`marsad context --hook`, a few ms) so the note reaches the prompt you just sent. The warning comes
+back after a compact or `/clear` brings the context below the threshold.
+
+```sh
+marsad context              # this session: context used, left, and the warning threshold
+marsad context --session 1fe6 --format json
+marsad context --warn 70    # warn at 70% instead
+marsad context --warn off
+```
+
+Inside Claude Code (a Bash tool call or a hook), `marsad context` finds its own session; elsewhere
+pass `--session`.
+
 ### Session history
 
 `enter` on a session opens a scrollable timeline of what happened in it, oldest first:
@@ -150,26 +168,42 @@ The history is a SQLite database at `~/.claude/marsad/usage.db`, indexed from Cl
 transcripts (`~/.claude/projects`). It includes sessions from before marsad was installed.
 Tokens are bucketed by the local day each API call happened, so long sessions split across days.
 
-Sessions are kept for the **last 30 days** by default; `marsad retention` changes that. Rows stay
-even after Claude Code deletes their transcripts (it does after `cleanupPeriodDays`, 30 days by
-default). Each session is indexed when it ends (the `SessionEnd` hook starts a background
+Session details (sessions, per-agent days, skill runs) are kept for the **last 30 days** by
+default; `marsad retention` changes that. Rows stay even after Claude Code deletes their
+transcripts (it does after `cleanupPeriodDays`, 30 days by default). Each session is indexed when it ends (the `SessionEnd` hook starts a background
 `marsad sync`), so it is recorded even if the dashboard isn't open. The dashboard also re-indexes
 every minute while open, and `marsad sync` / `report` / `sql` / `total` index on demand (only
 changed files are re-read).
 
-Before old days are deleted, their token counts are added to a single all-time total, with no
-session details. `marsad total` prints it, ready to share:
+Retention never touches the token counter: every session's tokens per agent and day are kept
+for good, so the header's today and all-time figures, `report --by day` and the Usage view's daily
+chart reach back past the retention window. `marsad total` prints the all-time total, ready to
+share, with today, the last 7 and 30 days and their daily averages:
 
 ```sh
-marsad total                # Claude Code tokens since Sep 21, 2026: 112,118,227 (112.1M) + breakdown
-marsad total --format json
-marsad retention            # show how many days are kept
-marsad retention 90         # keep 90 days; older rows are deleted on the next sync
+marsad total                # Claude Code tokens since Sep 21, 2026: 133,533,863 (133.5M) + breakdown
+marsad total --format json  # also a `periods` list: today, 7d, 30d, all
+marsad retention            # show how many days of details are kept
+marsad retention 90         # keep 90 days; older details are deleted on the next sync
 marsad retention forever
 ```
 
 The all-time total starts from the oldest day marsad indexed, so usage that was already gone from
-Claude Code's transcripts when marsad first ran isn't included.
+Claude Code's transcripts when marsad first ran isn't included. Days pruned by versions before 0.4
+survive only as one sum, so they count toward all time but have no daily rows.
+
+### Export and import
+
+```sh
+marsad export                     # writes marsad-export-YYYY-MM-DD.json in the current directory
+marsad export ~/marsad-backup.json
+marsad import ~/marsad-backup.json
+```
+
+The export holds the token counter, the kept history and your settings. `import` merges it into
+this machine's data and prints what it added: days and sessions already present keep the larger
+count, so importing the same file twice, or importing a machine's own export back, never double
+counts. Settings from the file fill only those not set here.
 
 ```sh
 marsad report --by skill --days 7          # skills by ≈tokens this week

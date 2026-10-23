@@ -10,6 +10,12 @@ GitHub release. Keep each bullet to one short line.
 - Sessions stay ACTIVE while a background shell Claude started is still running
 - Sessions whose process exited show ENDED reliably
 - Sounds and desktop notifications when a session needs you or finishes; `m` toggles them
+- The header shows today's and all-time tokens
+- A permanent per-day token counter: retention now prunes session details only
+- `marsad total` adds today, 7 and 30 days with daily averages
+- `marsad context` shows how full a session's context is
+- Claude is told once when a session's context passes 80%, so it can write a handoff (`marsad context --warn`)
+- `marsad export` and `marsad import` back up or move all data; importing twice never double counts
 
 ## 0.3.2 - 2026-10-11
 
