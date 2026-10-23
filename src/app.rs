@@ -66,6 +66,8 @@ pub enum View {
     /// One session's subagents: launching skill, tokens used, context left.
     Agents,
     Usage,
+    /// The shared AGENT-BOARD.md of the selected session's repo.
+    Board,
 }
 
 /// Which events the history shows; `f` cycles through them.
@@ -135,6 +137,11 @@ pub struct App {
     pub alerts_on: bool,
     /// A failure to show in the footer, such as settings that couldn't be saved; the next key clears it.
     pub error: Option<String>,
+    /// A success to show in the footer; the next key clears it.
+    pub info: Option<String>,
+    /// The launch command to copy by hand when the clipboard couldn't be reached; the next key clears it.
+    pub copy_note: Option<CopyNote>,
+    pub board: BoardState,
     alerts: crate::alerts::Detector,
     update_rx: std::sync::mpsc::Receiver<crate::update::Notice>,
     log: JsonlTail,
@@ -142,6 +149,96 @@ pub struct App {
     sys: System,
     last_slow_refresh: Instant,
     pub counter: Counter,
+}
+
+/// Shown above the footer when `c` couldn't put the launch command on a clipboard it can confirm.
+pub struct CopyNote {
+    pub headline: &'static str,
+    pub command: String,
+    pub path: String,
+}
+
+/// The board view's state: which board, its last good parse, and when the file was read.
+#[derive(Default)]
+pub struct BoardState {
+    /// The session whose repo the board belongs to.
+    pub session: String,
+    /// The cwd the path was resolved from, and when.
+    cwd: String,
+    resolved: Option<Instant>,
+    pub path: Option<PathBuf>,
+    /// Modified time and length of the file last parsed, so it is re-read only when it changes.
+    key: Option<(std::time::SystemTime, u64)>,
+    pub board: Option<crate::board::Board>,
+    pub truncated: bool,
+    /// No board file exists yet.
+    pub missing: bool,
+    /// The last read failed; `board` still holds the last good parse, if any.
+    pub read_error: Option<String>,
+    pub scroll: usize,
+    /// The furthest the view can scroll, set while drawing.
+    pub max_scroll: std::cell::Cell<usize>,
+}
+
+/// How long a resolved board path is reused before git is asked again (a repo may be created meanwhile).
+const BOARD_RESOLVE: Duration = Duration::from_secs(30);
+
+impl BoardState {
+    /// Re-resolves the board path when the session moved or the cached one is old, then re-reads
+    /// the file if it changed.
+    fn refresh(&mut self, cwd: &str) -> Result<(), &'static str> {
+        if self.path.is_none() || self.cwd != cwd || self.resolved.is_none_or(|t| t.elapsed() >= BOARD_RESOLVE) {
+            self.cwd = cwd.to_string();
+            self.resolved = Some(Instant::now());
+            let path = match crate::board::resolve(cwd) {
+                crate::board::Root::Board(path) => path,
+                crate::board::Root::NoCwd => return Err("this session has no working directory yet"),
+                crate::board::Root::Gone => return Err("this session's directory no longer exists"),
+            };
+            if self.path.as_ref() != Some(&path) {
+                self.path = Some(path);
+                self.key = None;
+                self.board = None;
+                self.scroll = 0;
+            }
+        }
+        self.reload();
+        Ok(())
+    }
+
+    fn reload(&mut self) {
+        let Some(path) = &self.path else { return };
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                (self.missing, self.board, self.key, self.read_error) = (true, None, None, None);
+                return;
+            }
+            Err(e) => {
+                self.read_error = Some(e.to_string());
+                return;
+            }
+        };
+        self.missing = false;
+        let key = (meta.modified().unwrap_or(std::time::UNIX_EPOCH), meta.len());
+        if self.key == Some(key) && self.read_error.is_none() {
+            return;
+        }
+        // Agents edit the board in place, so a read can land mid-edit; keep the last good parse then.
+        match crate::board::read(path) {
+            Ok((text, truncated)) => {
+                self.board = Some(crate::board::parse(&text));
+                self.truncated = truncated;
+                self.key = Some(key);
+                self.read_error = None;
+            }
+            Err(e) => self.read_error = Some(e.to_string()),
+        }
+    }
+
+    fn scroll(&mut self, delta: isize) {
+        self.scroll = self.scroll.saturating_add_signed(delta).min(self.max_scroll.get());
+    }
 }
 
 /// Indexed (session, agent) key -> tokens.
@@ -233,6 +330,9 @@ impl App {
             update: None,
             alerts_on: crate::settings::alerts(),
             error: None,
+            info: None,
+            copy_note: None,
+            board: BoardState::default(),
             alerts: crate::alerts::Detector::default(),
             update_rx: crate::update::background(),
             log: JsonlTail::new(dir.join("events.jsonl")),
@@ -293,6 +393,49 @@ impl App {
         }
     }
 
+    /// Opens the board of the selected session's repo, or says why there is none.
+    fn open_board(&mut self) {
+        let Some((id, cwd)) = self.selected_session().map(|s| (s.id.clone(), s.cwd.clone())) else { return };
+        self.selected = Some(id.clone());
+        let mut board = BoardState { session: id, ..BoardState::default() };
+        match board.refresh(&cwd) {
+            Ok(()) => {
+                self.board = board;
+                self.view = View::Board;
+            }
+            Err(why) => self.error = Some(why.into()),
+        }
+    }
+
+    fn refresh_board(&mut self) {
+        // A session that moved somewhere without a board keeps showing the last one.
+        if let Some(cwd) = self.sessions.get(&self.board.session).map(|s| s.cwd.clone()) {
+            let _ = self.board.refresh(&cwd);
+        }
+    }
+
+    /// Copies the command that starts a session with the coordination rules, refreshing the rules first.
+    fn copy_launch_command(&mut self) {
+        let path = match crate::coordination::ensure_protocol() {
+            Ok(path) => path,
+            Err(e) => {
+                self.error = Some(format!("couldn't write the coordination rules: {e:#}"));
+                return;
+            }
+        };
+        let command = crate::coordination::launch_command(&path);
+        let headline = match crate::clipboard::copy(&command) {
+            crate::clipboard::Copied::Native(_) => {
+                self.info = Some("copied the coordination command · it applies to new conversations ".into());
+                return;
+            }
+            crate::clipboard::Copied::Terminal => "Sent to your terminal's clipboard, if it allows that. To copy it by hand:",
+            crate::clipboard::Copied::Failed => "Couldn't reach a clipboard. Copy this command by hand:",
+        };
+        let path = crate::coordination::quote_arg(&path.to_string_lossy());
+        self.copy_note = Some(CopyNote { headline, command, path });
+    }
+
     /// Changes the sort order while keeping the highlighted session selected.
     fn set_sort(&mut self, key: SortKey, reversed: bool) {
         self.selected = self.selected_session().map(|s| s.id.clone());
@@ -346,6 +489,9 @@ impl App {
             self.refresh_transcripts();
             self.refresh_snapshots();
             self.counter.reload_if_due();
+            if self.view == View::Board {
+                self.refresh_board();
+            }
         }
         // Every refresh, so a Stop that leaves a background shell never shows as idle.
         let now = crate::now();
@@ -419,7 +565,7 @@ pub fn run() -> anyhow::Result<()> {
             if event::poll(Duration::from_millis(250))?
                 && let Event::Key(key) = event::read()?
                     && key.kind == KeyEventKind::Press {
-                        app.error = None;
+                        (app.error, app.info, app.copy_note) = (None, None, None);
                         match (app.view, key.code) {
                             (_, KeyCode::Char('q')) => return Ok(()),
                             (View::Usage, code) => {
@@ -443,6 +589,15 @@ pub fn run() -> anyhow::Result<()> {
                                     app.error = Some(format!("couldn't save alerts setting: {e}"));
                                 }
                             }
+                            (View::List | View::History | View::Agents, KeyCode::Char('b')) => app.open_board(),
+                            (View::List | View::Board, KeyCode::Char('c')) => app.copy_launch_command(),
+                            (View::Board, KeyCode::Esc | KeyCode::Char('b') | KeyCode::Left | KeyCode::Char('h')) => app.view = View::List,
+                            (View::Board, KeyCode::Down | KeyCode::Char('j')) => app.board.scroll(1),
+                            (View::Board, KeyCode::Up | KeyCode::Char('k')) => app.board.scroll(-1),
+                            (View::Board, KeyCode::PageDown | KeyCode::Char(' ')) => app.board.scroll(10),
+                            (View::Board, KeyCode::PageUp) => app.board.scroll(-10),
+                            (View::Board, KeyCode::Home | KeyCode::Char('g')) => app.board.scroll(isize::MIN / 2),
+                            (View::Board, KeyCode::End | KeyCode::Char('G')) => app.board.scroll(isize::MAX / 2),
                             (View::List, KeyCode::Char('s')) => app.set_sort(app.sort.next(), false),
                             (View::List, KeyCode::Char('S')) => app.set_sort(app.sort, !app.sort_reversed),
                             (View::List, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) => app.open(View::History),
