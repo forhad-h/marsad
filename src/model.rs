@@ -408,8 +408,11 @@ impl Session {
             return;
         }
         let running = !self.stats.background.is_empty();
-        let interrupted =
-            self.stats.turn_ended_at.is_some_and(|t| t > self.last_hook && now - t >= INTERRUPT_GRACE_SECS);
+        // Only a status entered before the turn ended can be its interruption: the transcript's turn
+        // end lands just after Stop, so later background-agent work or approvals are not undone.
+        let interrupted = self.stats.turn_ended_at.is_some_and(|t| {
+            t > self.last_hook && self.status_since <= t && now - t >= INTERRUPT_GRACE_SECS
+        });
         // A session kept active by a background shell has no hook newer than its last turn end.
         let waiting = self.status.needs_user() || (self.status == Status::Active && !running);
         if interrupted && waiting {

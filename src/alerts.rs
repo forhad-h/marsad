@@ -39,7 +39,7 @@ impl Alerts {
 /// Compares each observation with the previous one; the first only records the starting state.
 #[derive(Default)]
 pub struct Detector {
-    last: Option<HashMap<String, (Status, f64)>>,
+    last: Option<HashMap<String, (Status, f64, IdleCause)>>,
 }
 
 impl Detector {
@@ -47,8 +47,9 @@ impl Detector {
         let mut alerts = Alerts::default();
         let mut seen = HashMap::new();
         for s in sessions {
-            let now = (s.status, s.status_since);
-            // Status and the time it was entered: an unchanged pair means nothing new happened.
+            let now = (s.status, s.status_since, s.idle_cause);
+            // Status, the time it was entered and why it went idle: unchanged means nothing new
+            // happened. An idle session's cause alone changes when a late Stop finishes it.
             if let Some(last) = &self.last
                 && let prev = last.get(&s.id)
                 && prev != Some(&now)
@@ -197,6 +198,13 @@ mod tests {
         d.observe([&s]);
         s.set_idle(IdleCause::Finished, 4.0);
         assert!(d.observe([&s]).done);
+        // A Stop that finishes a session already idled as interrupted still sounds done.
+        s.set_status(Status::Active, 4.5);
+        d.observe([&s]);
+        s.set_idle(IdleCause::Interrupted, 5.0);
+        d.observe([&s]);
+        s.set_idle(IdleCause::Finished, 6.0);
+        assert!(d.observe([&s]).done, "the cause changed even though the status did not");
         // A session first seen after startup, already idle, is not news.
         let fresh = session("b", Status::Idle, 5.0);
         assert!(!d.observe([&s, &fresh]).done);

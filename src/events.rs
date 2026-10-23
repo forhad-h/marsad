@@ -216,8 +216,21 @@ mod tests {
         s.stats.turn_ended_at = Some(1.5);
         s.reconcile(10.0);
         assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Interrupted));
+        // A background agent keeps working or asks approval after the main Stop, whose transcript
+        // turn end lands about 0.4s later: neither is an interrupt.
+        let stop = json!({"hook_event_name": "Stop"});
+        for (later, status) in [
+            (json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "agent_id": "a1"}), Status::Active),
+            (json!({"hook_event_name": "PermissionRequest", "tool_name": "Bash", "agent_id": "a1"}), Status::Approve),
+        ] {
+            let mut s = run(&[turn[0].clone(), turn[1].clone(), stop.clone(), later]);
+            s.stats.turn_ended_at = Some(2.4);
+            s.reconcile(10.0);
+            assert_eq!(s.status, status);
+        }
         // Stop with a background shell open, then the follow-up turn after it finishes.
-        let mut s = run(&[turn[0].clone(), turn[1].clone(), json!({"hook_event_name": "Stop"})]);
+        let mut s = run(&[turn[0].clone(), turn[1].clone(), stop]);
+        s.stats.turn_ended_at = Some(2.4);
         s.stats.background = vec!["cargo build".into()];
         s.reconcile(10.0);
         assert_eq!((s.status, s.detail.as_str()), (Status::Active, "background: cargo build"));
