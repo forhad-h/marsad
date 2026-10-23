@@ -202,7 +202,7 @@ stateDiagram-v2
   - A pre-upgrade DB read through `open_readonly` first (no sync) migrates and answers `lifetime()`.
   - Covers AE1. With retention 30, a transcript whose usage is 45 days old lands in `token_days` and `days()` lists that day; `usage_daily` has no row for it.
   - Re-syncing a grown transcript raises that day's `token_days` total; re-syncing an unchanged one leaves it equal.
-  - With a legacy row since D10, through D40, transcript day D20 is not inserted into `token_days` and day D5 is.
+  - With this install's own legacy row since D10, through D40, transcript day D20 is not inserted into `token_days` and day D5 is.
   - After prune, `files` still holds the old transcript, so the next sync does not re-read it (`updated` = 0).
 - **Verification:** `marsad total` on a real install reports at least the previous figure.
 
@@ -298,7 +298,8 @@ stateDiagram-v2
   - Covers AE5. Importing machine A's export into B twice raises B's all-time once.
   - Importing this machine's own export changes nothing.
   - A's legacy row merges into B as a second source; importing it again keeps one row.
-  - B indexed a copy of A's transcripts first: importing A's export removes B's `token_days` rows inside A's legacy range, so all-time counts those days once.
+  - B indexed a copy of A's transcripts first: importing A's export with `--restore` removes B's `token_days` rows inside A's legacy range, so all-time counts those days once, and re-indexing stays blocked.
+  - B has its own session on a day inside A's legacy range: a plain import of A's export keeps it, and B keeps indexing that day.
   - A file with `marsad_export: 2` is refused with a version message; a non-JSON file is refused.
   - A `token_days` row with a missing total is skipped and counted; other rows still import.
   - Imported settings fill unset keys only.
