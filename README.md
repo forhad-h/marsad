@@ -198,12 +198,18 @@ survive only as one sum, so they count toward all time but have no daily rows.
 marsad export                     # writes marsad-export-YYYY-MM-DD.json in the current directory
 marsad export ~/marsad-backup.json
 marsad import ~/marsad-backup.json
+marsad import --restore ~/marsad-backup.json   # this machine's own earlier data, after a reinstall
 ```
 
 The export holds the token counter, the kept history and your settings. `import` merges it into
 this machine's data and prints what it added: days and sessions already present keep the larger
 count, so importing the same file twice, or importing a machine's own export back, never double
 counts. Settings from the file fill only those not set here.
+
+Use `--restore` when the file came from this same machine (a reinstall, or a new data folder) and
+Claude Code's old transcripts are still on disk. Days that a pre-0.4 version had pruned into one
+sum are then kept out of the day counter here, so they aren't counted twice. Without it, an
+import never removes this machine's own days.
 
 ```sh
 marsad report --by skill --days 7          # skills by ≈tokens this week

@@ -62,7 +62,13 @@ enum Cmd {
         file: Option<PathBuf>,
     },
     /// Merge a `marsad export` file into this machine's data; importing twice never double counts.
-    Import { file: PathBuf },
+    Import {
+        file: PathBuf,
+        /// The file is this machine's own earlier data (a reinstall with the old transcripts still
+        /// on disk): days its pre-0.4 totals already count are dropped from the day counter.
+        #[arg(long)]
+        restore: bool,
+    },
     /// How full this session's context is, and the automatic handoff warning (--warn).
     Context(context::ContextArgs),
     /// Update marsad to the latest release (or turn automatic updates on/off with --auto).
@@ -113,7 +119,7 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::Status(args)) => live::status(args),
         Some(Cmd::Context(args)) => context::run(args),
         Some(Cmd::Export { file }) => portable::export(file),
-        Some(Cmd::Import { file }) => portable::import(&file),
+        Some(Cmd::Import { file, restore }) => portable::import(&file, restore),
         Some(Cmd::Update(args)) => update::run(args),
         None => app::run(),
     }

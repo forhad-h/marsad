@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS legacy_totals (  -- days pruned by versions before 0.
     cache_write INTEGER,
     total       INTEGER
 );
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);  -- install_id, schema, restored:<source>
 CREATE TABLE IF NOT EXISTS lifetime (      -- frozen pre-0.4 data, copied into legacy_totals; no longer written
     id          INTEGER PRIMARY KEY CHECK (id = 1),
     since       TEXT,
@@ -171,9 +171,16 @@ pub fn install_id(conn: &Connection) -> anyhow::Result<String> {
     Ok(conn.query_row("SELECT value FROM meta WHERE key = 'install_id'", [], |r| r.get(0))?)
 }
 
+/// Legacy rows whose days stay out of the day counter: this install's own, and those restored
+/// with `marsad import --restore`. Another machine's merged legacy sum covers only its sessions,
+/// so it never blocks this machine's days.
+pub(crate) const BLOCKING_LEGACY: &str = "l.since IS NOT NULL AND l.through IS NOT NULL
+    AND (l.source = (SELECT value FROM meta WHERE key = 'install_id')
+         OR EXISTS (SELECT 1 FROM meta WHERE key = 'restored:' || l.source))";
+
 /// `[since, through)` day ranges that only legacy totals count.
 pub fn legacy_ranges(conn: &Connection) -> anyhow::Result<Vec<(String, String)>> {
-    let mut stmt = conn.prepare("SELECT since, through FROM legacy_totals WHERE since IS NOT NULL AND through IS NOT NULL")?;
+    let mut stmt = conn.prepare(&format!("SELECT l.since, l.through FROM legacy_totals l WHERE {BLOCKING_LEGACY}"))?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
@@ -955,7 +962,7 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         prepare(&mut conn).unwrap();
         conn.execute(
-            "INSERT INTO legacy_totals VALUES ('old', ?1, ?2, 0, 10, 0, 0, 10)",
+            "INSERT INTO legacy_totals SELECT value, ?1, ?2, 0, 10, 0, 0, 10 FROM meta WHERE key = 'install_id'",
             [day_n_ago(41), day_n_ago(11)],
         )
         .unwrap();

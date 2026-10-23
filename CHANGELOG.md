@@ -16,6 +16,7 @@ GitHub release. Keep each bullet to one short line.
 - `marsad context` shows how full a session's context is
 - Claude is told once when a session's context passes 80%, so it can write a handoff (`marsad context --warn`)
 - `marsad export` and `marsad import` back up or move all data; importing twice never double counts
+- `marsad import --restore` brings back this machine's own data after a reinstall
 
 ## 0.3.2 - 2026-10-11
 

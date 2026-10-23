@@ -108,7 +108,7 @@ struct Merged {
 }
 
 /// Merges an export into `conn`. A table that can't be read is reported and the others continue.
-fn import_value(conn: &mut Connection, export: &Value) -> anyhow::Result<Vec<(&'static str, Result<Merged, String>)>> {
+fn import_value(conn: &mut Connection, export: &Value, restore: bool) -> anyhow::Result<Vec<(&'static str, Result<Merged, String>)>> {
     match export["marsad_export"].as_u64() {
         Some(FORMAT) => {}
         Some(v) => bail!("this file is export format {v}; this marsad reads format {FORMAT}. Update marsad first"),
@@ -119,14 +119,16 @@ fn import_value(conn: &mut Connection, export: &Value) -> anyhow::Result<Vec<(&'
         let rows = export.get(t.name).and_then(Value::as_array);
         let res = match rows {
             None => Err("missing from the file".to_string()),
-            Some(rows) => merge_table(conn, t, rows).map_err(|e| e.to_string()),
+            Some(rows) => merge_table(conn, t, rows, restore).map_err(|e| e.to_string()),
         };
         results.push((t.name, res));
     }
     Ok(results)
 }
 
-fn merge_table(conn: &mut Connection, t: &Table, rows: &[Value]) -> anyhow::Result<Merged> {
+/// `restore` treats the file as this machine's own earlier data, so its legacy ranges block the
+/// day counter here too.
+fn merge_table(conn: &mut Connection, t: &Table, rows: &[Value], restore: bool) -> anyhow::Result<Merged> {
     let tx = conn.transaction()?;
     let count = |tx: &rusqlite::Transaction| -> anyhow::Result<usize> {
         Ok(tx.query_row(&format!("SELECT COUNT(*) FROM {}", t.name), [], |r| r.get::<_, i64>(0))? as usize)
@@ -159,12 +161,18 @@ fn merge_table(conn: &mut Connection, t: &Table, rows: &[Value]) -> anyhow::Resu
             stmt.execute(params_from_iter(values))?;
         }
     }
-    if t.name == "legacy_totals" {
-        // A restore onto a machine that indexed copies of the same transcripts must not count
-        // those days in both the legacy sum and the day counter.
+    if t.name == "legacy_totals" && restore {
+        // This machine may have indexed copies of the same transcripts, so the restored days
+        // must not count in both the legacy sum and the day counter.
+        for source in rows.iter().filter_map(|r| r["source"].as_str()) {
+            tx.execute("INSERT OR IGNORE INTO meta VALUES ('restored:' || ?1, '1')", [source])?;
+        }
         tx.execute(
-            "DELETE FROM token_days WHERE EXISTS (SELECT 1 FROM legacy_totals l
-               WHERE token_days.day >= l.since AND token_days.day < l.through)",
+            &format!(
+                "DELETE FROM token_days WHERE EXISTS (SELECT 1 FROM legacy_totals l
+                   WHERE {} AND token_days.day >= l.since AND token_days.day < l.through)",
+                store::BLOCKING_LEGACY
+            ),
             [],
         )?;
     }
@@ -200,12 +208,12 @@ pub fn export(file: Option<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn import(file: &Path) -> anyhow::Result<()> {
+pub fn import(file: &Path, restore: bool) -> anyhow::Result<()> {
     let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     let value: Value = serde_json::from_str(&text).context("not a marsad export file (invalid JSON)")?;
     let mut conn = store::open()?;
     let before = store::lifetime(&conn)?.total;
-    for (table, res) in import_value(&mut conn, &value)? {
+    for (table, res) in import_value(&mut conn, &value, restore)? {
         match res {
             Ok(m) => {
                 let skipped = if m.skipped > 0 { format!(", {} unreadable skipped", m.skipped) } else { String::new() };
@@ -257,7 +265,8 @@ mod tests {
     }
 
     const MACHINE_A: &str = "
-        INSERT INTO legacy_totals VALUES ('A', '2026-07-01', '2026-08-01', 0, 0, 0, 0, 1000);
+        INSERT INTO legacy_totals
+          SELECT value, '2026-07-01', '2026-08-01', 0, 0, 0, 0, 1000 FROM meta WHERE key = 'install_id';
         INSERT INTO token_days VALUES ('sa', 'main', '2026-09-01', 0, 10, 0, 0, 10, 1);
         INSERT INTO usage_daily VALUES ('sa', 'main', 'main', '2026-09-01', 0, 10, 0, 0, 10, 1);
         INSERT INTO sessions (session_id, project) VALUES ('sa', 'web');
@@ -271,13 +280,13 @@ mod tests {
         assert_eq!(all_time(&b), 7);
 
         // Covers AE5.
-        let first = import_value(&mut b, &export).unwrap();
+        let first = import_value(&mut b, &export, false).unwrap();
         assert_eq!(all_time(&b), 7 + 10 + 1000);
         assert!(first.iter().all(|(_, r)| r.as_ref().is_ok_and(|m| m.skipped == 0)));
-        let again = import_value(&mut b, &export).unwrap();
+        let again = import_value(&mut b, &export, false).unwrap();
         assert_eq!(all_time(&b), 7 + 10 + 1000, "a second import adds nothing");
         assert!(again.iter().all(|(_, r)| r.as_ref().is_ok_and(|m| m.added == 0)));
-        let legacy: i64 = b.query_row("SELECT COUNT(*) FROM legacy_totals WHERE source = 'A'", [], |r| r.get(0)).unwrap();
+        let legacy: i64 = b.query_row("SELECT COUNT(*) FROM legacy_totals", [], |r| r.get(0)).unwrap();
         assert_eq!(legacy, 1);
     }
 
@@ -286,8 +295,19 @@ mod tests {
         let mut a = db(MACHINE_A);
         let before = all_time(&a);
         let export = export_value(&a, Map::new()).unwrap();
-        import_value(&mut a, &export).unwrap();
+        import_value(&mut a, &export, false).unwrap();
         assert_eq!(all_time(&a), before);
+    }
+
+    #[test]
+    fn merging_another_machine_keeps_this_machines_days_in_its_pruned_range() {
+        let a = db(MACHINE_A);
+        let export = export_value(&a, Map::new()).unwrap();
+        // B's own session on a day A pruned before 0.4: A's legacy sum doesn't include it.
+        let mut b = db("INSERT INTO token_days VALUES ('own', 'main', '2026-07-15', 0, 300, 0, 0, 300, 1);");
+        import_value(&mut b, &export, false).unwrap();
+        assert_eq!(all_time(&b), 1000 + 10 + 300);
+        assert!(store::legacy_ranges(&b).unwrap().is_empty(), "B keeps indexing its own days in A's range");
     }
 
     #[test]
@@ -296,16 +316,20 @@ mod tests {
         let export = export_value(&a, Map::new()).unwrap();
         // B indexed a copy of a transcript whose 2026-07-15 usage is inside A's legacy sum.
         let mut b = db("INSERT INTO token_days VALUES ('old', 'main', '2026-07-15', 0, 300, 0, 0, 300, 1);");
-        import_value(&mut b, &export).unwrap();
+        import_value(&mut b, &export, true).unwrap();
         assert_eq!(all_time(&b), 1000 + 10, "the copied day is counted by the legacy sum only");
+        let ranges = store::legacy_ranges(&b).unwrap();
+        assert_eq!(ranges, [("2026-07-01".to_string(), "2026-08-01".to_string())], "re-indexing stays blocked");
+        import_value(&mut b, &export, false).unwrap();
+        assert_eq!(all_time(&b), 1000 + 10, "a later plain import of the same file changes nothing");
     }
 
     #[test]
     fn bad_files_and_rows_are_reported() {
         let mut b = db("");
         let newer = json!({ "marsad_export": 2 });
-        assert!(import_value(&mut b, &newer).unwrap_err().to_string().contains("format 2"));
-        assert!(import_value(&mut b, &json!({ "hello": 1 })).is_err());
+        assert!(import_value(&mut b, &newer, false).unwrap_err().to_string().contains("format 2"));
+        assert!(import_value(&mut b, &json!({ "hello": 1 }), false).is_err());
 
         let partial = json!({
             "marsad_export": 1,
@@ -315,7 +339,7 @@ mod tests {
                 { "session_id": "s", "agent_id": "main", "day": "2026-09-02", "input": 0, "output": 1 },
             ],
         });
-        let res = import_value(&mut b, &partial).unwrap();
+        let res = import_value(&mut b, &partial, false).unwrap();
         let days = res.iter().find(|(t, _)| *t == "token_days").unwrap();
         assert_eq!(days.1, Ok(Merged { added: 1, known: 0, skipped: 1 }));
         let sessions = res.iter().find(|(t, _)| *t == "sessions").unwrap();
