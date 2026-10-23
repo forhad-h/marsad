@@ -274,6 +274,11 @@ impl App {
             self.refresh_transcripts();
             self.refresh_snapshots();
         }
+        // Every refresh, so a Stop that leaves a background shell never shows as idle.
+        let now = crate::now();
+        for s in self.sessions.values_mut() {
+            s.reconcile(now);
+        }
     }
 
     /// Marks sessions whose Claude Code process is gone (crash, closed terminal) as ended.

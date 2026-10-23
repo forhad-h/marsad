@@ -30,6 +30,21 @@ impl Status {
     }
 }
 
+/// Why a session last went idle; only a finished turn plays the done sound.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IdleCause {
+    /// Session start or an idle notification.
+    #[default]
+    Other,
+    /// Claude finished its turn (Stop) with no background shell left running.
+    Finished,
+    /// The user pressed Esc or interrupted the turn, which fires no hook.
+    Interrupted,
+}
+
+/// How long a turn end with no later hook waits for a late Stop before it counts as an interrupt.
+const INTERRUPT_GRACE_SECS: f64 = 2.0;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input: u64,
@@ -337,6 +352,9 @@ pub struct Session {
     /// When marsad first saw the session; a stable tie-breaker for sorting.
     pub started: f64,
     pub last_event: f64,
+    /// Time of the latest hook event from the main agent (not a subagent).
+    pub last_hook: f64,
+    pub idle_cause: IdleCause,
     /// What the session is doing right now, e.g. "Bash: cargo test".
     pub detail: String,
     pub permission_mode: Option<String>,
@@ -358,6 +376,8 @@ impl Session {
             status_since: ts,
             started: ts,
             last_event: ts,
+            last_hook: ts,
+            idle_cause: IdleCause::Other,
             detail: String::new(),
             permission_mode: None,
             model: None,
@@ -373,6 +393,33 @@ impl Session {
         if self.status != status {
             self.status = status;
             self.status_since = ts;
+        }
+    }
+
+    pub fn set_idle(&mut self, cause: IdleCause, ts: f64) {
+        self.set_status(Status::Idle, ts);
+        self.idle_cause = cause;
+    }
+
+    /// Corrects the hook-driven status with what only the transcript knows: a turn that ended
+    /// without a Stop was interrupted, and a background shell still running keeps the session active.
+    pub fn reconcile(&mut self, now: f64) {
+        if self.status == Status::Ended {
+            return;
+        }
+        let background = self.stats.background.clone();
+        let interrupted =
+            self.stats.turn_ended_at.is_some_and(|t| t > self.last_hook && now - t >= INTERRUPT_GRACE_SECS);
+        // A session kept active by a background shell has no hook newer than its last turn end.
+        let waiting = self.status.needs_user() || (self.status == Status::Active && background.is_empty());
+        if interrupted && waiting {
+            self.set_idle(IdleCause::Interrupted, now);
+            self.detail.clear();
+        }
+        if self.status == Status::Idle && !background.is_empty() {
+            self.set_status(Status::Active, now);
+            let more = if background.len() > 1 { format!(" +{}", background.len() - 1) } else { String::new() };
+            self.detail = format!("background: {}{more}", background[0]);
         }
     }
 
@@ -613,6 +660,51 @@ mod tests {
             s.set_status(idle, 1_060.0);
             assert_eq!(s.running_secs(9_999.0), 100.0, "{idle:?} adds nothing");
         }
+    }
+
+    /// A session in `status` since the hook at `hook`, whose transcript recorded a turn end at `ended`.
+    fn reconciling(status: Status, hook: f64, ended: Option<f64>, background: &[&str]) -> Session {
+        let mut s = Session::new("s", 0.0);
+        s.set_status(status, hook);
+        s.last_hook = hook;
+        s.stats.turn_ended_at = ended;
+        s.stats.background = background.iter().map(|b| b.to_string()).collect();
+        s
+    }
+
+    #[test]
+    fn interrupts_go_idle_after_a_grace_period() {
+        for status in [Status::Question, Status::Approve, Status::Active] {
+            let mut s = reconciling(status, 10.0, Some(12.0), &[]);
+            s.reconcile(13.0);
+            assert_eq!(s.status, status, "{status:?}: within the grace period, Stop may still arrive");
+            s.reconcile(15.0);
+            assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Interrupted), "{status:?}");
+        }
+        // A turn end from before the latest hook belongs to an earlier turn.
+        let mut s = reconciling(Status::Active, 13.0, Some(12.0), &[]);
+        s.reconcile(20.0);
+        assert_eq!(s.status, Status::Active);
+        // Ended sessions are left alone.
+        let mut s = reconciling(Status::Ended, 10.0, Some(12.0), &["cargo build"]);
+        s.reconcile(20.0);
+        assert_eq!(s.status, Status::Ended);
+    }
+
+    #[test]
+    fn background_shells_keep_a_session_active() {
+        let mut s = reconciling(Status::Idle, 10.0, Some(10.0), &["cargo build", "npm test"]);
+        s.idle_cause = IdleCause::Finished;
+        s.reconcile(11.0);
+        assert_eq!((s.status, s.detail.as_str()), (Status::Active, "background: cargo build +1"));
+        // It stays active while they run, even though the turn ended without a later hook.
+        s.reconcile(30.0);
+        assert_eq!(s.status, Status::Active);
+        // Escaping a question while a shell runs still leaves the question, then shows the shell.
+        let mut s = reconciling(Status::Question, 10.0, Some(12.0), &["cargo build"]);
+        s.reconcile(15.0);
+        assert_eq!(s.status, Status::Active);
+        assert_eq!(s.idle_cause, IdleCause::Interrupted);
     }
 
     #[test]

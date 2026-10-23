@@ -1,6 +1,6 @@
 //! Turns hook events into per-session state.
 
-use crate::model::{Session, Status, Subagent};
+use crate::model::{IdleCause, Session, Status, Subagent};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -11,6 +11,9 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
     let ts = ev["ts"].as_f64().unwrap_or_else(crate::now);
     let session = sessions.entry(id.to_string()).or_insert_with(|| Session::new(id, ts));
     session.last_event = session.last_event.max(ts);
+    if ev.get("agent_id").is_none() {
+        session.last_hook = session.last_hook.max(ts);
+    }
 
     if let Some(cwd) = s("cwd") {
         // Subagents can run elsewhere; keep the session's own directory once known.
@@ -40,7 +43,7 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
 
     match event {
         "SessionStart" => {
-            session.set_status(Status::Idle, ts);
+            session.set_idle(IdleCause::Other, ts);
             session.detail.clear();
         }
         "UserPromptSubmit" => {
@@ -84,7 +87,7 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
                 session.set_status(Status::Question, ts);
                 session.detail = s("message").unwrap_or("").to_string();
             }
-            "idle_prompt" => session.set_status(Status::Idle, ts),
+            "idle_prompt" if session.status != Status::Idle => session.set_idle(IdleCause::Other, ts),
             _ => {}
         },
         "Elicitation" => {
@@ -92,7 +95,7 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
             session.detail = s("message").unwrap_or("MCP input requested").to_string();
         }
         "Stop" => {
-            session.set_status(Status::Idle, ts);
+            session.set_idle(IdleCause::Finished, ts);
             session.detail.clear();
         }
         "StopFailure" => {
@@ -188,6 +191,50 @@ mod tests {
         assert_eq!(run(std::slice::from_ref(&perm)).status, Status::Question);
         // A permission notification for anything else is an approval.
         assert_eq!(run(&[note]).status, Status::Approve);
+    }
+
+    #[test]
+    fn reconcile_tells_finished_from_interrupted_turns() {
+        use crate::model::IdleCause;
+        let turn = [
+            json!({"hook_event_name": "UserPromptSubmit", "prompt": "go"}),
+            json!({"hook_event_name": "PreToolUse", "tool_name": "Read"}),
+        ];
+        // A normal finish: Stop lands just after (or before) the transcript's turn end.
+        for ended in [1.5, 2.5] {
+            let mut s = run(&[turn[0].clone(), turn[1].clone(), json!({"hook_event_name": "Stop"})]);
+            s.stats.turn_ended_at = Some(ended);
+            s.reconcile(10.0);
+            assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Finished));
+        }
+        // Esc, then a new prompt: the old turn end must not idle the new turn.
+        let mut s = run(&[turn[0].clone(), turn[1].clone(), json!({"hook_event_name": "UserPromptSubmit", "prompt": "no, this"})]);
+        s.stats.turn_ended_at = Some(1.5);
+        s.reconcile(10.0);
+        assert_eq!(s.status, Status::Active);
+        // A subagent's later tool call is not the main agent's hook.
+        let mut s = run(&[turn[0].clone(), turn[1].clone(), json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "agent_id": "a1"})]);
+        s.stats.turn_ended_at = Some(1.5);
+        s.reconcile(10.0);
+        assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Interrupted));
+        // Stop with a background shell open, then the follow-up turn after it finishes.
+        let mut s = run(&[turn[0].clone(), turn[1].clone(), json!({"hook_event_name": "Stop"})]);
+        s.stats.background = vec!["cargo build".into()];
+        s.reconcile(10.0);
+        assert_eq!((s.status, s.detail.as_str()), (Status::Active, "background: cargo build"));
+        s.stats.background.clear();
+        s.reconcile(11.0);
+        assert_eq!(s.status, Status::Active, "stays active until the follow-up turn's Stop");
+        for (i, e) in [json!({"hook_event_name": "UserPromptSubmit"}), json!({"hook_event_name": "Stop"})].iter().enumerate() {
+            let mut e = e.clone();
+            e["session_id"] = json!("s1");
+            e["ts"] = json!(20.0 + i as f64);
+            let mut map = HashMap::from([("s1".to_string(), s)]);
+            apply(&mut map, &e);
+            s = map.remove("s1").unwrap();
+        }
+        s.reconcile(30.0);
+        assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Finished));
     }
 
     #[test]
