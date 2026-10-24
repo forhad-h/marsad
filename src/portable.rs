@@ -72,11 +72,23 @@ const TABLES: &[Table] = &[
             output = excluded.output, cache_read = excluded.cache_read, cache_write = excluded.cache_write,
             total = excluded.total WHERE excluded.total > skill_runs.total",
     },
+    Table {
+        name: "skills_seen",
+        columns: &["skill", "first_day"],
+        key: &["skill"],
+        merge: "DO UPDATE SET first_day = MIN(COALESCE(first_day, excluded.first_day), COALESCE(excluded.first_day, first_day))",
+    },
+    Table {
+        name: "badge_best",
+        columns: &["key", "value"],
+        key: &["key"],
+        merge: "DO UPDATE SET value = MAX(value, excluded.value)",
+    },
 ];
 
 /// Columns that must hold a number for a row to be importable (the rest may be null).
 fn numeric(column: &str) -> bool {
-    matches!(column, "input" | "output" | "cache_read" | "cache_write" | "total" | "turns" | "seq")
+    matches!(column, "input" | "output" | "cache_read" | "cache_write" | "total" | "turns" | "seq" | "value")
 }
 
 /// The whole export as JSON.
@@ -123,6 +135,8 @@ fn import_value(conn: &mut Connection, export: &Value, restore: bool) -> anyhow:
         };
         results.push((t.name, res));
     }
+    // An export from before skills_seen still brings its skill runs' skills.
+    store::backfill_skills_seen(conn)?;
     Ok(results)
 }
 
@@ -322,6 +336,59 @@ mod tests {
         assert_eq!(ranges, [("2026-07-01".to_string(), "2026-08-01".to_string())], "re-indexing stays blocked");
         import_value(&mut b, &export, false).unwrap();
         assert_eq!(all_time(&b), 1000 + 10, "a later plain import of the same file changes nothing");
+    }
+
+    fn rows(conn: &Connection, sql: &str) -> Vec<Vec<Value>> {
+        store::query(conn, sql, &[]).unwrap().rows
+    }
+
+    #[test]
+    fn best_values_and_seen_skills_merge_upward() {
+        let a = db("INSERT INTO badge_best VALUES ('rank', 500);
+                    INSERT INTO badge_best VALUES ('streak', 3);
+                    INSERT INTO badge_best VALUES ('skills', 4);
+                    INSERT INTO skills_seen VALUES ('ce-plan', '2026-09-01');
+                    INSERT INTO skills_seen VALUES ('ce-work', '2026-09-05');");
+        let export = export_value(&a, Map::new()).unwrap();
+        assert_eq!(export["badge_best"].as_array().map(Vec::len), Some(3));
+        let mut b = db("INSERT INTO badge_best VALUES ('rank', 900);
+                        INSERT INTO badge_best VALUES ('streak', 1);
+                        INSERT INTO skills_seen VALUES ('ce-plan', '2026-10-01');
+                        INSERT INTO skills_seen VALUES ('ce-work', '2026-08-01');");
+        import_value(&mut b, &export, false).unwrap();
+        // Covers AE1: a lower import never shrinks a best value.
+        assert_eq!(
+            rows(&b, "SELECT key, value FROM badge_best ORDER BY key"),
+            [[json!("rank"), json!(900)], [json!("skills"), json!(4)], [json!("streak"), json!(3)]]
+        );
+        assert_eq!(
+            rows(&b, "SELECT skill, first_day FROM skills_seen ORDER BY skill"),
+            [[json!("ce-plan"), json!("2026-09-01")], [json!("ce-work"), json!("2026-08-01")]],
+            "the earlier first day wins"
+        );
+    }
+
+    #[test]
+    fn an_export_from_before_badges_still_imports() {
+        let a = db(MACHINE_A);
+        let mut export = export_value(&a, Map::new()).unwrap();
+        let obj = export.as_object_mut().unwrap();
+        obj.remove("skills_seen");
+        obj.remove("badge_best");
+        let mut b = db("");
+        let res = import_value(&mut b, &export, false).unwrap();
+        for (table, r) in &res {
+            match *table {
+                "skills_seen" | "badge_best" => assert_eq!(r.as_ref().unwrap_err(), "missing from the file"),
+                _ => assert!(r.is_ok(), "{table} imports"),
+            }
+        }
+        assert_eq!(all_time(&b), 1000 + 10);
+        assert_eq!(
+            rows(&b, "SELECT skill, first_day FROM skills_seen"),
+            [[json!("ce-plan"), json!("2026-09-01")]],
+            "imported skill runs still count as seen skills"
+        );
     }
 
     #[test]

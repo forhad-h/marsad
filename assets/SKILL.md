@@ -80,6 +80,10 @@ Tables:
 - `lifetime` — frozen pre-0.4 data, already copied into `legacy_totals`; don't add it.
 - `skill_runs(session_id, agent_id, agent_type, seq, skill, via, at, day, turns, input, output, cache_read, cache_write, total)` —
   one row per skill invocation; `via` is `tool` (Claude invoked it) or `command` (user typed `/skill`).
+- `skills_seen(skill, first_day)` — every skill ever run, with the day of its earliest known run;
+  never pruned. Use it for distinct skills older than the retention window.
+- `badge_best(key, value)` — the highest value ever computed per badge stat (rank total and each
+  achievement); never lowered, so pruning or an import never revokes a badge.
 
 Example: skills with the highest average cost per call this week
 
