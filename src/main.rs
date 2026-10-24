@@ -1,5 +1,6 @@
 mod alerts;
 mod app;
+mod badge_art;
 mod board;
 mod clipboard;
 mod context;
