@@ -71,7 +71,6 @@ pub struct Snapshot {
     pub all_time: i64,
     pub badges: Badges,
     /// `git config user.name`, for the card.
-    #[allow(dead_code)] // read by the card once it shows the name
     pub name: Option<String>,
     pub work: Work,
     /// The user's home directory: cwd components at or above it are never names.
@@ -545,12 +544,13 @@ fn card_data(s: &Snapshot) -> card::CardData {
     card::CardData {
         tier: s.badges.rank.tier,
         rank: s.badges.rank.name.to_string(),
-        today: n(s.today),
+        name: s.name.clone(),
         week: n(s.week),
         month: n(s.month),
         all_time: n(s.all_time),
         daily_average: n(s.daily_average),
         date: s.date.clone(),
+        achievements: card::achievements(&s.badges),
     }
 }
 
@@ -1022,7 +1022,7 @@ mod tests {
         let s = acme();
         assert_eq!(
             post(&s, " I shipped it. "),
-            "I shipped it.\n\nToday 12.0M tokens · last 7 days 12.0M · last 30 days 12.0M (400.1k/day)\nAll-time 344.0M tokens · Rank: Expert"
+            "I shipped it.\n\nToday 12M tokens · last 7 days 12M · last 30 days 12M (400.1k/day)\nAll-time 344M tokens · Rank: Expert"
         );
     }
 
