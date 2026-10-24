@@ -106,6 +106,8 @@ pub struct Usage {
     pub skill_idx: usize,
     pub drill: Option<Drill>,
     pub syncing: bool,
+    /// Set when a background sync finishes; the dashboard takes it to refresh the badges.
+    pub synced: bool,
     pub error: Option<String>,
     conn: Option<Connection>,
     /// Delivers whether a background sync changed any rows.
@@ -128,6 +130,7 @@ impl Usage {
             skill_idx: 0,
             drill: None,
             syncing: false,
+            synced: false,
             error: None,
             conn: None,
             rx: None,
@@ -149,6 +152,7 @@ impl Usage {
             match res {
                 Ok(changed) => {
                     self.error = None;
+                    self.synced = true;
                     if changed {
                         self.reload();
                     }

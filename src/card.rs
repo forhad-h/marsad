@@ -1,6 +1,4 @@
 //! The share card: a 1200×627 PNG with the rank badge, the rank, the token stats and the earned achievements on an ivory ground framed in girih, drawn as SVG and rasterized by resvg with a bundled font.
-// used by the share flow (U5)
-#![allow(dead_code)]
 
 use crate::badge_art::{self, Point, Rgb};
 use crate::badges::Badges;

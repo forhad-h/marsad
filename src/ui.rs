@@ -6,8 +6,12 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
+use crate::badges::{Badges, Level as BadgeLevel};
+use crate::share_view::{Mark, Screen, ShareView};
+use ratatui::symbols::Marker;
+use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
 use ratatui::widgets::{
-    Block, BorderType, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table,
+    Block, BorderType, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table,
     TableState, Wrap,
 };
 
@@ -210,6 +214,24 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("q", "quit".into()),
             ]
         }
+        (View::Badges, _) => {
+            draw_badges(f, body, app);
+            vec![("p", "share".into()), ("esc", "back".into()), ("q", "quit".into())]
+        }
+        (View::Share, _) => {
+            if app.share_from() == View::Badges {
+                draw_badges(f, body, app);
+            } else {
+                draw_list(f, body, app, &visible);
+            }
+            match &app.share {
+                Some(share) => {
+                    draw_share(f, body, share, app.tick);
+                    share.keys().into_iter().map(|(k, label)| (k, label.to_string())).collect()
+                }
+                None => vec![],
+            }
+        }
         (View::Board, _) => {
             draw_board(f, body, app);
             vec![
@@ -228,6 +250,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("enter", "history".into()),
                 ("tab", "subagents".into()),
                 ("u", "usage".into()),
+                ("B", "badges".into()),
+                ("p", "share".into()),
                 ("b", "board".into()),
                 ("c", "coord cmd".into()),
                 ("a", ended.into()),
@@ -242,12 +266,13 @@ pub fn draw(f: &mut Frame, app: &App) {
         spans.push(k.to_string().bold());
         spans.push(format!(" {label}  ").dark_gray());
     }
-    let note = match (&app.error, &app.info, &app.update) {
-        (Some(e), _, _) => Some((format!("{e} "), Color::Red)),
-        (None, Some(i), _) => Some((i.clone(), Color::Green)),
-        (None, None, Some(Notice::Available(v))) => Some((format!("v{v} available · run `marsad update` "), Color::Yellow)),
-        (None, None, Some(Notice::Installed(v))) => Some((format!("updated to v{v} · restart marsad "), Color::Yellow)),
-        (None, None, None) => None,
+    let note = match (&app.error, &app.info, app.announcing(), &app.update) {
+        (Some(e), ..) => Some((format!("{e} "), Color::Red)),
+        (None, Some(i), ..) => Some((i.clone(), Color::Green)),
+        (None, None, Some(a), _) => Some((format!("★ {a} "), Color::Green)),
+        (None, None, None, Some(Notice::Available(v))) => Some((format!("v{v} available · run `marsad update` "), Color::Yellow)),
+        (None, None, None, Some(Notice::Installed(v))) => Some((format!("updated to v{v} · restart marsad "), Color::Yellow)),
+        (None, None, None, None) => None,
     };
     if let Some(note) = &app.copy_note {
         draw_copy_note(f, copy_note, note);
@@ -354,6 +379,198 @@ fn draw_copy_note(f: &mut Frame, area: Rect, note: &crate::app::CopyNote) {
     }
     lines.push(Line::from(dim("or run `marsad coordination` in another terminal")));
     f.render_widget(Paragraph::new(lines), area);
+}
+
+fn rgb(c: crate::badge_art::Rgb) -> Color {
+    Color::Rgb(c.0, c.1, c.2)
+}
+
+/// `c` lightened towards white by `t`, so dark glazes stay visible on a dark terminal.
+fn lighten(c: crate::badge_art::Rgb, t: f64) -> Color {
+    let m = |x: u8| (x as f64 + (255.0 - x as f64) * t).round() as u8;
+    Color::Rgb(m(c.0), m(c.1), m(c.2))
+}
+
+fn level_color(level: usize) -> Color {
+    match level {
+        3 => Color::Rgb(0xe6, 0xb8, 0x3c),
+        2 => Color::Rgb(0xc0, 0xc8, 0xd0),
+        1 => Color::Rgb(0xcd, 0x7f, 0x32),
+        _ => Color::DarkGray,
+    }
+}
+
+/// An achievement's value in its unit: tokens in short form, counts as they are.
+fn badge_value(value: i64, unit: &str) -> String {
+    match unit {
+        "tokens" => format!("{} tokens", crate::card::fmt_count(value.max(0) as u64)),
+        _ => format!("{value} {unit}"),
+    }
+}
+
+/// The rank, its progress, and the four achievements with their levels as text, beside the badge art
+/// when there is room for it; the art is dropped first so the rows never clip.
+fn draw_badges(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().dark_gray()).title(" Badges ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let Some(b) = &app.badges else {
+        f.render_widget(Paragraph::new(dim(" Reading your badges…")), inner);
+        return;
+    };
+    let rows = 4 + 3 * b.achievements.len() as u16;
+    let art_width = (inner.height.min(26) * 2 + 2).min(inner.width.saturating_sub(48));
+    let text = if inner.height >= 12 && art_width >= 26 {
+        let [art, _, text] = Layout::horizontal([Constraint::Length(art_width), Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+        draw_badge_art(f, art, b.rank.tier);
+        text
+    } else {
+        inner
+    };
+    let [_, text, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(rows.min(text.height)), Constraint::Fill(1)]).areas(text);
+    f.render_widget(Paragraph::new(badge_lines(b, text.width as usize)), text);
+}
+
+fn badge_lines(b: &Badges, width: usize) -> Vec<Line<'static>> {
+    let palette = crate::badge_art::badge(b.rank.tier).palette;
+    // Room for the longest label after a bar, " 1000 subagents to gold".
+    let bar_width = width.saturating_sub(26).clamp(10, 40);
+    let tokens = crate::card::fmt_count(b.rank.tokens.max(0) as u64);
+    let next = match (b.rank.next, b.rank.next_threshold) {
+        (Some(name), Some(at)) => format!("{tokens} tokens · {} to {name}", crate::card::fmt_count((at - b.rank.tokens).max(0) as u64)),
+        _ => format!("{tokens} tokens · top tier"),
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(b.rank.name.to_string(), Style::new().fg(lighten(palette.line, 0.0)).bold()),
+            dim(format!("   rank {} of {}", b.rank.tier + 1, crate::badges::TIERS.len())),
+        ]),
+        Line::from(vec![
+            Span::styled(bar(b.rank.progress, bar_width), Style::new().fg(lighten(palette.field, 0.35))),
+            Span::raw(format!(" {:.0}%", b.rank.progress * 100.0)),
+        ]),
+        Line::from(dim(next)),
+        Line::from(""),
+    ];
+    for a in &b.achievements {
+        lines.extend(achievement_lines(a, bar_width));
+    }
+    lines
+}
+
+fn achievement_lines(a: &BadgeLevel, bar_width: usize) -> Vec<Line<'static>> {
+    let level = a.level_name.unwrap_or("not yet");
+    let progress = match (a.next_level, a.next_threshold) {
+        (Some(next), Some(at)) => format!(" {} to {next}", badge_value((at - a.value).max(0), a.unit)),
+        _ => " complete".to_string(),
+    };
+    vec![
+        Line::from(vec![
+            Span::styled(format!("{:<16}", a.name), Style::new().bold()),
+            Span::styled(format!("{level:<8}"), Style::new().fg(level_color(a.level)).bold()),
+            Span::raw(badge_value(a.value, a.unit)),
+        ]),
+        Line::from(vec![Span::styled(bar(a.progress, bar_width), Style::new().fg(level_color(a.level + 1))), dim(progress)]),
+        Line::from(""),
+    ]
+}
+
+/// The tier's badge drawn with braille lines: rim, band ornament and tile outlines.
+fn draw_badge_art(f: &mut Frame, area: Rect, tier: usize) {
+    let badge = crate::badge_art::badge(tier);
+    let (metal, field) = (badge.metal, badge.palette.field);
+    let segments = badge.segments();
+    let canvas = Canvas::default().marker(Marker::Braille).x_bounds([-1.05, 1.05]).y_bounds([-1.05, 1.05]).paint(move |ctx| {
+        for &((x1, y1), (x2, y2), role) in &segments {
+            let color = match role {
+                crate::badge_art::Role::Rim => rgb(metal.mid),
+                crate::badge_art::Role::Band => rgb(metal.light),
+                crate::badge_art::Role::Tile => lighten(field, 0.3),
+            };
+            ctx.draw(&CanvasLine { x1, y1, x2, y2, color });
+        }
+    });
+    f.render_widget(canvas, area);
+}
+
+/// The share view, drawn as a modal over the view it was opened from.
+fn draw_share(f: &mut Frame, area: Rect, share: &ShareView, tick: u64) {
+    let (w, h) = (area.width.saturating_sub(4).min(90), area.height.saturating_sub(2).min(26));
+    let [_, rect, _] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(w), Constraint::Fill(1)]).areas(area);
+    let [_, rect, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(h), Constraint::Fill(1)]).areas(rect);
+    f.render_widget(Clear, rect);
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(ACCENT)).title(" Share to LinkedIn ".bold());
+    let inner = block.inner(rect).inner(Margin { horizontal: 1, vertical: 0 });
+    f.render_widget(block, rect);
+    match share.screen() {
+        Screen::Busy(what) => {
+            let [_, mid, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
+            let line = Line::from(vec![Span::styled(format!("{} ", SPINNER[(tick / 2 % 4) as usize]), Style::new().fg(ACCENT)), Span::raw(format!("{what}…"))]);
+            f.render_widget(Paragraph::new(line).alignment(Alignment::Center), mid);
+        }
+        Screen::Failed(why) => {
+            let lines = vec![Line::from("Couldn't prepare the share.".red().bold()), Line::from(""), Line::from(why.to_string())];
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        }
+        Screen::Preview { post, editing, note, warning } => draw_share_preview(f, inner, share, &post, editing, note, warning),
+        Screen::Done(done) => {
+            let mut lines = vec![Line::from("Shared.".green().bold()), Line::from("")];
+            for (name, mark, text) in done.steps() {
+                let (sym, style) = match mark {
+                    Mark::Done => ("✓", Style::new().fg(Color::Green)),
+                    Mark::Skipped => ("–", Style::new().dark_gray()),
+                    Mark::Failed => ("✗", Style::new().fg(Color::Red)),
+                };
+                lines.push(Line::from(vec![Span::styled(format!("{sym} "), style.bold()), Span::styled(format!("{name:<10}"), Style::new().bold()), Span::raw(text)]));
+            }
+            if let Some(url) = done.manual_url() {
+                lines.extend([Line::from(""), Line::from(dim("Open this link to post:")), Line::from(url.to_string())]);
+            }
+            if done.copied == crate::clipboard::Copied::Failed {
+                lines.extend([Line::from(""), Line::from(dim("The post:"))]);
+                lines.extend(done.post.lines().map(|l| Line::from(l.to_string())));
+            }
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        }
+    }
+}
+
+fn draw_share_preview(f: &mut Frame, area: Rect, share: &ShareView, post: &str, editing: Option<(String, usize)>, note: Option<String>, warning: Option<&str>) {
+    let width = area.width as usize;
+    let edit_rows = editing.as_ref().map_or(0, |(t, _)| (t.chars().count() + 7) / width.max(1) + 3) as u16;
+    let status: Vec<Line> = warning
+        .map(|w| Line::from(w.to_string().red()))
+        .into_iter()
+        .chain(note.map(|n| Line::from(n.yellow())))
+        .flat_map(|l| wrap_line(l, width))
+        .collect();
+    let [edit, body, status_area, count] = Layout::vertical([
+        Constraint::Length(edit_rows),
+        Constraint::Min(3),
+        Constraint::Length(status.len() as u16),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    if let Some((text, cursor)) = editing {
+        let chars: Vec<char> = text.chars().collect();
+        let (before, at, after): (String, String, String) = (
+            chars[..cursor].iter().collect(),
+            chars.get(cursor).map_or(" ".to_string(), |c| c.to_string()),
+            chars.get(cursor + 1..).map_or(String::new(), |r| r.iter().collect()),
+        );
+        let lines = vec![
+            Line::from(dim("Edit the line · enter keeps it, esc discards it")),
+            Line::from(vec![Span::styled("› ", Style::new().fg(ACCENT).bold()), Span::raw(before), Span::styled(at, Style::new().add_modifier(Modifier::REVERSED)), Span::raw(after)]),
+        ];
+        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), edit);
+    }
+    let rows: Vec<Line> = post.lines().flat_map(|l| wrap_line(Line::from(l.to_string()), width)).collect();
+    share.max_scroll.set((rows.len() as u16).saturating_sub(body.height));
+    f.render_widget(Paragraph::new(rows).scroll((share.scroll.min(share.max_scroll.get()), 0)), body);
+    f.render_widget(Paragraph::new(status), status_area);
+    let n = post.chars().count();
+    let style = if n > crate::share_view::MAX_POST { Style::new().fg(Color::Red).bold() } else { Style::new().dark_gray() };
+    f.render_widget(Paragraph::new(Span::styled(format!("{n} / {} characters", crate::share_view::MAX_POST), style)).alignment(Alignment::Right), count);
 }
 
 fn draw_board(f: &mut Frame, area: Rect, app: &App) {

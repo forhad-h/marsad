@@ -17,6 +17,7 @@ mod portable;
 mod report;
 mod settings;
 mod share;
+mod share_view;
 mod statusline;
 mod store;
 mod transcript;

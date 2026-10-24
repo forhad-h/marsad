@@ -1,10 +1,9 @@
 //! Sharing to LinkedIn: one frozen stats snapshot, a line drafted by an isolated `claude -p` over a
 //! redacted summary of today's work (or a template), the post text, the card, and the confirm steps
-//! that save, copy, open and reveal. The TUI share view and `marsad share --print` both use it.
+//! that save, open and reveal. The TUI share view and `marsad share --print` both use it.
 
 use crate::badges::{self, Badges};
 use crate::card::{self, fmt_count};
-use crate::clipboard::Copied;
 use crate::model::MAIN_AGENT;
 use crate::store;
 use anyhow::Context;
@@ -295,7 +294,6 @@ pub enum Note {
     /// The JSON reply has `is_error`.
     Error(String),
     Timeout,
-    #[allow(dead_code)] // the share view's cancel (U6)
     Cancelled,
     Empty,
     /// The reply named a project or folder.
@@ -562,7 +560,6 @@ pub fn save_card(s: &Snapshot, path: &Path) -> anyhow::Result<()> {
 // ---------- opening and revealing ----------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // used by the share view (U6)
 enum Platform {
     Macos,
     Windows,
@@ -578,10 +575,15 @@ pub struct Desktop {
     platform: Platform,
 }
 
-#[allow(dead_code)] // used by the share view (U6)
 impl Desktop {
     pub fn current() -> Self {
         Self::from_env(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
+    }
+
+    /// A local desktop with a display, so tests see every launch.
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        Desktop { ssh: false, display: true, platform: Platform::Unix }
     }
 
     fn from_env(set: impl Fn(&str) -> bool) -> Self {
@@ -669,7 +671,6 @@ fn reveal_steps(platform: Platform, path: &Path) -> Vec<Step> {
 }
 
 /// Runs one step for real.
-#[allow(dead_code)] // used by the share view (U6)
 pub fn launch(step: &Step) -> Result<(), String> {
     let mut cmd = Command::new(step.program);
     cmd.args(&step.args);
@@ -716,35 +717,6 @@ pub fn open_linkedin(desktop: &Desktop, text: &str, run: &dyn Fn(&Step) -> Resul
 /// Shows the card selected in the file manager.
 pub fn reveal(desktop: &Desktop, path: &Path, run: &dyn Fn(&Step) -> Result<(), String>) -> Launch {
     run_steps(desktop, &reveal_steps(desktop.platform, path), run)
-}
-
-/// What confirming did, step by step.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Confirmed {
-    pub card: PathBuf,
-    pub copied: Copied,
-    pub url: String,
-    pub opened: Launch,
-    pub revealed: Launch,
-}
-
-/// Confirms a share in order: write the PNG, copy the text, open LinkedIn, reveal the PNG. When
-/// the PNG can't be written nothing is copied or opened. `copy` is a step of its own so the
-/// dashboard can run the clipboard on its main thread (`clipboard::copy` for real).
-#[allow(dead_code)] // used by the share view (U6)
-pub fn confirm(
-    s: &Snapshot,
-    text: &str,
-    card: &Path,
-    desktop: &Desktop,
-    copy: impl FnOnce(&str) -> Copied,
-    run: &dyn Fn(&Step) -> Result<(), String>,
-) -> anyhow::Result<Confirmed> {
-    save_card(s, card)?;
-    let copied = copy(text);
-    let (url, opened) = open_linkedin(desktop, text, run);
-    let revealed = reveal(desktop, card, run);
-    Ok(Confirmed { card: card.to_path_buf(), copied, url, opened, revealed })
 }
 
 // ---------- `marsad share` ----------
@@ -1079,47 +1051,6 @@ mod tests {
         assert_eq!(reveal(&desktop, card, &run), Launch::Spawned);
         let none = |_: &Step| Err("not installed".to_string());
         assert_eq!(reveal(&desktop, card, &none), Launch::Failed("not installed".into()));
-    }
-
-    #[test]
-    fn confirm_writes_copies_opens_then_reveals() {
-        let dir = scratch("confirm");
-        let s = acme();
-        let card = dir.join("Downloads").join("marsad-2026-10-24.png");
-        let order = std::cell::RefCell::new(Vec::new());
-        let run = |step: &Step| -> Result<(), String> {
-            assert!(card.exists(), "the PNG is written before anything opens");
-            order.borrow_mut().push(format!("{} {}", step.program, step.args.join(" ")));
-            Ok(())
-        };
-        let desktop = Desktop { ssh: false, display: true, platform: Platform::Macos };
-        let copy = |text: &str| {
-            assert!(card.exists(), "the PNG is written before the copy");
-            order.borrow_mut().push(format!("copy {}", text.lines().next().unwrap()));
-            Copied::Native("pbcopy")
-        };
-        let done = confirm(&s, "My line\n\nstats", &card, &desktop, copy, &run).unwrap();
-        assert_eq!(done.copied, Copied::Native("pbcopy"));
-        assert_eq!((done.opened.clone(), done.revealed.clone()), (Launch::Spawned, Launch::Spawned));
-        assert_eq!(*order.borrow(), [
-            "copy My line".to_string(),
-            format!("open {}", linkedin_url("My line\n\nstats")),
-            format!("open -R {}", card.display()),
-        ]);
-        assert_eq!(&std::fs::read(&card).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn a_failed_card_write_copies_and_opens_nothing() {
-        let dir = scratch("unwritable");
-        std::fs::write(dir.join("file"), "").unwrap();
-        let card = dir.join("file").join("marsad.png");
-        let run = |_: &Step| -> Result<(), String> { panic!("nothing opens") };
-        let desktop = Desktop { ssh: false, display: true, platform: Platform::Macos };
-        let copy = |_: &str| -> Copied { panic!("nothing is copied") };
-        assert!(confirm(&acme(), "text", &card, &desktop, copy, &run).is_err());
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

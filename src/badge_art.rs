@@ -2,8 +2,6 @@
 //! Mamluk/Seljuk carving (tiers 0-1), Moorish zellij (2-4) and Persian tilework (5-6). Every badge
 //! has the same structure, a bevelled rim, a border band and an all-over tessellated field, and the
 //! tiers grow from plain carved stone to jewelled gold.
-// used by the card (U4) and the badge view (U6)
-#![allow(dead_code)]
 
 use std::f64::consts::PI;
 use std::fmt::Write;
@@ -318,13 +316,13 @@ pub struct Badge {
 }
 
 impl Badge {
-    /// Every stroke as straight segments, for a `Canvas`.
-    pub fn segments(&self) -> Vec<(Point, Point)> {
+    /// Every stroke as straight segments with its role, for a `Canvas`.
+    pub fn segments(&self) -> Vec<(Point, Point, Role)> {
         let mut out = Vec::new();
         for s in &self.strokes {
-            out.extend(s.points.windows(2).map(|w| (w[0], w[1])));
+            out.extend(s.points.windows(2).map(|w| (w[0], w[1], s.role)));
             if s.closed && s.points.len() > 2 {
-                out.push((s.points[s.points.len() - 1], s.points[0]));
+                out.push((s.points[s.points.len() - 1], s.points[0], s.role));
             }
         }
         out
@@ -848,7 +846,7 @@ mod tests {
     #[test]
     fn strokes_stay_inside_the_unit_disc() {
         for tier in 0..TIERS {
-            for (a, b) in badge(tier).segments() {
+            for (a, b, _) in badge(tier).segments() {
                 assert!(dist(a) <= 1.0 + EPS && dist(b) <= 1.0 + EPS, "tier {tier}");
             }
         }
