@@ -91,6 +91,14 @@ CREATE TABLE IF NOT EXISTS lifetime (      -- frozen pre-0.4 data, copied into l
     cache_write INTEGER,
     total       INTEGER
 );
+CREATE TABLE IF NOT EXISTS skills_seen (  -- every skill ever run, never pruned
+    skill       TEXT PRIMARY KEY,
+    first_day   TEXT        -- local date YYYY-MM-DD of its earliest known run
+);
+CREATE TABLE IF NOT EXISTS badge_best (   -- highest value ever computed per badge stat, never lowered
+    key         TEXT PRIMARY KEY,   -- e.g. 'rank', 'streak', 'skills', 'subagents', 'busiest_day'
+    value       INTEGER
+);
 CREATE INDEX IF NOT EXISTS usage_daily_day ON usage_daily(day);
 CREATE INDEX IF NOT EXISTS token_days_day ON token_days(day);
 CREATE INDEX IF NOT EXISTS skill_runs_day ON skill_runs(day);
@@ -116,7 +124,7 @@ pub(crate) fn open_at(path: &Path) -> anyhow::Result<Connection> {
 }
 
 /// Schema version this build writes; older databases are migrated on open.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 fn schema_version(conn: &Connection) -> i64 {
     conn.query_row("SELECT value FROM meta WHERE key = 'schema'", [], |r| r.get::<_, String>(0))
@@ -125,7 +133,7 @@ fn schema_version(conn: &Connection) -> i64 {
         .unwrap_or(0)
 }
 
-/// Creates missing tables and migrates older data.
+/// Creates missing tables and migrates older data, one version step at a time.
 fn prepare(conn: &mut Connection) -> anyhow::Result<()> {
     conn.execute_batch(SCHEMA)?;
     if schema_version(conn) >= SCHEMA_VERSION {
@@ -134,27 +142,45 @@ fn prepare(conn: &mut Connection) -> anyhow::Result<()> {
     // Immediate takes the write lock before re-reading the version, so two first openers can't
     // both migrate: the second waits on the busy timeout, then sees it done.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if schema_version(&tx) >= SCHEMA_VERSION {
+    let version = schema_version(&tx);
+    if version >= SCHEMA_VERSION {
         return Ok(());
     }
     tx.execute("INSERT OR IGNORE INTO meta VALUES ('install_id', ?1)", [new_install_id()])?;
-    // The old all-time sum keeps its pruned range, so those days are never counted again.
-    tx.execute(
-        "INSERT OR IGNORE INTO legacy_totals
-         SELECT (SELECT value FROM meta WHERE key = 'install_id'), since, through,
-                input, output, cache_read, cache_write, total
-         FROM lifetime WHERE id = 1 AND since IS NOT NULL",
-        [],
-    )?;
-    tx.execute(
-        "INSERT OR IGNORE INTO token_days
-         SELECT session_id, agent_id, day, input, output, cache_read, cache_write, total, turns FROM usage_daily",
-        [],
-    )?;
-    // Re-read every transcript still on disk once, so days the old retention skipped are counted.
+    // Version 1 only: copying usage_daily again would count days inside legacy ranges twice.
+    if version < 1 {
+        // The old all-time sum keeps its pruned range, so those days are never counted again.
+        tx.execute(
+            "INSERT OR IGNORE INTO legacy_totals
+             SELECT (SELECT value FROM meta WHERE key = 'install_id'), since, through,
+                    input, output, cache_read, cache_write, total
+             FROM lifetime WHERE id = 1 AND since IS NOT NULL",
+            [],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO token_days
+             SELECT session_id, agent_id, day, input, output, cache_read, cache_write, total, turns FROM usage_daily",
+            [],
+        )?;
+    }
+    if version < 2 {
+        backfill_skills_seen(&tx)?;
+    }
+    // Re-read every transcript still on disk once, so days the old retention skipped are counted
+    // and skills older than the retention reach skills_seen.
     tx.execute("DELETE FROM files", [])?;
     tx.execute("INSERT OR REPLACE INTO meta VALUES ('schema', ?1)", [SCHEMA_VERSION.to_string()])?;
     tx.commit()?;
+    Ok(())
+}
+
+/// Adds every skill in `skill_runs` to `skills_seen`, keeping each one's earliest day.
+pub(crate) fn backfill_skills_seen(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO skills_seen SELECT skill, MIN(day) FROM skill_runs WHERE skill IS NOT NULL AND day IS NOT NULL
+         GROUP BY skill ON CONFLICT(skill) DO UPDATE SET first_day = MIN(COALESCE(first_day, excluded.first_day), excluded.first_day)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -300,12 +326,21 @@ pub struct SyncReport {
     pub failed: usize,
     /// Rows removed by the retention setting.
     pub pruned: usize,
+    /// The badge stats recorded after a sync that changed anything.
+    pub badges: Option<crate::badges::Stats>,
 }
 
 /// Indexes new or changed transcripts under `~/.claude/projects`, then prunes detail rows
 /// older than the retention (unless it is forever). The permanent counter is never pruned.
 pub fn sync(conn: &mut Connection) -> anyhow::Result<SyncReport> {
-    sync_dir(conn, &crate::claude_dir().join("projects"), retention())
+    let mut report = sync_dir(conn, &crate::claude_dir().join("projects"), retention())?;
+    // Raised after every sync that changed data, so later pruning or a lowering import never revokes a badge.
+    // The indexed rows are already committed, so a failure here must not fail the sync: the shown values
+    // are recomputed from the counters anyway, and the next changed sync records them.
+    if report.updated + report.pruned > 0 {
+        report.badges = lifetime(conn).and_then(|l| crate::badges::record(conn, l.total)).ok();
+    }
+    Ok(report)
 }
 
 pub fn sync_dir(conn: &mut Connection, projects: &Path, retention: Option<u32>) -> anyhow::Result<SyncReport> {
@@ -391,6 +426,14 @@ fn write_unit(
     }
     for (seq, run) in stats.runs.iter().enumerate() {
         let day = run.at.as_deref().and_then(transcript::local_day);
+        // Seen before the retention check, so a re-read recovers skills older than the cutoff.
+        if let Some(day) = &day {
+            tx.execute(
+                "INSERT INTO skills_seen VALUES (?1, ?2)
+                 ON CONFLICT(skill) DO UPDATE SET first_day = MIN(COALESCE(first_day, excluded.first_day), excluded.first_day)",
+                params![run.name, day],
+            )?;
+        }
         if day.as_deref().is_none_or(|d| cutoff.is_some_and(|c| d < c)) {
             continue;
         }
@@ -442,6 +485,22 @@ fn prune(conn: &mut Connection, cutoff: &str) -> anyhow::Result<usize> {
 }
 
 // ---------- queries shared by the TUI and `marsad report` ----------
+
+/// Highest value ever stored per badge stat.
+pub fn badge_best(conn: &Connection) -> anyhow::Result<std::collections::HashMap<String, i64>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM badge_best")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Raises one stat's best value to `value`; a lower value leaves it as it was.
+pub fn raise_best(conn: &Connection, key: &str, value: i64) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO badge_best VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+        params![key, value],
+    )?;
+    Ok(())
+}
 
 /// All-time token totals: the permanent counter plus totals pruned by earlier versions.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
@@ -971,6 +1030,114 @@ mod tests {
         assert_eq!(counted, [100, 1], "the day before the legacy range is counted; the one inside is not");
         assert_eq!(lifetime(&conn).unwrap().total, 111);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A version-1 database: a legacy range holding a usage_daily day with no counter row (kept
+    /// forever), and skill runs indexed before `skills_seen` existed.
+    fn v1_db(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute_batch(
+            "INSERT INTO meta VALUES ('install_id', 'me');
+             INSERT INTO meta VALUES ('schema', '1');
+             INSERT INTO legacy_totals VALUES ('me', '2026-08-01', '2026-09-23', 0, 50, 0, 0, 50);
+             INSERT INTO usage_daily VALUES ('s1', 'main', 'main', '2026-08-10', 0, 9, 0, 0, 9, 1);
+             INSERT INTO token_days VALUES ('s1', 'main', '2026-10-20', 0, 7, 0, 0, 7, 2);
+             INSERT INTO skill_runs VALUES ('s1', 'main', 'main', 0, 'ce-plan', 'tool', 't', '2026-10-20', 1, 0, 1, 0, 0, 1);
+             INSERT INTO skill_runs VALUES ('s1', 'main', 'main', 1, 'ce-plan', 'tool', 't', '2026-10-02', 1, 0, 1, 0, 0, 1);
+             INSERT INTO skill_runs VALUES ('s2', 'main', 'main', 0, 'ce-work', 'command', 't', '2026-10-21', 1, 0, 1, 0, 0, 1);
+             INSERT INTO files VALUES ('/a.jsonl', 1, 1.0);",
+        )
+        .unwrap();
+    }
+
+    fn skills_seen(conn: &Connection) -> Vec<Value> {
+        query(conn, "SELECT skill, first_day FROM skills_seen ORDER BY skill", &[]).unwrap().rows.into_iter().map(Value::from).collect()
+    }
+
+    #[test]
+    fn v1_database_migrates_to_v2_once() {
+        let root = std::env::temp_dir().join(format!("marsad-v2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let db = root.join("usage.db");
+        v1_db(&db);
+
+        let conn = open_at(&db).unwrap();
+        assert_eq!(schema_version(&conn), 2);
+        assert_eq!(skills_seen(&conn), [json!(["ce-plan", "2026-10-02"]), json!(["ce-work", "2026-10-21"])], "earliest day per skill");
+        let files: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(files, 0, "transcripts are re-read once");
+        // The v1 copy must not run again: the legacy-range usage_daily day stays out of the counter.
+        let counted = query(&conn, "SELECT day, total FROM token_days", &[]).unwrap().rows;
+        assert_eq!(counted, vec![vec![json!("2026-10-20"), json!(7)]]);
+        assert_eq!(lifetime(&conn).unwrap().total, 57);
+        drop(conn);
+        assert_eq!(skills_seen(&open_at(&db).unwrap()).len(), 2, "reopening changes nothing");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn skills_seen_outlives_retention_and_reindexing() {
+        let root = std::env::temp_dir().join(format!("marsad-store-skills-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let proj = root.join("projects").join("-p-skills");
+        std::fs::create_dir_all(&proj).unwrap();
+        let file = proj.join("s6.jsonl");
+        let skill = |days_ago: i64, id: &str, name: &str| {
+            let ts = (chrono::Utc::now() - chrono::Duration::days(days_ago)).to_rfc3339();
+            format!(r#"{{"type":"assistant","timestamp":"{ts}","message":{{"id":"{id}","usage":{{"output_tokens":1}},"content":[{{"type":"tool_use","name":"Skill","input":{{"skill":"{name}"}}}}]}}}}"#)
+        };
+        std::fs::write(&file, format!("{}\n{}\n{}\n", skill(40, "a", "old-skill"), skill(20, "b", "mid-skill"), skill(0, "c", "new-skill"))).unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        prepare(&mut conn).unwrap();
+        let projects = root.join("projects");
+        let runs = |conn: &Connection| -> i64 { conn.query_row("SELECT COUNT(*) FROM skill_runs", [], |r| r.get(0)).unwrap() };
+
+        sync_dir(&mut conn, &projects, Some(30)).unwrap();
+        assert_eq!(runs(&conn), 2, "the 40-day-old run is past the retention");
+        let seen = skills_seen(&conn);
+        assert_eq!(seen.len(), 3, "but its skill is still seen: {seen:?}");
+        assert_eq!(seen[2], json!(["old-skill", transcript::local_day(&(chrono::Utc::now() - chrono::Duration::days(40)).to_rfc3339()).unwrap()]));
+
+        // Re-reading the same transcript never double counts or moves a first day.
+        let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writeln!(f, "{}", skill(0, "d", "new-skill")).unwrap();
+        drop(f);
+        assert_eq!(sync_dir(&mut conn, &projects, Some(30)).unwrap().updated, 1);
+        assert_eq!(skills_seen(&conn), seen);
+
+        // Pruning skill runs leaves the seen skills.
+        sync_dir(&mut conn, &projects, Some(7)).unwrap();
+        assert_eq!(runs(&conn), 2, "only today's two runs are kept");
+        assert_eq!(skills_seen(&conn), seen);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_seen_skill_without_a_first_day_takes_the_next_known_one() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        prepare(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO skills_seen VALUES ('ce-plan', NULL);
+             INSERT INTO skill_runs VALUES ('s1', 'main', 'main', 0, 'ce-plan', 'tool', 't', '2026-10-02', 1, 0, 1, 0, 0, 1);",
+        )
+        .unwrap();
+        backfill_skills_seen(&conn).unwrap();
+        assert_eq!(skills_seen(&conn), [json!(["ce-plan", "2026-10-02"])], "a NULL day never sticks");
+    }
+
+    #[test]
+    fn best_values_never_go_down() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        prepare(&mut conn).unwrap();
+        assert!(badge_best(&conn).unwrap().is_empty());
+        raise_best(&conn, "streak", 7).unwrap();
+        raise_best(&conn, "streak", 3).unwrap();
+        raise_best(&conn, "rank", 10).unwrap();
+        raise_best(&conn, "rank", 12).unwrap();
+        let best = badge_best(&conn).unwrap();
+        assert_eq!((best["streak"], best["rank"], best.len()), (7, 12, 2), "lower keeps the old value; higher replaces it");
     }
 
     #[test]

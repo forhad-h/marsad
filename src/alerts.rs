@@ -80,14 +80,14 @@ fn notification(s: &Session) -> (String, String) {
 
 /// Starts `cmd` detached from the terminal and reaps it in the background.
 fn spawn(cmd: &str, args: &[&str]) -> bool {
-    let child = Command::new(cmd).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
-    match child {
-        Ok(mut child) => {
-            std::thread::spawn(move || child.wait());
-            true
-        }
-        Err(_) => false,
-    }
+    detached(cmd, args).is_ok()
+}
+
+/// Starts `cmd` with no stdio and reaps it on a thread, so nothing waits for it.
+pub(crate) fn detached(cmd: &str, args: &[&str]) -> std::io::Result<()> {
+    let mut child = Command::new(cmd).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 /// The platform's own sound, or the terminal bell when there is none.

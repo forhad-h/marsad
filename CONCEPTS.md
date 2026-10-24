@@ -39,6 +39,17 @@ Days inside a legacy total's range never enter the day counter, but only when th
 ### Restore import
 An import the user marks as this machine's own earlier data, for a reinstall with the old transcripts still on disk. It makes the file's legacy totals block the day counter here too, and removes days already counted inside them. A plain import never removes this machine's days.
 
+## Badges
+
+### Rank
+The user's step on a craft ladder, Novice to Grandmaster, set by all-time tokens with cache reads included: the same figure as the dashboard header's all-time total. Each step has its own badge art.
+
+### Achievement
+A bronze, silver or gold level for breadth of use rather than volume: longest streak of days with usage, distinct skills, subagents run, and busiest day. Its value comes from the never-pruned tables, so it reaches past the retention window.
+
+### Best value
+The highest value a rank or achievement ever reached, stored and never lowered. The shown value is the larger of it and the value computed now, so pruning or an import that lowers the numbers never revokes a level.
+
 ## Coordination
 
 ### Coordination protocol
