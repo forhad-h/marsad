@@ -105,9 +105,25 @@ fn longest_streak<'a>(days: impl Iterator<Item = &'a str>) -> i64 {
 pub fn record(conn: &Connection, rank_total: i64) -> anyhow::Result<Stats> {
     let now = compute(conn, rank_total)?;
     for (key, value) in &now.0 {
-        store::raise_best(conn, key, *value)?;
+        raise_best(conn, key, *value)?;
     }
     shown_from(conn, now)
+}
+
+/// Highest value ever stored per badge stat.
+fn badge_best(conn: &Connection) -> anyhow::Result<std::collections::HashMap<String, i64>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM badge_best")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Raises one stat's best value to `value`; a lower value leaves it as it was.
+fn raise_best(conn: &Connection, key: &str, value: i64) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO badge_best VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+        rusqlite::params![key, value],
+    )?;
+    Ok(())
 }
 
 /// The shown values: each computed stat, never lower than its stored best. Writes nothing.
@@ -116,7 +132,7 @@ pub fn shown(conn: &Connection, rank_total: i64) -> anyhow::Result<Stats> {
 }
 
 fn shown_from(conn: &Connection, mut stats: Stats) -> anyhow::Result<Stats> {
-    let best = store::badge_best(conn)?;
+    let best = badge_best(conn)?;
     for (key, value) in stats.0.iter_mut() {
         *value = (*value).max(best.get(*key).copied().unwrap_or(0));
     }
@@ -392,6 +408,18 @@ mod tests {
 
     fn level(b: &Badges, key: &str) -> usize {
         b.achievements.iter().find(|a| a.key == key).unwrap().level
+    }
+
+    #[test]
+    fn best_values_never_go_down() {
+        let conn = db("");
+        assert!(badge_best(&conn).unwrap().is_empty());
+        raise_best(&conn, "streak", 7).unwrap();
+        raise_best(&conn, "streak", 3).unwrap();
+        raise_best(&conn, "rank", 10).unwrap();
+        raise_best(&conn, "rank", 12).unwrap();
+        let best = badge_best(&conn).unwrap();
+        assert_eq!((best["streak"], best["rank"], best.len()), (7, 12, 2), "lower keeps the old value; higher replaces it");
     }
 
     #[test]

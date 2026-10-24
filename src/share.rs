@@ -134,6 +134,10 @@ const CONTAINERS: [&str; 18] = [
     "repos", "repositories", "git", "github", "workspace", "workspaces", "sites",
 ];
 
+/// Words the summary and the drafted line use themselves; as a word of a longer name they never
+/// count (a project named exactly one of them still does, by its full name).
+const TOOLING: [&str; 10] = ["claude", "code", "agent", "agents", "subagent", "subagents", "skill", "skills", "worktree", "worktrees"];
+
 /// The words of a name: split on `-`, `_`, `.`, spaces and camelCase boundaries.
 fn tokens(name: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -167,20 +171,38 @@ fn names(work: &Work, home: Option<&Path>) -> Vec<String> {
         let cwd = Path::new(&s.cwd);
         // Only components below the home directory: never home itself or its ancestors.
         if let Some(rel) = home.and_then(|h| cwd.strip_prefix(h).ok()) {
-            raw.extend(rel.components().filter_map(|c| match c {
-                std::path::Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
-                _ => None,
-            }));
+            let parts: Vec<String> = rel
+                .components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+                    _ => None,
+                })
+                .collect();
+            for (i, part) in parts.iter().enumerate() {
+                // A Claude Code worktree (`.claude/worktrees/<name>`) is tooling, not a name.
+                if part == ".claude" && parts.get(i + 1).is_some_and(|p| p == "worktrees") {
+                    break;
+                }
+                // So are hidden folders (`.config`, `.cache`).
+                if !part.starts_with('.') {
+                    raw.push(part.clone());
+                }
+            }
         }
     }
     let mut out: Vec<String> = Vec::new();
     for name in raw {
-        let lower = name.to_lowercase();
-        if CONTAINERS.contains(&lower.as_str()) && !work.sessions.iter().any(|s| s.project.eq_ignore_ascii_case(&name)) {
+        // A container never names a project, even as a session's own folder: `~/code` says nothing.
+        if CONTAINERS.contains(&name.to_lowercase().as_str()) {
             continue;
         }
-        for n in std::iter::once(name.clone()).chain(tokens(&name)) {
-            let n = n.to_lowercase();
+        let words = tokens(&name);
+        // The joined spelling too, so `acme-portal` also catches `AcmePortal` and `acmeportal`.
+        let joined = (words.len() > 1).then(|| words.concat());
+        let words = words.into_iter().chain(joined).map(|w| w.to_lowercase()).filter(|w| {
+            !CONTAINERS.contains(&w.as_str()) && !TOOLING.contains(&w.as_str())
+        });
+        for n in std::iter::once(name.to_lowercase()).chain(words) {
             if n.chars().count() >= 3 && !out.contains(&n) {
                 out.push(n);
             }
@@ -190,7 +212,15 @@ fn names(work: &Work, home: Option<&Path>) -> Vec<String> {
     out
 }
 
+/// Whether a camelCase word starts at `text[k]`, by the same rule as `tokens`.
+fn camel_start(text: &[char], k: usize) -> bool {
+    let (Some(&c), Some(&p)) = (text.get(k), k.checked_sub(1).and_then(|j| text.get(j))) else { return false };
+    c.is_uppercase()
+        && (p.is_lowercase() || p.is_ascii_digit() || (p.is_uppercase() && text.get(k + 1).is_some_and(|n| n.is_lowercase())))
+}
+
 /// Where `name` occurs in `text` as a whole word, case-insensitively: (start, end) char indexes.
+/// A camelCase boundary counts as a word edge, so `acme` is found in `AcmePortal`.
 fn find_word(text: &[char], name: &[char], from: usize) -> Option<(usize, usize)> {
     if name.is_empty() || text.len() < name.len() {
         return None;
@@ -199,8 +229,8 @@ fn find_word(text: &[char], name: &[char], from: usize) -> Option<(usize, usize)
     (from..=text.len() - name.len()).find_map(|i| {
         let end = i + name.len();
         let matches = text[i..end].iter().zip(name).all(|(&a, &b)| same(a, b));
-        let open = i == 0 || !text[i - 1].is_alphanumeric();
-        let close = end == text.len() || !text[end].is_alphanumeric();
+        let open = i == 0 || !text[i - 1].is_alphanumeric() || camel_start(text, i);
+        let close = end == text.len() || !text[end].is_alphanumeric() || camel_start(text, end);
         (matches && open && close).then_some((i, end))
     })
 }
@@ -894,7 +924,7 @@ mod tests {
             ..Work::default()
         };
         let n = names(&work("acme-portal", "/Users/x/Projects/acme-portal"), Some(Path::new("/Users/x")));
-        assert_eq!(n, ["acme-portal", "portal", "acme"]);
+        assert_eq!(n, ["acme-portal", "acmeportal", "portal", "acme"]);
         let n = names(&work("billingApp", "/Users/x/clients/GlobexCorp/billingApp"), Some(Path::new("/Users/x")));
         for want in ["billingapp", "billing", "app", "globexcorp", "globex", "corp", "clients"] {
             assert!(n.contains(&want.to_string()), "{want} missing from {n:?}");
@@ -902,8 +932,42 @@ mod tests {
         assert!(!n.contains(&"x".to_string()) && !n.contains(&"users".to_string()));
         // Outside the home directory only the project counts; short tokens never do.
         let n = names(&work("wt-u5", "/private/tmp/wt-u5"), Some(Path::new("/Users/x")));
-        assert_eq!(n, ["wt-u5"]);
+        assert_eq!(n, ["wt-u5", "wtu5"]);
         assert_eq!(tokens("ACMEPortal_v2.web"), ["ACME", "Portal", "v2", "web"]);
+    }
+
+    #[test]
+    fn worktrees_hidden_folders_and_containers_are_not_names() {
+        let work = |project: &str, cwd: &str| Work {
+            sessions: vec![WorkSession { project: project.into(), cwd: cwd.into(), title: String::new() }],
+            ..Work::default()
+        };
+        let home = Some(Path::new("/Users/x"));
+        let n = names(&work("agent-1a2b", "/Users/x/Projects/acme/.claude/worktrees/agent-1a2b"), home);
+        assert!(n.contains(&"acme".to_string()), "{n:?}");
+        for never in ["claude", ".claude", "worktrees", "agent"] {
+            assert!(!n.contains(&never.to_string()), "{never} in {n:?}");
+        }
+        assert_eq!(mentioned("I used Claude Code agents to ship a feature.", &n), None);
+        assert_eq!(mentioned("I shipped an Acme feature.", &n), Some("acme"));
+        let n = names(&work("acme", "/Users/x/.config/acme"), home);
+        assert_eq!(n, ["acme"], "a hidden folder is not a name");
+        // A session started in a container folder names nothing.
+        let n = names(&work("code", "/Users/x/code"), home);
+        assert!(n.is_empty(), "{n:?}");
+        assert_eq!(mentioned("I used Claude Code to refactor a parser.", &n), None);
+    }
+
+    #[test]
+    fn joined_and_camel_case_spellings_are_caught() {
+        let s = acme();
+        let names = names(&s.work, s.home.as_deref());
+        assert_eq!(strip("Fix AcmePortal login", &names), "Fix login");
+        assert_eq!(strip("Fix acmeportal and ACMEPortal login", &names), "Fix and login");
+        assert_eq!(strip("Fix the acmeLogin page", &names), "Fix the Login page");
+        assert!(mentioned("Shipped the AcmePortal release.", &names).is_some());
+        assert!(mentioned("Shipped the PortalApp release.", &names).is_some());
+        assert_eq!(mentioned("Acmes and portals are not whole words.", &names), None);
     }
 
     #[test]

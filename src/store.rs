@@ -480,22 +480,6 @@ fn prune(conn: &mut Connection, cutoff: &str) -> anyhow::Result<usize> {
 
 // ---------- queries shared by the TUI and `marsad report` ----------
 
-/// Highest value ever stored per badge stat.
-pub fn badge_best(conn: &Connection) -> anyhow::Result<std::collections::HashMap<String, i64>> {
-    let mut stmt = conn.prepare("SELECT key, value FROM badge_best")?;
-    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    Ok(rows.collect::<Result<_, _>>()?)
-}
-
-/// Raises one stat's best value to `value`; a lower value leaves it as it was.
-pub fn raise_best(conn: &Connection, key: &str, value: i64) -> anyhow::Result<()> {
-    conn.execute(
-        "INSERT INTO badge_best VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
-        params![key, value],
-    )?;
-    Ok(())
-}
-
 /// All-time token totals: the permanent counter plus totals pruned by earlier versions.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct Lifetime {
@@ -1106,19 +1090,6 @@ mod tests {
         assert_eq!(runs(&conn), 2, "only today's two runs are kept");
         assert_eq!(skills_seen(&conn), seen);
         std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn best_values_never_go_down() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        prepare(&mut conn).unwrap();
-        assert!(badge_best(&conn).unwrap().is_empty());
-        raise_best(&conn, "streak", 7).unwrap();
-        raise_best(&conn, "streak", 3).unwrap();
-        raise_best(&conn, "rank", 10).unwrap();
-        raise_best(&conn, "rank", 12).unwrap();
-        let best = badge_best(&conn).unwrap();
-        assert_eq!((best["streak"], best["rank"], best.len()), (7, 12, 2), "lower keeps the old value; higher replaces it");
     }
 
     #[test]
