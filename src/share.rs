@@ -3,7 +3,8 @@
 //! that save, copy, open and reveal. The TUI share view and `marsad share --print` both use it.
 
 use crate::badges::{self, Badges};
-use crate::card::{self, fmt_count};
+use crate::card;
+use crate::model::fmt_count;
 use crate::clipboard::Copied;
 use crate::model::MAIN_AGENT;
 use crate::store;

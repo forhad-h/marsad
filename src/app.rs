@@ -265,7 +265,7 @@ pub struct BadgeState {
 /// How long a drawn announcement stays in the footer.
 const ANNOUNCE_FOR: Duration = Duration::from_secs(10);
 
-/// One footer note for levels that rose (KTD5): shown only on the list and badge views and never
+/// One footer note for levels that rose: shown only on the list and badge views and never
 /// over the share view, it outlives key presses, stays 10 s or until Esc, and is recorded as
 /// announced once it has been drawn.
 #[derive(Default)]

@@ -1,8 +1,8 @@
 //! The share card: a 1200×627 PNG with the rank badge, the rank, the token stats and the earned achievements on an ivory ground framed in girih, drawn as SVG and rasterized by resvg with a bundled font.
 
-use crate::badge_art::{self, Point, Rgb};
+use crate::badge_art::{self, Point, Rgb, hex, mix};
 use crate::badges::Badges;
-use crate::model::fmt_tokens;
+use crate::model::{DAY_FMT, fmt_count};
 use anyhow::{Context, Result};
 use resvg::{tiny_skia, usvg};
 use std::f64::consts::PI;
@@ -114,36 +114,13 @@ const TILE: f64 = 58.0;
 const IVORY: Rgb = (0xf8, 0xf3, 0xe6);
 const INK: Rgb = (0x1b, 0x21, 0x2c);
 
-/// A token count for the card: the dashboard's format, with billions and trillions so big totals stay short, and no `.0`.
-pub fn fmt_count(n: u64) -> String {
-    let s = match n {
-        0..1_000_000_000 => fmt_tokens(n),
-        1_000_000_000..1_000_000_000_000 => format!("{:.1}B", n as f64 / 1e9),
-        _ => format!("{:.1}T", n as f64 / 1e12),
-    };
-    match s.find(".0") {
-        Some(i) if i + 3 == s.len() => format!("{}{}", &s[..i], &s[i + 2..]),
-        _ => s,
-    }
-}
-
-fn hex(c: Rgb) -> String {
-    format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2)
-}
-
-/// `a` moved towards `b` by `t`.
-fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
-    let m = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round() as u8;
-    (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
-}
-
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 /// `2026-10-24` as `24 October 2026`; anything else as given.
 fn fmt_date(day: &str) -> String {
-    chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").map_or_else(|_| day.to_string(), |d| d.format("%-d %B %Y").to_string())
+    chrono::NaiveDate::parse_from_str(day, DAY_FMT).map_or_else(|_| day.to_string(), |d| d.format("%-d %B %Y").to_string())
 }
 
 /// A closed polygon's path, two decimals, no negative zero.
@@ -182,11 +159,11 @@ fn fitted(family: &str, size: f64, spacing: f64, text: &str, max: f64) -> (f64, 
     ((size * k * 10.0).floor() / 10.0, (spacing * k * 100.0).round() / 100.0)
 }
 
-/// One line of text, shrunk to fit `max`.
+/// One line of text, starting at `x` and shrunk to fit `max`.
 #[allow(clippy::too_many_arguments)]
-fn line(s: &mut String, id: &str, x: f64, y: f64, family: &str, size: f64, spacing: f64, color: Rgb, text: &str, max: f64, anchor: &str) {
+fn line(s: &mut String, id: &str, x: f64, y: f64, family: &str, size: f64, spacing: f64, color: Rgb, text: &str, max: f64) {
     let (size, spacing) = fitted(family, size, spacing, text, max);
-    let _ = write!(s, "<text id=\"{id}\" x=\"{x}\" y=\"{y}\" font-size=\"{size}\" font-family=\"{family}\" letter-spacing=\"{spacing}\" text-anchor=\"{anchor}\" fill=\"{}\">{}</text>", hex(color), escape(text));
+    let _ = write!(s, "<text id=\"{id}\" x=\"{x}\" y=\"{y}\" font-size=\"{size}\" font-family=\"{family}\" letter-spacing=\"{spacing}\" fill=\"{}\">{}</text>", hex(color), escape(text));
 }
 
 /// The ground: ivory with a faint star-and-cross lattice, strongest behind the badge.
@@ -253,7 +230,7 @@ fn medal(s: &mut String, x: f64, y: f64, r: f64, m: Medal) {
 
 /// The card as an SVG document.
 pub fn svg(d: &CardData) -> String {
-    let p = badge_art::badge(d.tier).palette;
+    let p = badge_art::recipe(d.tier).palette;
     let accent = mix(p.field, INK, 0.15);
     let muted = mix(INK, IVORY, 0.36);
     let rule = mix(p.field, IVORY, 0.72);
@@ -280,20 +257,20 @@ pub fn svg(d: &CardData) -> String {
     let y = top + (bottom - top - height) / 2.0 + 12.0;
 
     let tier = d.tier.min(badge_art::TIERS - 1) + 1;
-    line(&mut s, "kicker", TEXT_X, y, BOLD, 15.0, 2.2, accent, &format!("AI-ASSISTED ENGINEERING \u{b7} RANK {tier} OF {}", badge_art::TIERS), TEXT_W, "start");
+    line(&mut s, "kicker", TEXT_X, y, BOLD, 15.0, 2.2, accent, &format!("AI-ASSISTED ENGINEERING \u{b7} RANK {tier} OF {}", badge_art::TIERS), TEXT_W);
     if let Some(name) = name {
-        line(&mut s, "name", TEXT_X, y + name_gap, BOLD, 30.0, -0.2, INK, name, TEXT_W, "start");
+        line(&mut s, "name", TEXT_X, y + name_gap, BOLD, 30.0, -0.2, INK, name, TEXT_W);
     }
     let rank_y = y + name_gap + rank_gap;
-    line(&mut s, "rank", TEXT_X - 3.0, rank_y, BOLD, 86.0, -2.0, INK, &d.rank, TEXT_W, "start");
+    line(&mut s, "rank", TEXT_X - 3.0, rank_y, BOLD, 86.0, -2.0, INK, &d.rank, TEXT_W);
 
     let col = TEXT_W / STATS as f64;
     let label_y = rank_y + 64.0;
     let stats = [("all-time", "All time", d.all_time), ("week", "7 days", d.week), ("month", "30 days", d.month), ("daily", "Per day", d.daily_average)];
     for (i, (id, name, value)) in stats.into_iter().enumerate() {
         let x = TEXT_X + col * i as f64;
-        line(&mut s, &format!("{id}-label"), x, label_y, BOLD, 13.0, 1.8, muted, &name.to_uppercase(), col - 14.0, "start");
-        line(&mut s, id, x, label_y + 40.0, BOLD, 30.0, -0.6, if i == 0 { accent } else { INK }, &fmt_count(value), col - 14.0, "start");
+        line(&mut s, &format!("{id}-label"), x, label_y, BOLD, 13.0, 1.8, muted, &name.to_uppercase(), col - 14.0);
+        line(&mut s, id, x, label_y + 40.0, BOLD, 30.0, -0.6, if i == 0 { accent } else { INK }, &fmt_count(value), col - 14.0);
     }
 
     let award_y = label_y + 40.0 + 64.0;
@@ -307,7 +284,7 @@ pub fn svg(d: &CardData) -> String {
     }
 
     let _ = write!(s, "<rect x=\"{TEXT_X}\" y=\"504\" width=\"{TEXT_W}\" height=\"1.5\" fill=\"{}\"/>", hex(rule));
-    line(&mut s, "date", TEXT_X, 545.0, FAMILY, 17.0, 0.0, muted, &fmt_date(&d.date), TEXT_W / 2.0, "start");
+    line(&mut s, "date", TEXT_X, 545.0, FAMILY, 17.0, 0.0, muted, &fmt_date(&d.date), TEXT_W / 2.0);
     let _ = write!(s, "<text id=\"footer\" x=\"{}\" y=\"545\" font-size=\"17\" text-anchor=\"end\" fill=\"{}\">via <tspan font-family=\"{BOLD}\" fill=\"{}\">marsad</tspan></text>", TEXT_X + TEXT_W, hex(muted), hex(accent));
     s.push_str("</svg>");
     s

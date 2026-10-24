@@ -9,8 +9,8 @@ use std::fmt::Write;
 /// A point in the unit badge space: centre at the origin, y up, the badge rim at radius 1.
 pub type Point = (f64, f64);
 
-/// The number of tiers, Novice (0) to Grandmaster (6).
-pub const TIERS: usize = 7;
+/// The number of tiers, Novice (0) to Grandmaster (6): one badge per rank.
+pub const TIERS: usize = crate::badges::TIERS.len();
 
 /// An sRGB colour.
 pub type Rgb = (u8, u8, u8);
@@ -715,12 +715,12 @@ pub fn badge(tier: usize) -> Badge {
     Badge { style: rc.style, fills, strokes, crossings, palette: rc.palette }
 }
 
-fn hex(c: Rgb) -> String {
+pub(crate) fn hex(c: Rgb) -> String {
     format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2)
 }
 
 /// `a` moved towards `b` by `t`.
-fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
+pub(crate) fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
     let m = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round() as u8;
     (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
 }

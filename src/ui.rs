@@ -247,7 +247,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     };
     if let Some(share) = &app.share {
-        draw_share(f, body, app, share);
+        draw_share(f, body, app.tick, share);
         keys = share_keys(share);
     }
     let mut spans = vec![Span::raw(" ")];
@@ -1322,7 +1322,7 @@ fn level_color(level: usize) -> Color {
 fn badge_value(value: i64, unit: &str) -> String {
     let n = value.max(0) as u64;
     match unit {
-        "tokens" => format!("{} tokens", crate::card::fmt_count(n)),
+        "tokens" => format!("{} tokens", crate::model::fmt_count(n)),
         "days" if n == 1 => "1 day".into(),
         _ => format!("{n} {unit}"),
     }
@@ -1436,7 +1436,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 /// The share view, drawn as a modal over the list or the badge view.
-fn draw_share(f: &mut Frame, area: Rect, app: &App, v: &ShareView) {
+fn draw_share(f: &mut Frame, area: Rect, tick: u64, v: &ShareView) {
     let popup = centered(area, 96, 26);
     f.render_widget(Clear, popup);
     let block = Block::bordered()
@@ -1445,7 +1445,7 @@ fn draw_share(f: &mut Frame, area: Rect, app: &App, v: &ShareView) {
         .title(Line::from(" Share to LinkedIn ").bold());
     let inner = block.inner(popup).inner(Margin::new(1, 0));
     f.render_widget(block, popup);
-    let spin = SPINNER[(app.tick / 2 % 4) as usize];
+    let spin = SPINNER[(tick / 2 % 4) as usize];
     let wait = |text: &str| Paragraph::new(vec![Line::from(format!("{spin} {text}")), Line::from(""), Line::from(dim("Esc cancels; nothing is saved, copied or opened."))]);
     match &v.stage {
         Stage::Drafting if v.snapshot.is_none() => f.render_widget(wait("Syncing and gathering today's stats…"), inner),
@@ -1480,6 +1480,7 @@ fn draw_share(f: &mut Frame, area: Rect, app: &App, v: &ShareView) {
         Stage::Preview | Stage::Editing { .. } => {
             let [post_area, _, status_area, count_area] =
                 Layout::vertical([Constraint::Fill(1), Constraint::Length(1), Constraint::Length(2), Constraint::Length(1)]).areas(inner);
+            let post = v.post();
             let mut lines: Vec<Line<'static>> = Vec::new();
             match &v.stage {
                 Stage::Editing { text, cursor } => {
@@ -1493,7 +1494,7 @@ fn draw_share(f: &mut Frame, area: Rect, app: &App, v: &ShareView) {
                         lines.extend(crate::share::post(s, "").lines().skip(1).map(|l| Line::from(dim(l.to_string()))));
                     }
                 }
-                _ => lines.extend(v.post().lines().map(|l| Line::from(l.to_string()))),
+                _ => lines.extend(post.lines().map(|l| Line::from(l.to_string()))),
             }
             let width = post_area.width as usize;
             let rows: Vec<Line<'static>> = lines.into_iter().flat_map(|l| if l.width() == 0 { vec![l] } else { wrap_line(l, width) }).collect();
@@ -1505,7 +1506,7 @@ fn draw_share(f: &mut Frame, area: Rect, app: &App, v: &ShareView) {
                 (None, None) => Line::from(dim("Drafted by Claude Code from a summary of today's work. Review it before you share.")),
             };
             f.render_widget(Paragraph::new(status).wrap(Wrap { trim: false }), status_area);
-            let n = v.post().chars().count();
+            let n = post.chars().count();
             let count = format!("{n} / {MAX_POST} characters");
             let count = if n > MAX_POST { Span::styled(format!("{count} · too long for LinkedIn"), Style::new().fg(Color::Red)) } else { dim(count) };
             f.render_widget(Paragraph::new(Line::from(count)), count_area);

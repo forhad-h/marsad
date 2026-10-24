@@ -22,7 +22,7 @@ type CardPath = Arc<dyn Fn(&str) -> PathBuf + Send + Sync>;
 /// Everything the share view reaches outside itself; the tests swap each part.
 #[derive(Clone)]
 pub struct Deps {
-    /// Syncs and freezes the stats (KTD10).
+    /// Syncs and freezes the stats, once per share.
     pub snapshot: Snapshotter,
     pub draft: Drafter,
     /// Runs one desktop tool (open, reveal).
@@ -326,7 +326,7 @@ impl ShareView {
         }
     }
 
-    /// Runs the confirm steps on a worker (KTD12); the clipboard copy comes back to `tick`.
+    /// Runs the confirm steps on a worker; the clipboard copy comes back to `tick`.
     fn confirm(&mut self) {
         let Some(snapshot) = self.snapshot.clone() else { return };
         let text = self.post();
