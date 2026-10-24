@@ -145,6 +145,8 @@ pub struct ShareView {
     warning: Option<String>,
     /// Set when the share is cancelled or closed, which kills a running `claude`.
     cancel: Arc<AtomicBool>,
+    /// The badges of a snapshot just frozen after the share's own sync, until the dashboard takes them.
+    prepared: Option<crate::badges::Badges>,
     pub scroll: u16,
     /// The furthest the preview can scroll, set while drawing.
     pub max_scroll: Cell<u16>,
@@ -178,6 +180,7 @@ impl ShareView {
             custom: None,
             warning: None,
             cancel,
+            prepared: None,
             scroll: 0,
             max_scroll: Cell::new(0),
         }
@@ -229,6 +232,7 @@ impl ShareView {
         match &self.phase {
             Phase::Drafting(rx) => match rx.try_recv() {
                 Ok(Ok((s, d))) => {
+                    self.prepared = Some(s.badges.clone());
                     self.snapshot = Some(s);
                     (self.line, self.note) = (d.line, d.note);
                     self.phase = Phase::Preview;
@@ -331,13 +335,18 @@ impl ShareView {
         self.phase = Phase::Regenerating(rx);
     }
 
+    /// The badges the share's sync produced, once: the dashboard announces them as after its own sync.
+    pub fn take_prepared(&mut self) -> Option<crate::badges::Badges> {
+        self.prepared.take()
+    }
+
     /// Takes the post back from the user's editor.
     pub fn edited_post(&mut self, edited: Result<String, String>) {
         match edited {
             Ok(text) if text.trim().is_empty() => self.warning = Some("The edited post was empty, so it was not used.".into()),
             Ok(text) => {
-                self.custom = Some(text.trim_end().to_string());
-                self.warning = None;
+                // The user's own post: no longer the template, so a failed regenerate keeps it.
+                (self.custom, self.note, self.warning) = (Some(text.trim_end().to_string()), None, None);
             }
             Err(why) => self.warning = Some(format!("Couldn't edit the post: {why}")),
         }
@@ -389,7 +398,8 @@ impl ShareView {
                 KeyCode::Enter => {
                     let line: String = text.iter().collect::<String>().trim().to_string();
                     if !line.is_empty() {
-                        (self.line, self.custom) = (line, None);
+                        // The user's own line: no longer the template, so a failed regenerate keeps it.
+                        (self.line, self.custom, self.note) = (line, None, None);
                     }
                     self.phase = Phase::Preview;
                 }
@@ -435,8 +445,15 @@ pub fn edit_in_editor(text: &str) -> Result<String, String> {
         .unwrap_or_else(|| if cfg!(windows) { "notepad".into() } else { "vi".into() });
     let mut parts = editor.split_whitespace();
     let program = parts.next().ok_or("no editor is set")?;
-    let path = std::env::temp_dir().join(format!("marsad-post-{}.txt", std::process::id()));
-    std::fs::write(&path, text).map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
+    // A fresh file that must not exist yet, so a planted file or symlink in the shared temp dir is never written through.
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let path = std::env::temp_dir().join(format!("marsad-post-{}-{nanos:x}.txt", std::process::id()));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()))
+        .map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
     let status = std::process::Command::new(program).args(parts).arg(&path).status();
     let result = match status {
         Ok(s) if s.success() => std::fs::read_to_string(&path).map_err(|e| format!("couldn't read {}: {e}", path.display())),
@@ -686,5 +703,25 @@ mod tests {
         v.on_key(key(KeyCode::Char('e')));
         v.on_key(key(KeyCode::Enter));
         assert!(v.post().starts_with("I shipped"), "editing the line rebuilds the post");
+    }
+
+    #[test]
+    fn a_failed_regenerate_keeps_a_hand_edited_template_line_and_post() {
+        let dir = scratch("regen-edited");
+        let (mut v, _) = preview(&dir);
+        v.env.draft = Arc::new(|s, _| Draft::template(s, Note::NotInstalled));
+        // The line on screen is the template, then the user writes their own.
+        (v.line, v.note) = ("Template.".into(), Some(Note::NotInstalled));
+        v.on_key(key(KeyCode::Char('e')));
+        v.on_paste(" Mine.");
+        v.on_key(key(KeyCode::Enter));
+        v.on_key(key(KeyCode::Char('r')));
+        settle(&mut v);
+        assert!(v.post().starts_with("Template. Mine."), "{}", v.post());
+        assert!(matches!(v.screen(), Screen::Preview { warning: Some(_), .. }));
+        v.edited_post(Ok("My own words.".into()));
+        v.on_key(key(KeyCode::Char('r')));
+        settle(&mut v);
+        assert_eq!(v.post(), "My own words.", "the edited post survives too");
     }
 }

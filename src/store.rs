@@ -178,7 +178,7 @@ fn prepare(conn: &mut Connection) -> anyhow::Result<()> {
 pub(crate) fn backfill_skills_seen(conn: &Connection) -> anyhow::Result<()> {
     conn.execute(
         "INSERT INTO skills_seen SELECT skill, MIN(day) FROM skill_runs WHERE skill IS NOT NULL AND day IS NOT NULL
-         GROUP BY skill ON CONFLICT(skill) DO UPDATE SET first_day = MIN(first_day, excluded.first_day)",
+         GROUP BY skill ON CONFLICT(skill) DO UPDATE SET first_day = MIN(COALESCE(first_day, excluded.first_day), excluded.first_day)",
         [],
     )?;
     Ok(())
@@ -335,8 +335,10 @@ pub struct SyncReport {
 pub fn sync(conn: &mut Connection) -> anyhow::Result<SyncReport> {
     let mut report = sync_dir(conn, &crate::claude_dir().join("projects"), retention())?;
     // Raised after every sync that changed data, so later pruning or a lowering import never revokes a badge.
+    // The indexed rows are already committed, so a failure here must not fail the sync: the shown values
+    // are recomputed from the counters anyway, and the next changed sync records them.
     if report.updated + report.pruned > 0 {
-        report.badges = Some(crate::badges::record(conn, lifetime(conn)?.total)?);
+        report.badges = lifetime(conn).and_then(|l| crate::badges::record(conn, l.total)).ok();
     }
     Ok(report)
 }
@@ -428,7 +430,7 @@ fn write_unit(
         if let Some(day) = &day {
             tx.execute(
                 "INSERT INTO skills_seen VALUES (?1, ?2)
-                 ON CONFLICT(skill) DO UPDATE SET first_day = MIN(first_day, excluded.first_day)",
+                 ON CONFLICT(skill) DO UPDATE SET first_day = MIN(COALESCE(first_day, excluded.first_day), excluded.first_day)",
                 params![run.name, day],
             )?;
         }
@@ -1110,6 +1112,19 @@ mod tests {
         assert_eq!(runs(&conn), 2, "only today's two runs are kept");
         assert_eq!(skills_seen(&conn), seen);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_seen_skill_without_a_first_day_takes_the_next_known_one() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        prepare(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO skills_seen VALUES ('ce-plan', NULL);
+             INSERT INTO skill_runs VALUES ('s1', 'main', 'main', 0, 'ce-plan', 'tool', 't', '2026-10-02', 1, 0, 1, 0, 0, 1);",
+        )
+        .unwrap();
+        backfill_skills_seen(&conn).unwrap();
+        assert_eq!(skills_seen(&conn), [json!(["ce-plan", "2026-10-02"])], "a NULL day never sticks");
     }
 
     #[test]

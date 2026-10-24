@@ -524,7 +524,11 @@ impl App {
         // The header's figure also counts live usage the index hasn't caught up with.
         let rank = stats.0.entry(crate::badges::RANK_KEY).or_default();
         *rank = (*rank).max(self.counter.totals().1);
-        let b = crate::badges::badges(&stats);
+        self.announce(crate::badges::badges(&stats));
+    }
+
+    /// Shows `b` in the badge view, with a note for any level that rose since the last announcement.
+    fn announce(&mut self, b: Badges) {
         match crate::badges::pending_announcement(&b) {
             Ok(Some(text)) => self.announcement = Some(Announcement::new(text, b.clone())),
             Ok(None) => {}
@@ -614,8 +618,15 @@ impl App {
         if let Some(stats) = self.usage.tick() {
             self.after_sync(stats);
         }
-        if let Some(share) = self.share.as_mut() {
+        let prepared = self.share.as_mut().and_then(|share| {
             share.tick();
+            share.take_prepared()
+        });
+        // The share synced on its own thread, so the dashboard's next sync finds nothing new: take its
+        // rows and any badge level they raised here.
+        if let Some(b) = prepared {
+            self.usage.reload();
+            self.announce(b);
         }
         if let Ok(notice) = self.update_rx.try_recv() {
             self.update = Some(notice);

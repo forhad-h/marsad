@@ -106,6 +106,8 @@ const BADGE_R: f64 = 248.0;
 const TEXT_X: f64 = 622.0;
 const TEXT_W: f64 = 516.0;
 const STATS: usize = 4;
+/// The most achievements the card shows, in two columns.
+const AWARDS: usize = 4;
 const AWARD_COLS: usize = 2;
 /// The background lattice's spacing.
 const TILE: f64 = 58.0;
@@ -232,7 +234,7 @@ pub fn svg(d: &CardData) -> String {
     s.push_str(&badge_art::svg(d.tier, BADGE_X, BADGE_Y, BADGE_R));
 
     // The text block, centred between the top of the frame and the footer rule.
-    let rows = d.achievements.len().min(STATS).div_ceil(AWARD_COLS);
+    let rows = d.achievements.len().min(AWARDS).div_ceil(AWARD_COLS);
     let name = d.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
     let name_gap = if name.is_some() { 52.0 } else { 0.0 };
     let rank_gap = if name.is_some() { 86.0 } else { 94.0 };
@@ -260,7 +262,7 @@ pub fn svg(d: &CardData) -> String {
 
     let award_y = label_y + 40.0 + 64.0;
     let cell = TEXT_W / AWARD_COLS as f64;
-    for (i, a) in d.achievements.iter().take(STATS).enumerate() {
+    for (i, a) in d.achievements.iter().take(AWARDS).enumerate() {
         let (x, y) = (TEXT_X + cell * (i % AWARD_COLS) as f64, award_y + 42.0 * (i / AWARD_COLS) as f64);
         medal(&mut s, x + 13.0, y - 6.5, 14.0, a.medal);
         let text = format!("{} \u{b7} {}", a.label, a.value);

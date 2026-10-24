@@ -234,9 +234,11 @@ pub fn fmt_tokens(n: u64) -> String {
 
 /// A token count in short form: `fmt_tokens`, with billions and trillions so big totals stay short, and no `.0`.
 pub fn fmt_count(n: u64) -> String {
+    // Each unit starts where the one below would round up to `1000.0`, so 999.96M reads 1B.
     let s = match n {
-        0..1_000_000_000 => fmt_tokens(n),
-        1_000_000_000..1_000_000_000_000 => format!("{:.1}B", n as f64 / 1e9),
+        0..999_950 => fmt_tokens(n),
+        999_950..999_950_000 => format!("{:.1}M", n as f64 / 1e6),
+        999_950_000..999_950_000_000 => format!("{:.1}B", n as f64 / 1e9),
         _ => format!("{:.1}T", n as f64 / 1e12),
     };
     match s.find(".0") {
@@ -638,6 +640,10 @@ mod tests {
         assert_eq!(fmt_count(10_050_000), "10.1M");
         assert_eq!(fmt_count(12_300_000_000), "12.3B");
         assert_eq!(fmt_count(4_200_000_000_000), "4.2T");
+        assert_eq!(fmt_count(999_960), "1M", "no 1000k");
+        assert_eq!(fmt_count(999_960_000), "1B", "no 1000M");
+        assert_eq!(fmt_count(999_960_000_000), "1T", "no 1000B");
+        assert_eq!(fmt_count(999_900), "999.9k");
     }
 
     #[test]
