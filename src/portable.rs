@@ -270,8 +270,13 @@ mod tests {
         conn
     }
 
-    fn rand_suffix() -> u128 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    /// Unique per call: on Windows two parallel tests can read the same clock tick, share one
+    /// database and fail with "database is locked".
+    fn rand_suffix() -> String {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        format!("{nanos}-{n}")
     }
 
     fn all_time(conn: &Connection) -> i64 {
