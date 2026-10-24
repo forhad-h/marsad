@@ -16,6 +16,7 @@ mod model;
 mod portable;
 mod report;
 mod settings;
+mod share;
 mod statusline;
 mod store;
 mod transcript;
@@ -56,6 +57,8 @@ enum Cmd {
     Total(report::TotalArgs),
     /// Show your rank and achievement levels, with progress to the next.
     Badges(badges::BadgesArgs),
+    /// Print a LinkedIn post of today's work and your rank (--print), and write its PNG card.
+    Share(share::ShareArgs),
     /// Summarize token usage (by day, session, skill, project, model, agent).
     Report(report::ReportArgs),
     /// Run a read-only SQL query against the usage history.
@@ -121,6 +124,7 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::Retention(args)) => report::retention(args),
         Some(Cmd::Total(args)) => report::total(args),
         Some(Cmd::Badges(args)) => badges::run(args),
+        Some(Cmd::Share(args)) => share::run(args),
         Some(Cmd::Report(args)) => report::report(args),
         Some(Cmd::Sql(args)) => report::sql(args),
         Some(Cmd::Schema) => {
