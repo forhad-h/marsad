@@ -134,6 +134,9 @@ const CONTAINERS: [&str; 18] = [
     "repos", "repositories", "git", "github", "workspace", "workspaces", "sites",
 ];
 
+/// System folders above a cwd outside the home directory; they never count as names.
+const SYSTEM: [&str; 14] = ["srv", "opt", "var", "tmp", "private", "mnt", "media", "volumes", "usr", "local", "data", "home", "users", "root"];
+
 /// Words the summary and the drafted line use themselves; as a word of a longer name they never
 /// count (a project named exactly one of them still does, by its full name).
 const TOOLING: [&str; 10] = ["claude", "code", "agent", "agents", "subagent", "subagents", "skill", "skills", "worktree", "worktrees"];
@@ -169,15 +172,19 @@ fn names(work: &Work, home: Option<&Path>) -> Vec<String> {
     for s in &work.sessions {
         raw.push(s.project.clone());
         let cwd = Path::new(&s.cwd);
-        // Only components below the home directory: never home itself or its ancestors.
-        if let Some(rel) = home.and_then(|h| cwd.strip_prefix(h).ok()) {
-            let parts: Vec<String> = rel
-                .components()
-                .filter_map(|c| match c {
-                    std::path::Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
-                    _ => None,
-                })
-                .collect();
+        // Below the home directory, every component (never home itself or its ancestors); outside
+        // it, every component but system folders, so `/srv/clients/acme/app` names `acme` too.
+        let below_home = home.and_then(|h| cwd.strip_prefix(h).ok());
+        let parts: Vec<String> = below_home
+            .unwrap_or(cwd)
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .filter(|p| below_home.is_some() || !SYSTEM.contains(&p.to_lowercase().as_str()))
+            .collect();
+        {
             for (i, part) in parts.iter().enumerate() {
                 // A Claude Code worktree (`.claude/worktrees/<name>`) is tooling, not a name.
                 if part == ".claude" && parts.get(i + 1).is_some_and(|p| p == "worktrees") {
@@ -930,9 +937,14 @@ mod tests {
             assert!(n.contains(&want.to_string()), "{want} missing from {n:?}");
         }
         assert!(!n.contains(&"x".to_string()) && !n.contains(&"users".to_string()));
-        // Outside the home directory only the project counts; short tokens never do.
+        // Outside the home directory every folder counts except system ones; short tokens never do.
         let n = names(&work("wt-u5", "/private/tmp/wt-u5"), Some(Path::new("/Users/x")));
         assert_eq!(n, ["wt-u5", "wtu5"]);
+        let mut n = names(&work("app", "/srv/clients/acme/app"), Some(Path::new("/Users/x")));
+        n.sort();
+        assert_eq!(n, ["acme", "app", "clients"], "a client folder above the project is a name too");
+        let n = names(&work("web", "/opt/data/Volumes/GlobexCorp/web"), None);
+        assert!(n.contains(&"globexcorp".to_string()) && !n.contains(&"opt".to_string()) && !n.contains(&"data".to_string()), "{n:?}");
         assert_eq!(tokens("ACMEPortal_v2.web"), ["ACME", "Portal", "v2", "web"]);
     }
 

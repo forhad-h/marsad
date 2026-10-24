@@ -268,7 +268,8 @@ What leaves your machine before you share: only the summary Claude Code drafts t
 It holds today's session titles, skill names and subagent types with counts, and the token figures,
 with every project and folder name of today's sessions (and the words in them) removed, joined or
 camelCase spellings too (`acme-portal` also removes `AcmePortal`). Generic folders such as
-`Projects` or `code`, hidden folders and a `.claude/worktrees` path are not names, and neither are
+`Projects` or `code`, system folders above a project outside your home folder (`/srv`, `/opt`,
+`/tmp` …), hidden folders and a `.claude/worktrees` path are not names, and neither are
 words like Claude, code or agent inside a longer name. Project names and working directories
 themselves are never sent. The draft runs as one isolated
 `claude -p` call (`--safe-mode`, `--no-session-persistence`, no tools, the haiku model) in an empty
