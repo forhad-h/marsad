@@ -80,7 +80,7 @@ pub struct DayUsage {
 }
 
 /// Unix time of an entry's timestamp.
-fn unix_ts(e: &Value) -> Option<f64> {
+pub(crate) fn unix_ts(e: &Value) -> Option<f64> {
     let t = chrono::DateTime::parse_from_rfc3339(e["timestamp"].as_str()?).ok()?;
     Some(t.timestamp_millis() as f64 / 1000.0)
 }
@@ -479,7 +479,7 @@ impl TranscriptReader {
     }
 }
 
-fn parse_usage(u: &Value) -> TokenUsage {
+pub(crate) fn parse_usage(u: &Value) -> TokenUsage {
     let n = |k: &str| u[k].as_u64().unwrap_or(0);
     TokenUsage {
         input: n("input_tokens"),

@@ -6,8 +6,9 @@ description: Analyze Claude Code token usage over any period, including past and
 # Claude Code usage history (marsad)
 
 `marsad` keeps a SQLite history of every Claude Code session on this machine, built from
-transcripts and kept after Claude Code deletes them, for the last 30 days by default (`marsad retention`).
-`marsad total` gives the all-time token total (`--format json`), which also counts pruned days. Each command below indexes new transcript data first (add `--no-sync` to skip).
+transcripts and kept after Claude Code deletes them. Session details are kept for the last 30 days by
+default (`marsad retention`); daily token counts are kept forever. `marsad total` gives the all-time
+token total plus today, 7 and 30 days with daily averages (`--format json` adds a `periods` list). Each command below indexes new transcript data first (add `--no-sync` to skip).
 If `marsad` is not on PATH, run it by its full path: `"{{MARSAD_EXE}}"`.
 
 ## Live sessions (right now)
@@ -23,6 +24,19 @@ auto-compact; `context_estimated: true` means the window size was inferred from 
 `tokens_total`. The top-level `rate_limits.five_hour` / `seven_day` give `used_pct` and `resets_at`
 (Unix seconds), from the most recent status line report (claude.ai Pro/Max only; null otherwise).
 Live data is not in the usage database; use `marsad status` for it.
+
+## This session's context and handoffs
+
+```sh
+marsad context --format json       # the session this runs in: context_used / context_left / context_pct, warn_pct
+marsad context --session <id-prefix>
+```
+
+Run inside Claude Code, `marsad context` finds its own session. marsad also adds a note to the
+prompt once the context passes `warn_pct` (default 80) of the auto-compact point. When you see that
+note, or `context_pct` is high, offer to write a handoff prompt: the goal, what is done, decisions
+made, open questions, and the next steps, with file paths, so a fresh session can continue.
+`marsad context --warn <pct|off>` changes the threshold.
 
 ## Ready-made reports
 
@@ -50,8 +64,12 @@ Tables:
 - `sessions(session_id, project, cwd, title, model, first_at, last_at, transcript_path)`
 - `usage_daily(session_id, agent_id, agent_type, day, input, output, cache_read, cache_write, total, turns)` —
   one row per session × agent (`main` or a subagent) × local day.
-- `lifetime(since, through, input, output, cache_read, cache_write, total)` — one row: tokens of
-  days already pruned from `usage_daily`.
+- `token_days(session_id, agent_id, day, input, output, cache_read, cache_write, total, turns)` —
+  the permanent counter: same grain as `usage_daily` but never pruned. Use it for totals and daily
+  trends older than the retention window.
+- `legacy_totals(source, since, through, input, output, cache_read, cache_write, total)` — sums of
+  days pruned by marsad before 0.4, one row per install; those days have no `token_days` rows.
+- `lifetime` — frozen pre-0.4 data, already copied into `legacy_totals`; don't add it.
 - `skill_runs(session_id, agent_id, agent_type, seq, skill, via, at, day, turns, input, output, cache_read, cache_write, total)` —
   one row per skill invocation; `via` is `tool` (Claude invoked it) or `command` (user typed `/skill`).
 
@@ -71,8 +89,8 @@ marsad sql "SELECT skill, COUNT(*) calls, SUM(total)/COUNT(*) avg_tokens
 - Skill tokens are **approximate**: each run counts the turns between the skill's invocation and the
   next user prompt or next skill, so it includes work Claude did while following that skill.
 - Days are the machine's local dates. History goes back to the first indexed transcript;
-  `marsad retention` shows how many days are kept. For totals beyond that, use `marsad total`
-  or the `lifetime` table (all time = `lifetime` + `SUM(usage_daily)`).
+  `marsad retention` shows how many days of details are kept. For totals beyond that, use
+  `marsad total` or SQL (all time = `SUM(token_days.total)` + `SUM(legacy_totals.total)`).
 - Sessions that ran inside subagents appear under `agent_type` other than `main`.
 
 When reporting, lead with the answer (the top items and their share of the total), then

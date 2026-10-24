@@ -35,9 +35,33 @@ fn settings_path() -> PathBuf {
 fn is_ours(entry: &Value) -> bool {
     entry["hooks"].as_array().is_some_and(|hs| {
         hs.iter().any(|h| {
-            h["command"].as_str().is_some_and(|c| c.contains("marsad") && c.ends_with(" hook"))
+            h["command"].as_str().is_some_and(|c| c.contains("marsad") && (c.ends_with(" hook") || c.ends_with(CONTEXT_HOOK)))
         })
     })
+}
+
+/// Arguments of the prompt hook that adds the handoff warning to a session's context.
+const CONTEXT_HOOK: &str = " context --hook";
+
+/// Registers marsad for every event. The context hook is synchronous: only a hook Claude Code
+/// waits for can add text to the prompt.
+fn add_hooks(settings: &mut Map<String, Value>, exe: &str) -> anyhow::Result<()> {
+    let command = format!("\"{exe}\" hook");
+    let hooks = settings.entry("hooks").or_insert_with(|| json!({}));
+    let Value::Object(hooks) = hooks else { bail!("`hooks` in settings.json is not an object") };
+    for event in EVENTS {
+        let list = hooks.entry(*event).or_insert_with(|| json!([]));
+        let Value::Array(list) = list else { bail!("hooks.{event} is not an array") };
+        list.push(json!({
+            "hooks": [{ "type": "command", "command": command, "async": true, "timeout": 10 }]
+        }));
+        if *event == "UserPromptSubmit" {
+            list.push(json!({
+                "hooks": [{ "type": "command", "command": format!("\"{exe}\"{CONTEXT_HOOK}"), "timeout": 5 }]
+            }));
+        }
+    }
+    Ok(())
 }
 
 fn load() -> anyhow::Result<(PathBuf, Map<String, Value>)> {
@@ -127,22 +151,13 @@ fn uninstall_statusline(settings: &mut Map<String, Value>, original: &Path) {
 
 pub fn install(with_statusline: bool) -> anyhow::Result<()> {
     let exe = std::env::current_exe()?.canonicalize()?;
-    let command = format!("\"{}\" hook", exe.display());
     let (path, mut settings) = load()?;
     strip(&mut settings);
     if with_statusline {
         install_statusline(&mut settings, &exe.display().to_string(), &crate::statusline::original_path())?;
     }
 
-    let hooks = settings.entry("hooks").or_insert_with(|| json!({}));
-    let Value::Object(hooks) = hooks else { bail!("`hooks` in settings.json is not an object") };
-    for event in EVENTS {
-        let list = hooks.entry(*event).or_insert_with(|| json!([]));
-        let Value::Array(list) = list else { bail!("hooks.{event} is not an array") };
-        list.push(json!({
-            "hooks": [{ "type": "command", "command": command, "async": true, "timeout": 10 }]
-        }));
-    }
+    add_hooks(&mut settings, &exe.display().to_string())?;
     save(&path, settings)?;
     std::fs::create_dir_all(crate::data_dir())?;
     std::fs::create_dir_all(skill_dir())?;
@@ -262,5 +277,24 @@ mod tests {
         assert_eq!(s["hooks"]["Stop"].as_array().unwrap().len(), 1);
         assert!(s["hooks"].get("PreToolUse").is_none());
         assert_eq!(s["model"], "opus");
+    }
+
+    #[test]
+    fn reinstall_keeps_one_async_and_one_sync_prompt_hook() {
+        let foreign = json!({ "hooks": [{ "type": "command", "command": "echo hi" }] });
+        let mut s = settings(json!({ "hooks": { "UserPromptSubmit": [foreign.clone()] } }));
+        for _ in 0..2 {
+            strip(&mut s);
+            add_hooks(&mut s, "/x/marsad").unwrap();
+        }
+        let prompt = s["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        let commands: Vec<(&str, bool)> = prompt
+            .iter()
+            .map(|e| (e["hooks"][0]["command"].as_str().unwrap(), e["hooks"][0]["async"] == true))
+            .collect();
+        assert_eq!(commands, [("echo hi", false), ("\"/x/marsad\" hook", true), ("\"/x/marsad\" context --hook", false)]);
+        assert_eq!(s["hooks"]["Stop"].as_array().unwrap().len(), 1, "other events get only the async hook");
+        strip(&mut s);
+        assert_eq!(s["hooks"]["UserPromptSubmit"], json!([foreign]), "uninstall removes both");
     }
 }

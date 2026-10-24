@@ -112,9 +112,10 @@ fn report_sql(by: By) -> String {
     let usage_cols = "SUM(u.total) AS total, SUM(u.input) AS input, SUM(u.output) AS output,
                       SUM(u.cache_read) AS cache_read, SUM(u.cache_write) AS cache_write, SUM(u.turns) AS turns";
     match by {
+        // Days come from the permanent counter, so they outlive the retention.
         By::Day => format!(
             "SELECT u.day, {usage_cols}, COUNT(DISTINCT u.session_id) AS sessions
-             FROM usage_daily u LEFT JOIN sessions s USING (session_id) WHERE {}
+             FROM token_days u LEFT JOIN sessions s USING (session_id) WHERE {}
              GROUP BY u.day ORDER BY u.day DESC LIMIT ?5",
             filter("u")
         ),
@@ -178,14 +179,19 @@ pub struct TotalArgs {
     no_sync: bool,
 }
 
-/// All-time token totals, including days already pruned from the history: a shareable number
-/// with no per-session detail.
+/// All-time token totals, including days whose detail was pruned, plus today, 7-day and 30-day
+/// totals with daily averages: shareable numbers with no per-session detail.
 pub fn total(a: TotalArgs) -> anyhow::Result<()> {
     ensure_synced(a.no_sync)?;
     let conn = store::open_readonly()?;
     let t = store::lifetime(&conn)?;
+    let periods = store::periods(&conn, &store::day_n_ago(1))?;
     match a.format {
-        Format::Json => println!("{}", serde_json::to_string_pretty(&t)?),
+        Format::Json => {
+            let mut v = serde_json::to_value(&t)?;
+            v["periods"] = serde_json::to_value(&periods)?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
         Format::Csv => {
             println!("since,input,output,cache_read,cache_write,total");
             let since = t.since.as_deref().unwrap_or("");
@@ -206,6 +212,16 @@ pub fn total(a: TotalArgs) -> anyhow::Result<()> {
                 n(t.cache_read),
                 n(t.cache_write)
             );
+            for p in &periods {
+                let label = match p.period {
+                    "today" => "today".to_string(),
+                    "all" => "all time".to_string(),
+                    other => format!("last {}", other.replace('d', " days")),
+                };
+                let short = crate::model::fmt_tokens(p.total.max(0) as u64);
+                let avg = crate::model::fmt_tokens(p.daily_average.max(0) as u64);
+                println!("  {label:<12} {short:>7}  ({avg}/day)");
+            }
         }
     }
     Ok(())
@@ -223,7 +239,7 @@ pub fn retention(a: RetentionArgs) -> anyhow::Result<()> {
     store::set_retention(days)?;
     println!("Keeping usage history {}.", store::retention_label(days));
     if days.is_some() {
-        println!("Older rows are deleted on the next sync; their tokens stay in `marsad total`.");
+        println!("Older session and skill detail is deleted on the next sync; daily totals are kept.");
     }
     Ok(())
 }
@@ -233,8 +249,8 @@ pub fn schema() {
     match store::retention() {
         None => println!("-- Local-date usage, kept forever (also for sessions whose transcripts were deleted)."),
         Some(n) => println!(
-            "-- Local-date usage for the last {n} days. Older rows are deleted automatically,\n\
-             -- after their tokens are added to `lifetime` (all time = lifetime + SUM(usage_daily))."
+            "-- Session and skill detail for the last {n} days; older rows are deleted automatically.\n\
+             -- token_days keeps every day: all time = SUM(token_days.total) + SUM(legacy_totals.total)."
         ),
     }
     println!("{}", store::SCHEMA.trim());
@@ -328,6 +344,7 @@ mod tests {
         conn.execute_batch(
             "INSERT INTO sessions (session_id, project, model) VALUES ('abc', 'web', 'claude-opus-5-5');
              INSERT INTO usage_daily VALUES ('abc', 'main', 'main', '2026-10-09', 1, 2, 3, 4, 10, 1);
+             INSERT INTO token_days VALUES ('abc', 'main', '2026-10-09', 1, 2, 3, 4, 10, 1);
              INSERT INTO skill_runs VALUES ('abc', 'main', 'main', 0, 'ce-plan', 'tool', 't', '2026-10-09', 1, 1, 1, 1, 1, 4);",
         )
         .unwrap();
@@ -342,5 +359,10 @@ mod tests {
             let miss = store::query(&conn, &sql, &[&some("2026-10-10"), &none, &none, &none, &25]).unwrap();
             assert!(miss.rows.is_empty(), "date filter excludes");
         }
+        // A day whose detail was pruned still reports, with the same columns.
+        conn.execute_batch("INSERT INTO token_days VALUES ('old', 'main', '2026-07-01', 0, 5, 0, 0, 5, 2);").unwrap();
+        let days = store::query(&conn, &report_sql(By::Day), &[&none, &none, &none, &none, &25]).unwrap();
+        assert_eq!(days.rows.len(), 2);
+        assert!(days.columns.contains(&"turns".to_string()));
     }
 }

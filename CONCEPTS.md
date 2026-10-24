@@ -22,3 +22,19 @@ Why a session last went Idle: it finished its turn, it was interrupted, or somet
 
 ### Background shell
 A shell command Claude left running after its tool call returned, either because it asked to or because the command timed out and was moved to the background. It keeps its session Active until a task notification reports it finished. Shells launched by an earlier process of a resumed session are ignored, since they never report.
+
+## Token history
+
+### Day counter
+The permanent record of tokens used per session, agent and local calendar day. Retention never prunes it, so totals for any day, week or all time come from it.
+*Avoid:* lifetime total
+
+Retention prunes only the detail history (sessions, per-agent days, skill runs); the day counter outlives it. Re-indexing a transcript replaces that transcript's days rather than adding to them.
+
+### Legacy total
+One all-time sum of days that a version before the day counter had already pruned, kept per install together with the day range it covers. Its parts are gone, so it counts toward all-time totals but toward no single day.
+
+Days inside a legacy total's range never enter the day counter, but only when the legacy total is this install's own or came from a restore import. Another install's legacy total covers only that install's sessions and blocks nothing here.
+
+### Restore import
+An import the user marks as this machine's own earlier data, for a reinstall with the old transcripts still on disk. It makes the file's legacy totals block the day counter here too, and removes days already counted inside them. A plain import never removes this machine's days.

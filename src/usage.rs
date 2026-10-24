@@ -55,26 +55,14 @@ impl Period {
     pub fn label(self) -> String {
         match self.days() {
             Some(n) => format!("last {n} days"),
-            None => "all kept history".into(),
+            None => "all time".into(),
         }
     }
 
-    /// Periods worth offering when `retention` days are kept: shorter ones, then the whole history.
-    fn available(retention: Option<u32>) -> Vec<Period> {
-        Self::ORDER
-            .into_iter()
-            .filter(|p| match (p.days(), retention) {
-                (None, _) => true,
-                (Some(d), Some(r)) => d < r,
-                (Some(_), None) => true,
-            })
-            .collect()
-    }
-
-    fn shift(self, delta: isize, retention: Option<u32>) -> Self {
-        let periods = Self::available(retention);
-        let i = periods.iter().position(|p| *p == self).unwrap_or(0) as isize;
-        periods[(i + delta).rem_euclid(periods.len() as isize) as usize]
+    /// Every period has per-day totals, since the day counter outlives the retention.
+    fn shift(self, delta: isize) -> Self {
+        let i = Self::ORDER.iter().position(|p| *p == self).unwrap_or(0) as isize;
+        Self::ORDER[(i + delta).rem_euclid(Self::ORDER.len() as isize) as usize]
     }
 }
 
@@ -104,8 +92,6 @@ pub struct Drill {
 
 pub struct Usage {
     pub period: Period,
-    /// Days of history kept (None = forever); limits which periods are offered.
-    pub retention: Option<u32>,
     pub summary: Summary,
     /// All-time token totals, including pruned days.
     pub lifetime: store::Lifetime,
@@ -131,7 +117,6 @@ impl Usage {
     pub fn new() -> Self {
         Self {
             period: Period::All,
-            retention: store::retention(),
             summary: Summary::default(),
             lifetime: store::Lifetime::default(),
             days: Vec::new(),
@@ -201,7 +186,7 @@ impl Usage {
             }
         }
         let conn = self.conn.as_ref().expect("opened above");
-        let start = self.period.days().or(self.retention).map(store::day_n_ago);
+        let start = self.period.days().map(store::day_n_ago);
         let result = (|| -> anyhow::Result<()> {
             let period = store::Days::since(start.as_deref());
             self.days = store::days(conn, period)?;
@@ -227,12 +212,9 @@ impl Usage {
         self.skill_idx = self.skill_idx.min(self.skills.len().saturating_sub(1));
     }
 
-    /// The selected period in words; the whole history reads as its length when it is limited.
+    /// The selected period in words.
     pub fn period_label(&self) -> String {
-        match (self.period, self.retention) {
-            (Period::All, Some(r)) => format!("last {r} days"),
-            (p, _) => p.label(),
-        }
+        self.period.label()
     }
 
     fn set_period(&mut self, period: Period) {
@@ -287,8 +269,8 @@ impl Usage {
         match code {
             KeyCode::Esc | KeyCode::Char('u') => return false,
             KeyCode::Char('r') => self.start_sync(),
-            KeyCode::Char('p') => self.set_period(self.period.shift(1, self.retention)),
-            KeyCode::Char('P') => self.set_period(self.period.shift(-1, self.retention)),
+            KeyCode::Char('p') => self.set_period(self.period.shift(1)),
+            KeyCode::Char('P') => self.set_period(self.period.shift(-1)),
             KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => self.focus = self.focus.next(),
             KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => self.focus = self.focus.prev(),
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
@@ -332,8 +314,13 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(store::SCHEMA).unwrap();
         conn.execute_batch(rows).unwrap();
+        // Indexing writes the permanent counter alongside the detail rows.
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO token_days
+             SELECT session_id, agent_id, day, input, output, cache_read, cache_write, total, turns FROM usage_daily",
+        )
+        .unwrap();
         let mut u = Usage::new();
-        u.retention = Some(30);
         u.conn = Some(conn);
         u.reload();
         u
@@ -401,30 +388,23 @@ mod tests {
         let old = store::day_n_ago(100);
         let mut u = usage_with(&format!(
             "INSERT INTO usage_daily VALUES ('s1', 'main', 'main', '{today}', 0, 0, 0, 0, 300, 1);
-             INSERT INTO usage_daily VALUES ('s2', 'main', 'main', '{old}', 0, 0, 0, 0, 900, 1);
-             INSERT INTO lifetime VALUES (1, '2026-01-01', '2026-02-01', 0, 0, 0, 0, 5000);"
+             INSERT INTO token_days VALUES ('s2', 'main', '{old}', 0, 0, 0, 0, 900, 1);
+             INSERT INTO legacy_totals VALUES ('here', '2026-01-01', '2026-02-01', 0, 0, 0, 0, 5000);"
         ));
-        // Kept for 30 days: the whole history means the last 30 days, and only 7 days is shorter.
+        // Covers AE1: a day whose detail was pruned still shows in the whole history.
         assert_eq!(u.period, Period::All);
-        assert_eq!(u.days.len(), 1, "100-day-old usage is outside the last 30 days");
-        assert_eq!((u.summary.total, u.summary.sessions, u.summary.span_days), (300, 1, 30));
-        assert_eq!(u.summary.daily_average(), 10);
+        assert_eq!(u.days.len(), 2);
+        assert_eq!(u.summary.busiest, Some((old.clone(), 900)));
+        assert_eq!((u.summary.total, u.summary.sessions, u.summary.span_days), (1200, 1, 100));
+        assert_eq!(u.summary.daily_average(), 12);
         assert_eq!(u.lifetime.total, 5000 + 300 + 900);
         assert_eq!(u.lifetime.since.as_deref(), Some("2026-01-01"));
         u.on_key(KeyCode::Char('p'));
         assert_eq!(u.period, Period::Week);
-        assert_eq!(u.summary.span_days, 7);
-        u.on_key(KeyCode::Char('p'));
-        assert_eq!(u.period, Period::All, "wraps around");
-
-        // Kept forever: every period is offered, and the whole history starts at the first day.
-        u.retention = None;
+        assert_eq!((u.days.len(), u.summary.span_days), (1, 7));
         u.on_key(KeyCode::Char('P'));
-        assert_eq!(u.period, Period::Year);
+        u.on_key(KeyCode::Char('P'));
+        assert_eq!(u.period, Period::Year, "wraps around");
         assert_eq!(u.days.len(), 2);
-        assert_eq!(u.summary.busiest, Some((old.clone(), 900)));
-        u.on_key(KeyCode::Char('p'));
-        assert_eq!(u.period, Period::All);
-        assert_eq!(u.summary.span_days, 100);
     }
 }

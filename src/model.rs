@@ -273,6 +273,16 @@ pub fn auto_compact_window() -> Option<u64> {
     }
 }
 
+/// Context used per whichever source reported most recently: the transcript's latest
+/// `(used, unix time)` or the status line snapshot.
+pub fn fresher_used(transcript: Option<(u64, f64)>, snap: Option<&StatusSnapshot>) -> Option<u64> {
+    let from_snapshot = snap.and_then(|s| s.used.map(|u| (u, s.ts)));
+    match (transcript, from_snapshot) {
+        (Some(t), Some(s)) => Some(if s.1 > t.1 { s.0 } else { t.0 }),
+        (t, s) => Some(t.or(s)?.0),
+    }
+}
+
 /// Context fill relative to the auto-compact point, given the prompt size of the latest
 /// API call. `reported_window` is the exact size from the status line, when known.
 pub fn context_info(used: u64, model: Option<&str>, reported_window: Option<u64>, compact_window: Option<u64>) -> ContextInfo {
@@ -470,13 +480,8 @@ impl Session {
     /// user's `autoCompactWindow` setting, if any.
     pub fn context(&self, compact_window: Option<u64>) -> Option<ContextInfo> {
         let snap = self.snapshot.as_ref();
-        // Prefer whichever source reported most recently.
-        let from_snapshot = snap.and_then(|s| s.used.map(|u| (u, s.ts)));
         let from_transcript = self.stats.context_used.map(|u| (u, self.stats.context_at.unwrap_or(0.0)));
-        let used = match (from_transcript, from_snapshot) {
-            (Some(t), Some(s)) => if s.1 > t.1 { s.0 } else { t.0 },
-            (t, s) => t.or(s)?.0,
-        };
+        let used = fresher_used(from_transcript, snap)?;
         let model = snap.and_then(|s| s.model.clone()).or(self.model.clone()).or(self.stats.model.clone());
         Some(context_info(used, model.as_deref(), snap.and_then(|s| s.window), compact_window))
     }

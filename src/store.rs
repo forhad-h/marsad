@@ -3,14 +3,14 @@
 //! Built from Claude Code transcripts, re-reading a file only when its size or mtime
 //! changes. Tokens are bucketed by the local day each API call happened; skill runs by
 //! the day they started. Rows outlive their transcripts (Claude Code deletes those after
-//! `cleanupPeriodDays`) and are kept for `marsad retention` days (30 by default). Before
-//! old rows are deleted, their token counts are added to `lifetime`, a single row of
-//! all-time totals with no per-session detail.
+//! `cleanupPeriodDays`). Session and skill detail is kept for `marsad retention` days (30 by
+//! default); `token_days` is the permanent counter and is never pruned. Versions before 0.4
+//! folded pruned days into one `lifetime` row; that sum lives on in `legacy_totals`.
 
 use crate::model::{DAY_FMT, MAIN_AGENT};
 use crate::transcript::{self, TranscriptReader};
 use anyhow::Context;
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -58,17 +58,41 @@ CREATE TABLE IF NOT EXISTS skill_runs (
     PRIMARY KEY (session_id, agent_id, seq)
 );
 CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, size INTEGER, mtime REAL);
-CREATE TABLE IF NOT EXISTS lifetime (
-    id          INTEGER PRIMARY KEY CHECK (id = 1),
-    since       TEXT,       -- oldest local day counted
-    through     TEXT,       -- days before this were pruned into these totals and are never indexed again
+CREATE TABLE IF NOT EXISTS token_days (   -- permanent counter, never pruned; all time = this + legacy_totals
+    session_id  TEXT,
+    agent_id    TEXT,
+    day         TEXT,       -- local date YYYY-MM-DD
     input       INTEGER,
     output      INTEGER,
     cache_read  INTEGER,
     cache_write INTEGER,
-    total       INTEGER     -- tokens of usage_daily rows already pruned; add usage_daily for all time
+    total       INTEGER,
+    turns       INTEGER,
+    PRIMARY KEY (session_id, agent_id, day)
+);
+CREATE TABLE IF NOT EXISTS legacy_totals (  -- days pruned by versions before 0.4, per install that pruned them
+    source      TEXT PRIMARY KEY,   -- install id (meta.install_id of that machine)
+    since       TEXT,       -- oldest pruned day
+    through     TEXT,       -- days in [since, through) are only in this sum and never enter token_days
+    input       INTEGER,
+    output      INTEGER,
+    cache_read  INTEGER,
+    cache_write INTEGER,
+    total       INTEGER
+);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);  -- install_id, schema, restored:<source>
+CREATE TABLE IF NOT EXISTS lifetime (      -- frozen pre-0.4 data, copied into legacy_totals; no longer written
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    since       TEXT,
+    through     TEXT,
+    input       INTEGER,
+    output      INTEGER,
+    cache_read  INTEGER,
+    cache_write INTEGER,
+    total       INTEGER
 );
 CREATE INDEX IF NOT EXISTS usage_daily_day ON usage_daily(day);
+CREATE INDEX IF NOT EXISTS token_days_day ON token_days(day);
 CREATE INDEX IF NOT EXISTS skill_runs_day ON skill_runs(day);
 ";
 
@@ -80,15 +104,89 @@ pub fn open() -> anyhow::Result<Connection> {
     open_at(&db_path())
 }
 
-fn open_at(path: &Path) -> anyhow::Result<Connection> {
+pub(crate) fn open_at(path: &Path) -> anyhow::Result<Connection> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(10))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.execute_batch(SCHEMA)?;
+    prepare(&mut conn)?;
     Ok(conn)
+}
+
+/// Schema version this build writes; older databases are migrated on open.
+const SCHEMA_VERSION: i64 = 1;
+
+fn schema_version(conn: &Connection) -> i64 {
+    conn.query_row("SELECT value FROM meta WHERE key = 'schema'", [], |r| r.get::<_, String>(0))
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Creates missing tables and migrates older data.
+fn prepare(conn: &mut Connection) -> anyhow::Result<()> {
+    conn.execute_batch(SCHEMA)?;
+    if schema_version(conn) >= SCHEMA_VERSION {
+        return Ok(());
+    }
+    // Immediate takes the write lock before re-reading the version, so two first openers can't
+    // both migrate: the second waits on the busy timeout, then sees it done.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if schema_version(&tx) >= SCHEMA_VERSION {
+        return Ok(());
+    }
+    tx.execute("INSERT OR IGNORE INTO meta VALUES ('install_id', ?1)", [new_install_id()])?;
+    // The old all-time sum keeps its pruned range, so those days are never counted again.
+    tx.execute(
+        "INSERT OR IGNORE INTO legacy_totals
+         SELECT (SELECT value FROM meta WHERE key = 'install_id'), since, through,
+                input, output, cache_read, cache_write, total
+         FROM lifetime WHERE id = 1 AND since IS NOT NULL",
+        [],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO token_days
+         SELECT session_id, agent_id, day, input, output, cache_read, cache_write, total, turns FROM usage_daily",
+        [],
+    )?;
+    // Re-read every transcript still on disk once, so days the old retention skipped are counted.
+    tx.execute("DELETE FROM files", [])?;
+    tx.execute("INSERT OR REPLACE INTO meta VALUES ('schema', ?1)", [SCHEMA_VERSION.to_string()])?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn new_install_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}-{:x}", nanos, std::process::id())
+}
+
+/// This machine's id, which tags the legacy totals it pruned and its exports.
+pub fn install_id(conn: &Connection) -> anyhow::Result<String> {
+    Ok(conn.query_row("SELECT value FROM meta WHERE key = 'install_id'", [], |r| r.get(0))?)
+}
+
+/// Legacy rows whose days stay out of the day counter: this install's own, and those restored
+/// with `marsad import --restore`. Another machine's merged legacy sum covers only its sessions,
+/// so it never blocks this machine's days.
+pub(crate) const BLOCKING_LEGACY: &str = "l.since IS NOT NULL AND l.through IS NOT NULL
+    AND (l.source = (SELECT value FROM meta WHERE key = 'install_id')
+         OR EXISTS (SELECT 1 FROM meta WHERE key = 'restored:' || l.source))";
+
+/// `[since, through)` day ranges that only legacy totals count.
+pub fn legacy_ranges(conn: &Connection) -> anyhow::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(&format!("SELECT l.since, l.through FROM legacy_totals l WHERE {BLOCKING_LEGACY}"))?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+pub(crate) fn in_legacy(ranges: &[(String, String)], day: &str) -> bool {
+    ranges.iter().any(|(since, through)| day >= since.as_str() && day < through.as_str())
 }
 
 /// Read-only handle for user/Claude-supplied SQL.
@@ -97,8 +195,14 @@ pub fn open_readonly() -> anyhow::Result<Connection> {
 }
 
 fn open_readonly_at(path: &Path) -> anyhow::Result<Connection> {
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .context("no usage history yet; run `marsad sync` first")?;
+    let readonly = || Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY);
+    let mut conn = readonly().context("no usage history yet; run `marsad sync` first")?;
+    // A database from an older version is migrated before its first read.
+    if schema_version(&conn) < SCHEMA_VERSION {
+        drop(conn);
+        drop(open_at(path)?);
+        conn = readonly()?;
+    }
     conn.busy_timeout(Duration::from_secs(10))?;
     conn.pragma_update(None, "query_only", true)?;
     Ok(conn)
@@ -116,20 +220,12 @@ pub fn day_n_ago(n: u32) -> String {
         .to_string()
 }
 
-fn retention_path() -> PathBuf {
-    crate::data_dir().join("history.json")
-}
-
 /// Days of history to keep unless `marsad retention` says otherwise.
 pub const DEFAULT_RETENTION_DAYS: u32 = 30;
 
 /// Days of history to keep; None keeps everything.
 pub fn retention() -> Option<u32> {
-    let saved = std::fs::read_to_string(retention_path())
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|v| v.get("retention_days").and_then(Value::as_u64));
-    match saved {
+    match crate::settings::retention_days() {
         None => Some(DEFAULT_RETENTION_DAYS),
         Some(0) => None,
         Some(n) => Some(n as u32),
@@ -137,13 +233,8 @@ pub fn retention() -> Option<u32> {
 }
 
 pub fn set_retention(days: Option<u32>) -> anyhow::Result<()> {
-    let path = retention_path();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
     // 0 = forever.
-    std::fs::write(path, serde_json::to_vec_pretty(&json!({ "retention_days": days.unwrap_or(0) }))?)?;
-    Ok(())
+    crate::settings::set_retention_days(days.unwrap_or(0) as u64)
 }
 
 /// "forever" or "the last N days", for messages.
@@ -211,25 +302,19 @@ pub struct SyncReport {
     pub pruned: usize,
 }
 
-/// Indexes new or changed transcripts under `~/.claude/projects`, then prunes rows
-/// older than the retention (unless it is forever).
+/// Indexes new or changed transcripts under `~/.claude/projects`, then prunes detail rows
+/// older than the retention (unless it is forever). The permanent counter is never pruned.
 pub fn sync(conn: &mut Connection) -> anyhow::Result<SyncReport> {
     sync_dir(conn, &crate::claude_dir().join("projects"), retention())
 }
 
 pub fn sync_dir(conn: &mut Connection, projects: &Path, retention: Option<u32>) -> anyhow::Result<SyncReport> {
     let cutoff = retention.map(day_n_ago);
-    let cutoff_time = retention.map(|n| crate::now() - n as f64 * 86400.0);
-    // Never re-insert a day already folded into `lifetime`, even after the retention grows.
-    let through: Option<String> = conn.query_row("SELECT through FROM lifetime", [], |r| r.get(0)).ok().flatten();
-    let floor = cutoff.clone().max(through);
+    let legacy = legacy_ranges(conn)?;
     let mut report = SyncReport::default();
 
     for unit in units(projects) {
         let Some((size, mtime)) = file_sig(&unit.path) else { continue };
-        if cutoff_time.is_some_and(|t| mtime < t) {
-            continue;
-        }
         report.scanned += 1;
         let path_str = unit.path.to_string_lossy().into_owned();
         let known: Option<(i64, f64)> = conn
@@ -241,25 +326,38 @@ pub fn sync_dir(conn: &mut Connection, projects: &Path, retention: Option<u32>) 
         }
         let mut reader = TranscriptReader::new(unit.path.clone());
         reader.poll();
+        // A file that yields no usage although the counter has rows for it was unreadable or
+        // emptied; replacing would erase permanent tokens, so keep them and retry next sync.
+        if reader.daily().is_empty() && has_token_days(conn, &unit)? {
+            report.failed += 1;
+            continue;
+        }
         // One bad file must not block indexing of the rest.
-        match write_unit(conn, &unit, &reader, floor.as_deref(), (size, mtime)) {
+        match write_unit(conn, &unit, &reader, cutoff.as_deref(), &legacy, (size, mtime)) {
             Ok(()) => report.updated += 1,
             Err(_) => report.failed += 1,
         }
     }
 
-    if let (Some(cutoff), Some(cutoff_time)) = (&cutoff, cutoff_time) {
-        report.pruned = prune(conn, cutoff, cutoff_time)?;
+    if let Some(cutoff) = &cutoff {
+        report.pruned = prune(conn, cutoff)?;
     }
     Ok(report)
 }
 
-/// Replaces one file's rows and records its signature, in a single transaction.
+fn has_token_days(conn: &Connection, unit: &Unit) -> anyhow::Result<bool> {
+    let mut stmt = conn.prepare_cached("SELECT 1 FROM token_days WHERE session_id = ?1 AND agent_id = ?2 LIMIT 1")?;
+    Ok(stmt.exists(params![unit.session_id, unit.agent_id])?)
+}
+
+/// Replaces one file's rows and records its signature, in a single transaction. Detail rows
+/// start at `cutoff`; counter rows cover every day outside the `legacy` ranges.
 fn write_unit(
     conn: &mut Connection,
     unit: &Unit,
     reader: &TranscriptReader,
     cutoff: Option<&str>,
+    legacy: &[(String, String)],
     (size, mtime): (i64, f64),
 ) -> anyhow::Result<()> {
     let stats = reader.stats();
@@ -268,16 +366,28 @@ fn write_unit(
     let key = params![unit.session_id, unit.agent_id];
     tx.execute("DELETE FROM usage_daily WHERE session_id = ?1 AND agent_id = ?2", key)?;
     tx.execute("DELETE FROM skill_runs WHERE session_id = ?1 AND agent_id = ?2", key)?;
+    // Replaced rather than merged, so usage re-bucketed after a timezone change isn't counted
+    // twice. Days inside a legacy range never have rows here, so none are lost.
+    tx.execute("DELETE FROM token_days WHERE session_id = ?1 AND agent_id = ?2", key)?;
 
-    for (day, d) in reader.daily().iter().filter(|(day, _)| cutoff.is_none_or(|c| day.as_str() >= c)) {
+    for (day, d) in &reader.daily() {
         let t = d.tokens;
-        tx.execute(
-            "INSERT INTO usage_daily VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                unit.session_id, unit.agent_id, agent_type, day,
-                t.input as i64, t.output as i64, t.cache_read as i64, t.cache_write as i64, t.total() as i64, d.turns
-            ],
-        )?;
+        let row = params![
+            unit.session_id, unit.agent_id, day,
+            t.input as i64, t.output as i64, t.cache_read as i64, t.cache_write as i64, t.total() as i64, d.turns
+        ];
+        if !in_legacy(legacy, day) {
+            tx.execute("INSERT INTO token_days VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", row)?;
+        }
+        if cutoff.is_none_or(|c| day.as_str() >= c) {
+            tx.execute(
+                "INSERT INTO usage_daily VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    unit.session_id, unit.agent_id, agent_type, day,
+                    t.input as i64, t.output as i64, t.cache_read as i64, t.cache_write as i64, t.total() as i64, d.turns
+                ],
+            )?;
+        }
     }
     for (seq, run) in stats.runs.iter().enumerate() {
         let day = run.at.as_deref().and_then(transcript::local_day);
@@ -316,27 +426,10 @@ fn write_unit(
     Ok(())
 }
 
-/// Adds the token counts of rows older than the retention window to `lifetime`, then deletes
-/// them; returns how many usage rows went. A pruned day is never re-inserted (indexing skips
-/// days before the cutoff), so nothing is counted twice.
-fn prune(conn: &mut Connection, cutoff: &str, cutoff_time: f64) -> anyhow::Result<usize> {
+/// Deletes session and skill detail older than the retention window; returns how many rows
+/// went. The permanent counter (`token_days`) keeps those days.
+fn prune(conn: &mut Connection, cutoff: &str) -> anyhow::Result<usize> {
     let tx = conn.transaction()?;
-    tx.execute("INSERT OR IGNORE INTO lifetime VALUES (1, NULL, NULL, 0, 0, 0, 0, 0)", [])?;
-    let old = "FROM usage_daily WHERE day < ?1";
-    tx.execute(
-        &format!(
-            "UPDATE lifetime SET
-               since = (SELECT MIN(d) FROM (SELECT lifetime.since AS d UNION ALL SELECT MIN(day) {old})),
-               through = MAX(COALESCE(through, ''), ?1),
-               input = input + (SELECT COALESCE(SUM(input), 0) {old}),
-               output = output + (SELECT COALESCE(SUM(output), 0) {old}),
-               cache_read = cache_read + (SELECT COALESCE(SUM(cache_read), 0) {old}),
-               cache_write = cache_write + (SELECT COALESCE(SUM(cache_write), 0) {old}),
-               total = total + (SELECT COALESCE(SUM(total), 0) {old})
-             WHERE id = 1"
-        ),
-        [cutoff],
-    )?;
     let mut pruned = tx.execute("DELETE FROM usage_daily WHERE day < ?1", [cutoff])?;
     pruned += tx.execute("DELETE FROM skill_runs WHERE day < ?1", [cutoff])?;
     tx.execute(
@@ -344,14 +437,13 @@ fn prune(conn: &mut Connection, cutoff: &str, cutoff_time: f64) -> anyhow::Resul
            AND session_id NOT IN (SELECT session_id FROM skill_runs)",
         [],
     )?;
-    tx.execute("DELETE FROM files WHERE mtime < ?1", [cutoff_time])?;
     tx.commit()?;
     Ok(pruned)
 }
 
 // ---------- queries shared by the TUI and `marsad report` ----------
 
-/// All-time token totals: pruned rows plus what is still in the window.
+/// All-time token totals: the permanent counter plus totals pruned by earlier versions.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct Lifetime {
     /// Oldest local day counted; None when there is no usage yet.
@@ -365,13 +457,14 @@ pub struct Lifetime {
 
 pub fn lifetime(conn: &Connection) -> anyhow::Result<Lifetime> {
     Ok(conn.query_row(
-        "SELECT (SELECT MIN(d) FROM (SELECT since AS d FROM lifetime UNION ALL SELECT MIN(day) FROM usage_daily)),
+        "SELECT (SELECT MIN(d) FROM (SELECT MIN(since) AS d FROM legacy_totals UNION ALL SELECT MIN(day) FROM token_days)),
                 COALESCE(l.input, 0) + COALESCE(u.input, 0), COALESCE(l.output, 0) + COALESCE(u.output, 0),
                 COALESCE(l.cache_read, 0) + COALESCE(u.cache_read, 0),
                 COALESCE(l.cache_write, 0) + COALESCE(u.cache_write, 0), COALESCE(l.total, 0) + COALESCE(u.total, 0)
          FROM (SELECT SUM(input) input, SUM(output) output, SUM(cache_read) cache_read,
-                      SUM(cache_write) cache_write, SUM(total) total FROM usage_daily) u
-         LEFT JOIN lifetime l ON l.id = 1",
+                      SUM(cache_write) cache_write, SUM(total) total FROM token_days) u,
+              (SELECT SUM(input) input, SUM(output) output, SUM(cache_read) cache_read,
+                      SUM(cache_write) cache_write, SUM(total) total FROM legacy_totals) l",
         [],
         |r| {
             Ok(Lifetime {
@@ -384,6 +477,49 @@ pub fn lifetime(conn: &Connection) -> anyhow::Result<Lifetime> {
             })
         },
     )?)
+}
+
+/// Tokens over one stretch of days, with the per-day average over its calendar days.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct PeriodTotal {
+    pub period: &'static str,
+    pub days: i64,
+    pub total: i64,
+    pub daily_average: i64,
+}
+
+/// Totals for today, the last 7 and 30 days, and all time (which starts at the first counted day).
+pub fn periods(conn: &Connection, today: &str) -> anyhow::Result<Vec<PeriodTotal>> {
+    let parse = |d: &str| chrono::NaiveDate::parse_from_str(d, DAY_FMT);
+    let today_date = parse(today)?;
+    let since_day = |n: u64| (today_date - chrono::Days::new(n - 1)).format(DAY_FMT).to_string();
+    let sum = |from: &str| -> anyhow::Result<i64> {
+        Ok(conn.query_row(
+            "SELECT COALESCE(SUM(total), 0) FROM token_days WHERE day >= ?1 AND day <= ?2",
+            [from, today],
+            |r| r.get(0),
+        )?)
+    };
+    let all = lifetime(conn)?;
+    let all_days = all.since.as_deref().and_then(|d| parse(d).ok()).map_or(0, |d| (today_date - d).num_days() + 1);
+    let mut out = Vec::new();
+    for (period, days, total) in [
+        ("today", 1, sum(today)?),
+        ("7d", 7, sum(&since_day(7))?),
+        ("30d", 30, sum(&since_day(30))?),
+        ("all", all_days.max(0), all.total),
+    ] {
+        let daily_average = if days > 0 { total / days } else { 0 };
+        out.push(PeriodTotal { period, days, total, daily_average });
+    }
+    Ok(out)
+}
+
+/// Tokens indexed for `day`, per (session, agent), for overlaying live usage.
+pub fn day_rows(conn: &Connection, day: &str) -> anyhow::Result<std::collections::HashMap<(String, String), i64>> {
+    let mut stmt = conn.prepare("SELECT session_id, agent_id, total FROM token_days WHERE day = ?1")?;
+    let rows = stmt.query_map([day], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
 }
 
 #[derive(Clone, Debug)]
@@ -444,7 +580,7 @@ impl<'a> Days<'a> {
 /// Per-day totals, newest first.
 pub fn days(conn: &Connection, range: Days) -> anyhow::Result<Vec<DayRow>> {
     let mut stmt = conn.prepare(
-        "SELECT day, SUM(total) FROM usage_daily
+        "SELECT day, SUM(total) FROM token_days
          WHERE (?1 IS NULL OR day >= ?1) AND (?2 IS NULL OR day <= ?2)
          GROUP BY day ORDER BY day DESC",
     )?;
@@ -454,7 +590,7 @@ pub fn days(conn: &Connection, range: Days) -> anyhow::Result<Vec<DayRow>> {
 
 /// Oldest day with any usage.
 pub fn first_day(conn: &Connection) -> anyhow::Result<Option<String>> {
-    Ok(conn.query_row("SELECT MIN(day) FROM usage_daily", [], |r| r.get(0))?)
+    Ok(conn.query_row("SELECT MIN(day) FROM token_days", [], |r| r.get(0))?)
 }
 
 /// Number of sessions with usage in the range.
@@ -592,13 +728,14 @@ mod tests {
         std::fs::write(proj.join("s1/subagents/agent-a1.meta.json"), r#"{"agentType":"Explore"}"#).unwrap();
 
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
+        prepare(&mut conn).unwrap();
         let r = sync_dir(&mut conn, &root.join("projects"), Some(30)).unwrap();
         assert_eq!((r.scanned, r.updated), (2, 2));
 
         let days = days(&conn, Days::default()).unwrap();
-        assert_eq!(days.len(), 1, "40-day-old usage is pruned");
-        assert_eq!(days[0].total, 10 + 5 + 20 + 100 + 7);
+        assert_eq!(days.len(), 2, "the day counter keeps 40-day-old usage");
+        assert_eq!((days[0].total, days[1].total), (10 + 5 + 20 + 100 + 7, 999));
+        assert_eq!(total_tokens(&conn), 142, "detail older than the retention is not kept");
         let sessions = sessions_in(&conn, Days::default()).unwrap();
         assert_eq!((sessions[0].project.as_str(), sessions[0].skill_runs), ("web", 1));
         let skills = skills_in(&conn, Days::on(&days[0].day)).unwrap();
@@ -627,7 +764,7 @@ mod tests {
             format!(r#"{{"type":"assistant","timestamp":"{ts}","message":{{"id":"{id}","usage":{{"output_tokens":{out}}}}}}}"#)
         };
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
+        prepare(&mut conn).unwrap();
         let projects = root.join("projects");
 
         // Corrupt and partial lines are skipped; valid ones still count.
@@ -651,6 +788,32 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_or_emptied_transcript_keeps_counted_tokens() {
+        let root = std::env::temp_dir().join(format!("marsad-store-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let proj = root.join("projects").join("-p-gone");
+        std::fs::create_dir_all(&proj).unwrap();
+        let file = proj.join("s5.jsonl");
+        let ts = chrono::Utc::now().to_rfc3339();
+        std::fs::write(&file, format!(r#"{{"type":"assistant","timestamp":"{ts}","message":{{"id":"a","usage":{{"output_tokens":30}}}}}}"#) + "\n").unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        prepare(&mut conn).unwrap();
+        let projects = root.join("projects");
+        sync_dir(&mut conn, &projects, None).unwrap();
+        let counted = |conn: &Connection| days(conn, Days::default()).unwrap().iter().map(|d| d.total).sum::<i64>();
+        assert_eq!(counted(&conn), 30);
+
+        // The file changed but the reader saw nothing: the counter keeps its rows and the file
+        // is retried rather than recorded as indexed.
+        std::fs::write(&file, "").unwrap();
+        let r = sync_dir(&mut conn, &projects, None).unwrap();
+        assert_eq!((r.updated, r.failed), (0, 1));
+        assert_eq!(counted(&conn), 30);
+        assert_eq!(sync_dir(&mut conn, &projects, None).unwrap().failed, 1, "retried on the next sync");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn without_retention_history_outlives_deleted_transcripts() {
         let root = std::env::temp_dir().join(format!("marsad-store-keep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -664,7 +827,7 @@ mod tests {
         };
         std::fs::write(&file, format!("{}\n{}\n", msg(&old, "a", 40), msg(&now, "b", 2))).unwrap();
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
+        prepare(&mut conn).unwrap();
         let projects = root.join("projects");
 
         sync_dir(&mut conn, &projects, None).unwrap();
@@ -692,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn growing_the_retention_never_counts_pruned_days_twice() {
+    fn growing_the_retention_brings_detail_back_without_double_counting() {
         let root = std::env::temp_dir().join(format!("marsad-store-grow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let proj = root.join("projects").join("-p-grow");
@@ -704,7 +867,7 @@ mod tests {
         };
         std::fs::write(&file, format!("{}\n{}\n", msg(20, "a", 5), msg(0, "b", 2))).unwrap();
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(SCHEMA).unwrap();
+        prepare(&mut conn).unwrap();
         let projects = root.join("projects");
 
         assert_eq!(lifetime(&conn).unwrap(), Lifetime::default(), "empty history");
@@ -712,13 +875,101 @@ mod tests {
         sync_dir(&mut conn, &projects, Some(7)).unwrap();
         assert_eq!((total_tokens(&conn), lifetime(&conn).unwrap().total), (2, 7));
 
-        // The transcript changes and the retention goes back to 30: the 20-day-old turn is
-        // already in the all-time total, so it must not come back into the window.
+        // The transcript changes and the retention goes back to 30: the 20-day-old turn's detail
+        // returns, and the all-time total still counts it once.
         let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
         writeln!(f, "{}", msg(0, "c", 1)).unwrap();
         drop(f);
         sync_dir(&mut conn, &projects, Some(30)).unwrap();
-        assert_eq!((total_tokens(&conn), lifetime(&conn).unwrap().total), (3, 8));
+        assert_eq!((total_tokens(&conn), lifetime(&conn).unwrap().total), (8, 8));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn periods_total_and_average_over_calendar_days() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        prepare(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO token_days VALUES ('a', 'main', '2026-10-23', 0, 0, 0, 0, 10, 1);
+             INSERT INTO token_days VALUES ('b', 'main', '2026-10-20', 0, 0, 0, 0, 20, 1);
+             INSERT INTO token_days VALUES ('c', 'main', '2026-09-12', 0, 0, 0, 0, 60, 1);",
+        )
+        .unwrap();
+        let got: Vec<(&str, i64, i64, i64)> =
+            periods(&conn, "2026-10-23").unwrap().iter().map(|p| (p.period, p.days, p.total, p.daily_average)).collect();
+        assert_eq!(got, [("today", 1, 10, 10), ("7d", 7, 30, 4), ("30d", 30, 30, 1), ("all", 42, 90, 2)]);
+
+        let mut empty = Connection::open_in_memory().unwrap();
+        prepare(&mut empty).unwrap();
+        let all = periods(&empty, "2026-10-23").unwrap();
+        assert!(all.iter().all(|p| p.total == 0 && p.daily_average == 0));
+        assert_eq!(all[3].days, 0, "no usage, no start day");
+    }
+
+    /// A database as versions before 0.4 left it: pruned days in `lifetime`, recent ones in detail.
+    fn pre_upgrade_db(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE usage_daily (session_id TEXT, agent_id TEXT, agent_type TEXT, day TEXT, input INTEGER,
+                 output INTEGER, cache_read INTEGER, cache_write INTEGER, total INTEGER, turns INTEGER,
+                 PRIMARY KEY (session_id, agent_id, day));
+             CREATE TABLE files (path TEXT PRIMARY KEY, size INTEGER, mtime REAL);
+             CREATE TABLE lifetime (id INTEGER PRIMARY KEY CHECK (id = 1), since TEXT, through TEXT, input INTEGER,
+                 output INTEGER, cache_read INTEGER, cache_write INTEGER, total INTEGER);
+             INSERT INTO usage_daily VALUES ('s1', 'main', 'main', '2026-10-20', 0, 7, 0, 0, 7, 2);
+             INSERT INTO files VALUES ('/gone.jsonl', 1, 1.0);
+             INSERT INTO lifetime VALUES (1, '2026-08-01', '2026-09-23', 0, 50, 0, 0, 50);",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn upgrade_keeps_the_all_time_total() {
+        let root = std::env::temp_dir().join(format!("marsad-upgrade-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let db = root.join("usage.db");
+        pre_upgrade_db(&db);
+
+        // Covers AE2. Read-only first, as `marsad total --no-sync` would.
+        assert_eq!(lifetime(&open_readonly_at(&db).unwrap()).unwrap().total, 57);
+        let conn = open_at(&db).unwrap();
+        let all = lifetime(&conn).unwrap();
+        assert_eq!((all.total, all.since.as_deref()), (57, Some("2026-08-01")), "migrated once");
+        let legacy: i64 = conn.query_row("SELECT COUNT(*) FROM legacy_totals", [], |r| r.get(0)).unwrap();
+        assert_eq!(legacy, 1);
+        assert_eq!(legacy_ranges(&conn).unwrap(), [("2026-08-01".to_string(), "2026-09-23".to_string())]);
+        let files: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(files, 0, "transcripts are re-read once");
+        let id = install_id(&conn).unwrap();
+        drop(conn);
+        assert_eq!(install_id(&open_at(&db).unwrap()).unwrap(), id, "the install id is stable");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn days_inside_a_legacy_sum_are_not_counted_again() {
+        let root = std::env::temp_dir().join(format!("marsad-store-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let proj = root.join("projects").join("-p-legacy");
+        std::fs::create_dir_all(&proj).unwrap();
+        let msg = |days_ago: i64, id: &str, out: u64| {
+            let ts = (chrono::Utc::now() - chrono::Duration::days(days_ago)).to_rfc3339();
+            format!(r#"{{"type":"assistant","timestamp":"{ts}","message":{{"id":"{id}","usage":{{"output_tokens":{out}}}}}}}"#)
+        };
+        // Days 60 and 0 are free; day 20 lies inside a legacy range from day 40 to day 10.
+        std::fs::write(proj.join("s5.jsonl"), format!("{}\n{}\n{}\n", msg(60, "a", 1), msg(20, "b", 10), msg(0, "c", 100))).unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
+        prepare(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO legacy_totals SELECT value, ?1, ?2, 0, 10, 0, 0, 10 FROM meta WHERE key = 'install_id'",
+            [day_n_ago(41), day_n_ago(11)],
+        )
+        .unwrap();
+        sync_dir(&mut conn, &root.join("projects"), None).unwrap();
+        let counted: Vec<i64> = days(&conn, Days::default()).unwrap().iter().map(|d| d.total).collect();
+        assert_eq!(counted, [100, 1], "the day before the legacy range is counted; the one inside is not");
+        assert_eq!(lifetime(&conn).unwrap().total, 111);
         std::fs::remove_dir_all(root).ok();
     }
 
