@@ -3,6 +3,7 @@ mod app;
 mod badge_art;
 mod badges;
 mod board;
+mod card;
 mod clipboard;
 mod context;
 mod coordination;
