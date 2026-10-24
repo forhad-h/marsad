@@ -201,7 +201,8 @@ and 4 are skipped and the link and the card's path are shown.
 one `claude -p` call (Haiku, no tools, no hooks, CLAUDE.md, plugins or MCP, and no transcript, so it
 doesn't appear as a session) gets today's session titles, the skills and subagent types you used
 with their counts, and the token figures. Every project and folder name from today's sessions is
-removed from them first, and project and folder fields are never sent. If the reply still names one,
+removed from them first, including the folders above a project outside your home folder (system
+folders such as `/srv`, `/opt` or `/Volumes` aside), and project and folder fields are never sent. If the reply still names one,
 marsad uses a template line instead and says why. A client or company named only inside a session
 title, and not in any project or folder name, is **not** removed: read the line in the preview
 before you confirm. Without Claude Code, or if drafting fails or takes over a minute, the post uses

@@ -133,6 +133,9 @@ const CONTAINERS: [&str; 18] = [
     "repos", "repositories", "git", "github", "workspace", "workspaces", "sites",
 ];
 
+/// System folders above a cwd outside the home directory; they never count as names.
+const SYSTEM: [&str; 14] = ["srv", "opt", "var", "tmp", "private", "mnt", "media", "volumes", "usr", "local", "data", "home", "users", "root"];
+
 /// The words of a name: split on `-`, `_`, `.`, spaces and camelCase boundaries.
 fn tokens(name: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -164,13 +167,13 @@ fn names(work: &Work, home: Option<&Path>) -> Vec<String> {
     for s in &work.sessions {
         raw.push(s.project.clone());
         let cwd = Path::new(&s.cwd);
-        // Only components below the home directory: never home itself or its ancestors.
-        if let Some(rel) = home.and_then(|h| cwd.strip_prefix(h).ok()) {
-            raw.extend(rel.components().filter_map(|c| match c {
-                std::path::Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
-                _ => None,
-            }));
-        }
+        // Below the home directory, every component (never home itself or its ancestors); outside
+        // it, every component but system folders, so `/srv/clients/acme/app` names `acme` too.
+        let below_home = home.and_then(|h| cwd.strip_prefix(h).ok());
+        raw.extend(below_home.unwrap_or(cwd).components().filter_map(|c| match c {
+            std::path::Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+            _ => None,
+        }).filter(|p| below_home.is_some() || !SYSTEM.contains(&p.to_lowercase().as_str())));
     }
     let mut out: Vec<String> = Vec::new();
     for name in raw {
@@ -872,9 +875,14 @@ mod tests {
             assert!(n.contains(&want.to_string()), "{want} missing from {n:?}");
         }
         assert!(!n.contains(&"x".to_string()) && !n.contains(&"users".to_string()));
-        // Outside the home directory only the project counts; short tokens never do.
+        // Outside the home directory every folder counts except system ones; short tokens never do.
         let n = names(&work("wt-u5", "/private/tmp/wt-u5"), Some(Path::new("/Users/x")));
         assert_eq!(n, ["wt-u5"]);
+        let mut n = names(&work("app", "/srv/clients/acme/app"), Some(Path::new("/Users/x")));
+        n.sort();
+        assert_eq!(n, ["acme", "app", "clients"], "a client folder above the project is a name too");
+        let n = names(&work("web", "/Volumes/Work/Globex/web"), None);
+        assert!(n.contains(&"globex".to_string()) && !n.contains(&"volumes".to_string()), "{n:?}");
         assert_eq!(tokens("ACMEPortal_v2.web"), ["ACME", "Portal", "v2", "web"]);
     }
 
