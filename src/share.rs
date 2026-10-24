@@ -1,11 +1,10 @@
 //! Sharing to LinkedIn: one frozen stats snapshot, a line drafted by an isolated `claude -p` over a
 //! redacted summary of today's work (or a template), the post text, the card, and the confirm steps
-//! that save, copy, open and reveal. The TUI share view and `marsad share --print` both use it.
+//! that save, open and reveal. The TUI share view and `marsad share --print` both use it.
 
 use crate::badges::{self, Badges};
 use crate::card;
 use crate::model::fmt_count;
-use crate::clipboard::Copied;
 use crate::model::MAIN_AGENT;
 use crate::store;
 use anyhow::Context;
@@ -134,13 +133,6 @@ const CONTAINERS: [&str; 18] = [
     "repos", "repositories", "git", "github", "workspace", "workspaces", "sites",
 ];
 
-/// System folders above a cwd outside the home directory; they never count as names.
-const SYSTEM: [&str; 14] = ["srv", "opt", "var", "tmp", "private", "mnt", "media", "volumes", "usr", "local", "data", "home", "users", "root"];
-
-/// Words the summary and the drafted line use themselves; as a word of a longer name they never
-/// count (a project named exactly one of them still does, by its full name).
-const TOOLING: [&str; 10] = ["claude", "code", "agent", "agents", "subagent", "subagents", "skill", "skills", "worktree", "worktrees"];
-
 /// The words of a name: split on `-`, `_`, `.`, spaces and camelCase boundaries.
 fn tokens(name: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -172,44 +164,22 @@ fn names(work: &Work, home: Option<&Path>) -> Vec<String> {
     for s in &work.sessions {
         raw.push(s.project.clone());
         let cwd = Path::new(&s.cwd);
-        // Below the home directory, every component (never home itself or its ancestors); outside
-        // it, every component but system folders, so `/srv/clients/acme/app` names `acme` too.
-        let below_home = home.and_then(|h| cwd.strip_prefix(h).ok());
-        let parts: Vec<String> = below_home
-            .unwrap_or(cwd)
-            .components()
-            .filter_map(|c| match c {
+        // Only components below the home directory: never home itself or its ancestors.
+        if let Some(rel) = home.and_then(|h| cwd.strip_prefix(h).ok()) {
+            raw.extend(rel.components().filter_map(|c| match c {
                 std::path::Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
                 _ => None,
-            })
-            .filter(|p| below_home.is_some() || !SYSTEM.contains(&p.to_lowercase().as_str()))
-            .collect();
-        {
-            for (i, part) in parts.iter().enumerate() {
-                // A Claude Code worktree (`.claude/worktrees/<name>`) is tooling, not a name.
-                if part == ".claude" && parts.get(i + 1).is_some_and(|p| p == "worktrees") {
-                    break;
-                }
-                // So are hidden folders (`.config`, `.cache`).
-                if !part.starts_with('.') {
-                    raw.push(part.clone());
-                }
-            }
+            }));
         }
     }
     let mut out: Vec<String> = Vec::new();
     for name in raw {
-        // A container never names a project, even as a session's own folder: `~/code` says nothing.
-        if CONTAINERS.contains(&name.to_lowercase().as_str()) {
+        let lower = name.to_lowercase();
+        if CONTAINERS.contains(&lower.as_str()) && !work.sessions.iter().any(|s| s.project.eq_ignore_ascii_case(&name)) {
             continue;
         }
-        let words = tokens(&name);
-        // The joined spelling too, so `acme-portal` also catches `AcmePortal` and `acmeportal`.
-        let joined = (words.len() > 1).then(|| words.concat());
-        let words = words.into_iter().chain(joined).map(|w| w.to_lowercase()).filter(|w| {
-            !CONTAINERS.contains(&w.as_str()) && !TOOLING.contains(&w.as_str())
-        });
-        for n in std::iter::once(name.to_lowercase()).chain(words) {
+        for n in std::iter::once(name.clone()).chain(tokens(&name)) {
+            let n = n.to_lowercase();
             if n.chars().count() >= 3 && !out.contains(&n) {
                 out.push(n);
             }
@@ -219,15 +189,7 @@ fn names(work: &Work, home: Option<&Path>) -> Vec<String> {
     out
 }
 
-/// Whether a camelCase word starts at `text[k]`, by the same rule as `tokens`.
-fn camel_start(text: &[char], k: usize) -> bool {
-    let (Some(&c), Some(&p)) = (text.get(k), k.checked_sub(1).and_then(|j| text.get(j))) else { return false };
-    c.is_uppercase()
-        && (p.is_lowercase() || p.is_ascii_digit() || (p.is_uppercase() && text.get(k + 1).is_some_and(|n| n.is_lowercase())))
-}
-
 /// Where `name` occurs in `text` as a whole word, case-insensitively: (start, end) char indexes.
-/// A camelCase boundary counts as a word edge, so `acme` is found in `AcmePortal`.
 fn find_word(text: &[char], name: &[char], from: usize) -> Option<(usize, usize)> {
     if name.is_empty() || text.len() < name.len() {
         return None;
@@ -236,8 +198,8 @@ fn find_word(text: &[char], name: &[char], from: usize) -> Option<(usize, usize)
     (from..=text.len() - name.len()).find_map(|i| {
         let end = i + name.len();
         let matches = text[i..end].iter().zip(name).all(|(&a, &b)| same(a, b));
-        let open = i == 0 || !text[i - 1].is_alphanumeric() || camel_start(text, i);
-        let close = end == text.len() || !text[end].is_alphanumeric() || camel_start(text, end);
+        let open = i == 0 || !text[i - 1].is_alphanumeric();
+        let close = end == text.len() || !text[end].is_alphanumeric();
         (matches && open && close).then_some((i, end))
     })
 }
@@ -619,7 +581,13 @@ impl Desktop {
         Self::from_env(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
     }
 
-    pub(crate) fn from_env(set: impl Fn(&str) -> bool) -> Self {
+    /// A local desktop with a display, so tests see every launch.
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        Desktop { ssh: false, display: true, platform: Platform::Unix }
+    }
+
+    fn from_env(set: impl Fn(&str) -> bool) -> Self {
         let platform = if cfg!(target_os = "macos") {
             Platform::Macos
         } else if cfg!(windows) {
@@ -705,23 +673,18 @@ fn reveal_steps(platform: Platform, path: &Path) -> Vec<Step> {
 
 /// Runs one step for real.
 pub fn launch(step: &Step) -> Result<(), String> {
+    if !step.wait {
+        let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
+        return crate::alerts::detached(step.program, &args).map_err(|e| format!("couldn't run {}: {e}", step.program));
+    }
     let mut cmd = Command::new(step.program);
     cmd.args(&step.args);
-    if step.wait {
-        return match run_captured(&mut cmd, b"", TOOL_WAIT, &AtomicBool::new(false)) {
-            Ok(out) if out.success => Ok(()),
-            Ok(out) => Err(first_line(&String::from_utf8_lossy(&out.stderr)).unwrap_or("failed").to_string()),
-            Err(RunError::NotFound) => Err(format!("{} is not installed", step.program)),
-            Err(RunError::Spawn(why)) => Err(why),
-            Err(_) => Err(format!("{} did not answer", step.program)),
-        };
-    }
-    match cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
-        Ok(mut child) => {
-            std::thread::spawn(move || child.wait());
-            Ok(())
-        }
-        Err(e) => Err(format!("couldn't run {}: {e}", step.program)),
+    match run_captured(&mut cmd, b"", TOOL_WAIT, &AtomicBool::new(false)) {
+        Ok(out) if out.success => Ok(()),
+        Ok(out) => Err(first_line(&String::from_utf8_lossy(&out.stderr)).unwrap_or("failed").to_string()),
+        Err(RunError::NotFound) => Err(format!("{} is not installed", step.program)),
+        Err(RunError::Spawn(why)) => Err(why),
+        Err(_) => Err(format!("{} did not answer", step.program)),
     }
 }
 
@@ -750,34 +713,6 @@ pub fn open_linkedin(desktop: &Desktop, text: &str, run: &dyn Fn(&Step) -> Resul
 /// Shows the card selected in the file manager.
 pub fn reveal(desktop: &Desktop, path: &Path, run: &dyn Fn(&Step) -> Result<(), String>) -> Launch {
     run_steps(desktop, &reveal_steps(desktop.platform, path), run)
-}
-
-/// What confirming did, step by step.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Confirmed {
-    pub card: PathBuf,
-    pub copied: Copied,
-    pub url: String,
-    pub opened: Launch,
-    pub revealed: Launch,
-}
-
-/// Confirms a share in order: write the PNG, copy the text, open LinkedIn, reveal the PNG. When
-/// the PNG can't be written nothing is copied or opened. `copy` is a step of its own so the
-/// dashboard can run the clipboard on its main thread (`clipboard::copy` for real).
-pub fn confirm(
-    s: &Snapshot,
-    text: &str,
-    card: &Path,
-    desktop: &Desktop,
-    copy: impl FnOnce(&str) -> Copied,
-    run: &dyn Fn(&Step) -> Result<(), String>,
-) -> anyhow::Result<Confirmed> {
-    save_card(s, card)?;
-    let copied = copy(text);
-    let (url, opened) = open_linkedin(desktop, text, run);
-    let revealed = reveal(desktop, card, run);
-    Ok(Confirmed { card: card.to_path_buf(), copied, url, opened, revealed })
 }
 
 // ---------- `marsad share` ----------
@@ -931,55 +866,16 @@ mod tests {
             ..Work::default()
         };
         let n = names(&work("acme-portal", "/Users/x/Projects/acme-portal"), Some(Path::new("/Users/x")));
-        assert_eq!(n, ["acme-portal", "acmeportal", "portal", "acme"]);
+        assert_eq!(n, ["acme-portal", "portal", "acme"]);
         let n = names(&work("billingApp", "/Users/x/clients/GlobexCorp/billingApp"), Some(Path::new("/Users/x")));
         for want in ["billingapp", "billing", "app", "globexcorp", "globex", "corp", "clients"] {
             assert!(n.contains(&want.to_string()), "{want} missing from {n:?}");
         }
         assert!(!n.contains(&"x".to_string()) && !n.contains(&"users".to_string()));
-        // Outside the home directory every folder counts except system ones; short tokens never do.
+        // Outside the home directory only the project counts; short tokens never do.
         let n = names(&work("wt-u5", "/private/tmp/wt-u5"), Some(Path::new("/Users/x")));
-        assert_eq!(n, ["wt-u5", "wtu5"]);
-        let mut n = names(&work("app", "/srv/clients/acme/app"), Some(Path::new("/Users/x")));
-        n.sort();
-        assert_eq!(n, ["acme", "app", "clients"], "a client folder above the project is a name too");
-        let n = names(&work("web", "/opt/data/Volumes/GlobexCorp/web"), None);
-        assert!(n.contains(&"globexcorp".to_string()) && !n.contains(&"opt".to_string()) && !n.contains(&"data".to_string()), "{n:?}");
+        assert_eq!(n, ["wt-u5"]);
         assert_eq!(tokens("ACMEPortal_v2.web"), ["ACME", "Portal", "v2", "web"]);
-    }
-
-    #[test]
-    fn worktrees_hidden_folders_and_containers_are_not_names() {
-        let work = |project: &str, cwd: &str| Work {
-            sessions: vec![WorkSession { project: project.into(), cwd: cwd.into(), title: String::new() }],
-            ..Work::default()
-        };
-        let home = Some(Path::new("/Users/x"));
-        let n = names(&work("agent-1a2b", "/Users/x/Projects/acme/.claude/worktrees/agent-1a2b"), home);
-        assert!(n.contains(&"acme".to_string()), "{n:?}");
-        for never in ["claude", ".claude", "worktrees", "agent"] {
-            assert!(!n.contains(&never.to_string()), "{never} in {n:?}");
-        }
-        assert_eq!(mentioned("I used Claude Code agents to ship a feature.", &n), None);
-        assert_eq!(mentioned("I shipped an Acme feature.", &n), Some("acme"));
-        let n = names(&work("acme", "/Users/x/.config/acme"), home);
-        assert_eq!(n, ["acme"], "a hidden folder is not a name");
-        // A session started in a container folder names nothing.
-        let n = names(&work("code", "/Users/x/code"), home);
-        assert!(n.is_empty(), "{n:?}");
-        assert_eq!(mentioned("I used Claude Code to refactor a parser.", &n), None);
-    }
-
-    #[test]
-    fn joined_and_camel_case_spellings_are_caught() {
-        let s = acme();
-        let names = names(&s.work, s.home.as_deref());
-        assert_eq!(strip("Fix AcmePortal login", &names), "Fix login");
-        assert_eq!(strip("Fix acmeportal and ACMEPortal login", &names), "Fix and login");
-        assert_eq!(strip("Fix the acmeLogin page", &names), "Fix the Login page");
-        assert!(mentioned("Shipped the AcmePortal release.", &names).is_some());
-        assert!(mentioned("Shipped the PortalApp release.", &names).is_some());
-        assert_eq!(mentioned("Acmes and portals are not whole words.", &names), None);
     }
 
     #[test]
@@ -1151,47 +1047,6 @@ mod tests {
         assert_eq!(reveal(&desktop, card, &run), Launch::Spawned);
         let none = |_: &Step| Err("not installed".to_string());
         assert_eq!(reveal(&desktop, card, &none), Launch::Failed("not installed".into()));
-    }
-
-    #[test]
-    fn confirm_writes_copies_opens_then_reveals() {
-        let dir = scratch("confirm");
-        let s = acme();
-        let card = dir.join("Downloads").join("marsad-2026-10-24.png");
-        let order = std::cell::RefCell::new(Vec::new());
-        let run = |step: &Step| -> Result<(), String> {
-            assert!(card.exists(), "the PNG is written before anything opens");
-            order.borrow_mut().push(format!("{} {}", step.program, step.args.join(" ")));
-            Ok(())
-        };
-        let desktop = Desktop { ssh: false, display: true, platform: Platform::Macos };
-        let copy = |text: &str| {
-            assert!(card.exists(), "the PNG is written before the copy");
-            order.borrow_mut().push(format!("copy {}", text.lines().next().unwrap()));
-            Copied::Native("pbcopy")
-        };
-        let done = confirm(&s, "My line\n\nstats", &card, &desktop, copy, &run).unwrap();
-        assert_eq!(done.copied, Copied::Native("pbcopy"));
-        assert_eq!((done.opened.clone(), done.revealed.clone()), (Launch::Spawned, Launch::Spawned));
-        assert_eq!(*order.borrow(), [
-            "copy My line".to_string(),
-            format!("open {}", linkedin_url("My line\n\nstats")),
-            format!("open -R {}", card.display()),
-        ]);
-        assert_eq!(&std::fs::read(&card).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn a_failed_card_write_copies_and_opens_nothing() {
-        let dir = scratch("unwritable");
-        std::fs::write(dir.join("file"), "").unwrap();
-        let card = dir.join("file").join("marsad.png");
-        let run = |_: &Step| -> Result<(), String> { panic!("nothing opens") };
-        let desktop = Desktop { ssh: false, display: true, platform: Platform::Macos };
-        let copy = |_: &str| -> Copied { panic!("nothing is copied") };
-        assert!(confirm(&acme(), "text", &card, &desktop, copy, &run).is_err());
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

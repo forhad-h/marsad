@@ -1,371 +1,69 @@
-//! The dashboard's share view: a self-contained state machine for drafting, reviewing, editing and
-//! confirming a LinkedIn post. The app hands it keys and pastes before its own keys, and runs the
-//! two steps that need the terminal itself: the clipboard copy and the `$EDITOR` round trip.
+//! The dashboard's share view: a state machine from drafting the line, through the preview and its
+//! edits, to the confirm steps and a Done screen. The dashboard routes keys here before its own.
 
 use crate::clipboard::Copied;
-use crate::share::{self, Confirmed, Desktop, Draft, Launch, Note, Snapshot, Step};
-use ratatui::crossterm::event::KeyCode;
+use crate::share::{self, Desktop, Draft, Launch, Note, Snapshot, Step};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::cell::Cell;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::Arc;
 
-/// LinkedIn's limit for a post.
+/// LinkedIn's limit on a post's length, in characters.
 pub const MAX_POST: usize = 3000;
 
-type Snapshotter = Arc<dyn Fn() -> anyhow::Result<Snapshot> + Send + Sync>;
-type Drafter = Arc<dyn Fn(&Snapshot, &AtomicBool) -> Draft + Send + Sync>;
-type Runner = Arc<dyn Fn(&Step) -> Result<(), String> + Send + Sync>;
-type CardPath = Arc<dyn Fn(&str) -> PathBuf + Send + Sync>;
+type DraftFn = dyn Fn(&Snapshot, &AtomicBool) -> Draft + Send + Sync;
+type RunFn = dyn Fn(&Step) -> Result<(), String> + Send + Sync;
 
-/// Everything the share view reaches outside itself; the tests swap each part.
+/// What the share view runs: the real thing in the dashboard, fakes in tests.
 #[derive(Clone)]
-pub struct Deps {
-    /// Syncs and freezes the stats, once per share.
-    pub snapshot: Snapshotter,
-    pub draft: Drafter,
-    /// Runs one desktop tool (open, reveal).
-    pub run: Runner,
+pub struct Env {
+    /// Syncs and freezes the stats.
+    pub prepare: Arc<dyn Fn() -> Result<Snapshot, String> + Send + Sync>,
+    pub draft: Arc<DraftFn>,
+    pub card_path: Arc<dyn Fn(&Snapshot) -> PathBuf + Send + Sync>,
+    /// Called on the main thread only: OSC 52 writes to the terminal and would interleave with drawing.
+    pub copy: Arc<dyn Fn(&str) -> Copied + Send + Sync>,
+    pub run: Arc<RunFn>,
     pub desktop: Desktop,
-    /// Where the card goes, for the snapshot's day.
-    pub card: CardPath,
 }
 
-impl Deps {
-    /// The real thing. `rank_total` is the header's all-time figure, which may include live usage
-    /// the index hasn't caught up with yet.
+impl Env {
+    /// The dashboard's: `rank_total` is the header's all-time figure.
     pub fn real(rank_total: i64) -> Self {
-        Deps {
-            snapshot: Arc::new(move || {
-                crate::store::open_and_sync()?;
-                let conn = crate::store::open_readonly()?;
-                let total = crate::store::lifetime(&conn)?.total.max(rank_total);
-                share::snapshot(&conn, &crate::store::day_n_ago(0), total, dirs::home_dir(), share::git_user_name())
-            }),
+        Env {
+            prepare: Arc::new(move || prepare(rank_total).map_err(|e| format!("{e:#}"))),
             draft: Arc::new(share::draft),
+            card_path: Arc::new(|s| share::default_card_path(&s.date)),
+            copy: Arc::new(crate::clipboard::copy),
             run: Arc::new(share::launch),
             desktop: Desktop::current(),
-            card: Arc::new(share::default_card_path),
         }
     }
 }
 
-/// Where the share stands.
-#[derive(Debug, PartialEq)]
-pub enum Stage {
-    /// Waiting for the snapshot, then the line.
-    Drafting,
-    Preview,
-    /// Editing the line inline: the text and the cursor, in chars. Esc keeps the old line.
-    Editing { text: String, cursor: usize },
-    /// The card is being written, then copied, opened and revealed.
-    Saving,
-    Done(Confirmed),
-    /// The stats couldn't be gathered; nothing can be shared.
-    Failed(String),
+/// Syncs, then freezes the snapshot the post, the card and its file name share. git is asked for the
+/// user's name meanwhile, since it may take up to two seconds.
+fn prepare(rank_total: i64) -> anyhow::Result<Snapshot> {
+    let name = std::thread::spawn(share::git_user_name);
+    crate::store::open_and_sync()?;
+    let conn = crate::store::open_readonly()?;
+    let total = rank_total.max(crate::store::lifetime(&conn)?.total);
+    share::snapshot(&conn, &crate::store::day_n_ago(0), total, dirs::home_dir(), name.join().ok().flatten())
 }
 
-/// What the app must do after a key.
+/// What a key did to the view.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Action {
-    None,
-    /// The share is over; drop the view.
+pub enum Outcome {
+    Stay,
+    /// The share is over: cancelled, failed or done.
     Close,
-    /// Suspend the terminal, edit this text in `$EDITOR`, then hand the result to `edited`.
+    /// Suspend the dashboard and open this post text in the user's editor.
     EditPost(String),
 }
 
-/// What the drafting worker reports.
-enum Drafted {
-    Snapshot(Result<Arc<Snapshot>, String>),
-    Line(Draft),
-}
-
-/// The confirm worker's channels: it asks the main thread to copy, waits for the answer, then reports.
-struct Saving {
-    copy: Receiver<String>,
-    copied: Sender<Copied>,
-    done: Receiver<Result<Confirmed, String>>,
-}
-
-pub struct ShareView {
-    deps: Deps,
-    pub stage: Stage,
-    pub snapshot: Option<Arc<Snapshot>>,
-    pub line: String,
-    /// Why the line is the template, when it is.
-    pub note: Option<Note>,
-    /// The whole post as edited with `E`; None builds it from the line.
-    pub edited_post: Option<String>,
-    /// A failure to show above the keys: a regenerate that fell back, a card that couldn't be written.
-    pub status: Option<String>,
-    pub scroll: u16,
-    /// The furthest the preview can scroll, set while drawing.
-    pub max_scroll: Cell<u16>,
-    cancel: Arc<AtomicBool>,
-    drafts: Option<Receiver<Drafted>>,
-    saving: Option<Saving>,
-    /// A drafted line is being replaced (`r`), so a failure keeps the line already shown.
-    regenerating: bool,
-}
-
-impl Drop for ShareView {
-    fn drop(&mut self) {
-        // Whatever closes the view, a running `claude` is killed.
-        self.cancel.store(true, Ordering::Relaxed);
-    }
-}
-
-impl ShareView {
-    /// Opens the view and starts gathering the stats and drafting the line.
-    pub fn new(deps: Deps) -> Self {
-        let mut v = ShareView {
-            deps,
-            stage: Stage::Drafting,
-            snapshot: None,
-            line: String::new(),
-            note: None,
-            edited_post: None,
-            status: None,
-            scroll: 0,
-            max_scroll: Cell::new(0),
-            cancel: Arc::new(AtomicBool::new(false)),
-            drafts: None,
-            saving: None,
-            regenerating: false,
-        };
-        v.start_draft();
-        v
-    }
-
-    /// Drafts a line on a worker thread, first taking the snapshot if there is none yet.
-    fn start_draft(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
-        self.cancel = Arc::new(AtomicBool::new(false));
-        let (tx, rx) = mpsc::channel();
-        let (deps, cancel, known) = (self.deps.clone(), self.cancel.clone(), self.snapshot.clone());
-        std::thread::spawn(move || {
-            let snapshot = match known {
-                Some(s) => s,
-                None => match (deps.snapshot)() {
-                    Ok(s) => {
-                        let s = Arc::new(s);
-                        let _ = tx.send(Drafted::Snapshot(Ok(s.clone())));
-                        s
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Drafted::Snapshot(Err(format!("{e:#}"))));
-                        return;
-                    }
-                },
-            };
-            let _ = tx.send(Drafted::Line((deps.draft)(&snapshot, &cancel)));
-        });
-        self.drafts = Some(rx);
-        self.stage = Stage::Drafting;
-    }
-
-    /// The post as it will be shared.
-    pub fn post(&self) -> String {
-        match (&self.edited_post, &self.snapshot) {
-            (Some(text), _) => text.clone(),
-            (None, Some(s)) => share::post(s, &self.line),
-            (None, None) => String::new(),
-        }
-    }
-
-    /// Collects what the workers finished. Returns text the main thread must put on the clipboard,
-    /// then hand the result to `copied`.
-    pub fn tick(&mut self) -> Option<String> {
-        while let Some(rx) = &self.drafts {
-            match rx.try_recv() {
-                Ok(Drafted::Snapshot(Ok(s))) => self.snapshot = Some(s),
-                Ok(Drafted::Snapshot(Err(e))) => {
-                    self.drafts = None;
-                    self.stage = Stage::Failed(format!("Couldn't gather today's stats: {e}"));
-                }
-                Ok(Drafted::Line(d)) => {
-                    self.drafts = None;
-                    self.drafted(d);
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    self.drafts = None;
-                    match &self.snapshot {
-                        Some(s) => {
-                            let d = Draft::template(s, Note::Failed("the drafting thread stopped".into()));
-                            self.drafted(d);
-                        }
-                        None => self.stage = Stage::Failed("Couldn't gather today's stats: the worker stopped".into()),
-                    }
-                }
-            }
-        }
-        let saving = self.saving.as_ref()?;
-        if let Ok(text) = saving.copy.try_recv() {
-            return Some(text);
-        }
-        match saving.done.try_recv() {
-            Ok(Ok(done)) => {
-                self.saving = None;
-                self.stage = Stage::Done(done);
-            }
-            Ok(Err(e)) => {
-                self.saving = None;
-                self.stage = Stage::Preview;
-                self.status = Some(format!("Couldn't save the card: {e}. Nothing was copied or opened."));
-            }
-            Err(TryRecvError::Disconnected) => {
-                self.saving = None;
-                self.stage = Stage::Preview;
-                self.status = Some("Saving stopped unexpectedly; nothing was opened.".into());
-            }
-            Err(TryRecvError::Empty) => {}
-        }
-        None
-    }
-
-    fn drafted(&mut self, d: Draft) {
-        if self.regenerating && d.note.is_some() {
-            // Keep the line already shown; say why it didn't change.
-            let why = d.note.as_ref().map(Note::message).unwrap_or_default();
-            self.status = Some(format!("Couldn't regenerate, kept the line. {why}"));
-        } else {
-            self.line = d.line;
-            self.note = d.note;
-            self.edited_post = None;
-        }
-        self.regenerating = false;
-        self.stage = Stage::Preview;
-    }
-
-    /// The clipboard result for the confirm worker.
-    pub fn copied(&mut self, c: Copied) {
-        if let Some(saving) = &self.saving {
-            let _ = saving.copied.send(c);
-        }
-    }
-
-    /// The post back from `$EDITOR`, or why it couldn't be edited.
-    pub fn edited(&mut self, result: anyhow::Result<String>) {
-        match result {
-            Ok(text) => {
-                let text = text.trim_end().to_string();
-                if text.trim().is_empty() {
-                    self.status = Some("The edited post was empty; kept the previous one.".into());
-                } else if text != self.post() {
-                    self.edited_post = Some(text);
-                    self.status = None;
-                }
-            }
-            Err(e) => self.status = Some(format!("Couldn't open the editor: {e:#}")),
-        }
-    }
-
-    pub fn on_key(&mut self, code: KeyCode) -> Action {
-        match &mut self.stage {
-            Stage::Drafting => {
-                if matches!(code, KeyCode::Esc | KeyCode::Char('q')) {
-                    return Action::Close;
-                }
-            }
-            Stage::Preview => match code {
-                KeyCode::Esc | KeyCode::Char('q') => return Action::Close,
-                KeyCode::Enter => self.confirm(),
-                KeyCode::Char('e') => {
-                    let cursor = self.line.chars().count();
-                    self.stage = Stage::Editing { text: self.line.clone(), cursor };
-                }
-                KeyCode::Char('E') => return Action::EditPost(self.post()),
-                KeyCode::Char('r') => {
-                    self.status = None;
-                    self.regenerating = self.note.is_none();
-                    self.start_draft();
-                }
-                KeyCode::Down | KeyCode::Char('j') => self.scroll = (self.scroll + 1).min(self.max_scroll.get()),
-                KeyCode::Up | KeyCode::Char('k') => self.scroll = self.scroll.saturating_sub(1),
-                _ => {}
-            },
-            Stage::Editing { text, cursor } => match code {
-                KeyCode::Enter => {
-                    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                    if line != self.line {
-                        // A new line rebuilds the post, so a whole-post edit is dropped.
-                        if self.edited_post.take().is_some() {
-                            self.status = Some("The post was rebuilt from the new line.".into());
-                        }
-                        self.line = line;
-                    }
-                    self.stage = Stage::Preview;
-                }
-                KeyCode::Esc => self.stage = Stage::Preview,
-                KeyCode::Char(c) => insert(text, cursor, &c.to_string()),
-                KeyCode::Backspace if *cursor > 0 => {
-                    *cursor -= 1;
-                    remove(text, *cursor);
-                }
-                KeyCode::Delete if *cursor < text.chars().count() => remove(text, *cursor),
-                KeyCode::Left => *cursor = cursor.saturating_sub(1),
-                KeyCode::Right => *cursor = (*cursor + 1).min(text.chars().count()),
-                KeyCode::Home => *cursor = 0,
-                KeyCode::End => *cursor = text.chars().count(),
-                _ => {}
-            },
-            Stage::Saving => {}
-            Stage::Done(_) | Stage::Failed(_) => return Action::Close,
-        }
-        Action::None
-    }
-
-    /// A bracketed paste: into the line being edited, as one line.
-    pub fn on_paste(&mut self, pasted: &str) {
-        if let Stage::Editing { text, cursor } = &mut self.stage {
-            let flat: String = pasted.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
-            insert(text, cursor, &flat);
-        }
-    }
-
-    /// Runs the confirm steps on a worker; the clipboard copy comes back to `tick`.
-    fn confirm(&mut self) {
-        let Some(snapshot) = self.snapshot.clone() else { return };
-        let text = self.post();
-        let card = (self.deps.card)(&snapshot.date);
-        let (copy_tx, copy) = mpsc::channel();
-        let (copied, copied_rx) = mpsc::channel();
-        let (done_tx, done) = mpsc::channel();
-        let (desktop, run) = (self.deps.desktop, self.deps.run.clone());
-        std::thread::spawn(move || {
-            let copy = |t: &str| {
-                let _ = copy_tx.send(t.to_string());
-                copied_rx.recv().unwrap_or(Copied::Failed)
-            };
-            let res = share::confirm(&snapshot, &text, &card, &desktop, copy, &*run).map_err(|e| format!("{e:#}"));
-            let _ = done_tx.send(res);
-        });
-        self.saving = Some(Saving { copy, copied, done });
-        self.status = None;
-        self.stage = Stage::Saving;
-    }
-}
-
-fn byte_at(text: &str, chars: usize) -> usize {
-    text.char_indices().nth(chars).map_or(text.len(), |(i, _)| i)
-}
-
-fn insert(text: &mut String, cursor: &mut usize, s: &str) {
-    text.insert_str(byte_at(text, *cursor), s);
-    *cursor += s.chars().count();
-}
-
-fn remove(text: &mut String, at: usize) {
-    let i = byte_at(text, at);
-    if i < text.len() {
-        text.remove(i);
-    }
-}
-
-/// How one confirm step went.
+/// One confirm step's result, for the Done screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mark {
     Done,
@@ -373,93 +71,408 @@ pub enum Mark {
     Failed,
 }
 
-/// The Done screen: one line per confirm step.
-pub fn done_lines(c: &Confirmed) -> Vec<(Mark, String)> {
-    let mut out = vec![(Mark::Done, format!("Card saved to {}", c.card.display()))];
-    out.push(match c.copied {
-        Copied::Native(tool) => (Mark::Done, format!("Post copied to the clipboard ({tool})")),
-        Copied::Terminal => (Mark::Done, "Post sent to the terminal's clipboard, if it allows that".into()),
-        Copied::Failed => (Mark::Failed, "Couldn't reach a clipboard: copy the post below by hand".into()),
-    });
-    out.push(match &c.opened {
-        Launch::Spawned => (Mark::Done, "Opened LinkedIn; if the post box is empty, paste the post".into()),
-        Launch::Skipped(why) => (Mark::Skipped, format!("Browser not opened ({why}); open {}", c.url)),
-        Launch::Failed(why) => (Mark::Failed, format!("Couldn't open the browser ({why}); open {}", c.url)),
-    });
-    let folder = c.card.parent().unwrap_or(Path::new(".")).display();
-    out.push(match &c.revealed {
-        Launch::Spawned => (Mark::Done, "Showed the card in the file manager: drag it into the post".into()),
-        Launch::Skipped(why) => (Mark::Skipped, format!("File manager not opened ({why}); the card is in {folder}")),
-        Launch::Failed(why) => (Mark::Failed, format!("Couldn't show the card ({why}); it is in {folder}")),
-    });
-    out
+/// What confirming did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Done {
+    pub card: PathBuf,
+    pub copied: Copied,
+    pub url: String,
+    pub opened: Launch,
+    pub revealed: Launch,
+    pub post: String,
 }
 
-/// The editor for `E`: `$VISUAL`, then `$EDITOR`, then `notepad` or `vi`.
-pub fn editor() -> String {
-    ["VISUAL", "EDITOR"]
+impl Done {
+    /// One row per step: its name, how it went and what to say about it.
+    pub fn steps(&self) -> Vec<(&'static str, Mark, String)> {
+        let launch = |l: &Launch, done: &str| match l {
+            Launch::Spawned => (Mark::Done, done.to_string()),
+            Launch::Skipped(why) => (Mark::Skipped, format!("skipped ({why})")),
+            Launch::Failed(why) => (Mark::Failed, format!("failed: {why}")),
+        };
+        let (copied, copy_text) = match self.copied {
+            Copied::Native(tool) => (Mark::Done, format!("the post is on your clipboard ({tool})")),
+            Copied::Terminal => (Mark::Done, "sent to your terminal's clipboard, if it allows that".to_string()),
+            Copied::Failed => (Mark::Failed, "couldn't reach a clipboard; copy the post below by hand".to_string()),
+        };
+        let (opened, open_text) = launch(&self.opened, "opened LinkedIn's post composer");
+        let (revealed, reveal_text) = launch(&self.revealed, "showed the card in your file manager");
+        vec![
+            ("card", Mark::Done, self.card.display().to_string()),
+            ("clipboard", copied, copy_text),
+            ("browser", opened, open_text),
+            ("reveal", revealed, reveal_text),
+        ]
+    }
+
+    /// The link to open by hand, when the browser didn't open it.
+    pub fn manual_url(&self) -> Option<&str> {
+        (self.opened != Launch::Spawned).then_some(self.url.as_str())
+    }
+}
+
+enum Phase {
+    /// Syncing, freezing the snapshot and drafting the line.
+    Drafting(Receiver<Result<(Snapshot, Draft), String>>),
+    Preview,
+    /// Editing the line in place; the line itself changes only on Enter.
+    Editing { text: Vec<char>, cursor: usize },
+    Regenerating(Receiver<Draft>),
+    Saving(Receiver<Result<(), String>>),
+    Opening { rx: Receiver<(String, Launch, Launch)>, copied: Copied },
+    Done(Done),
+    /// The sync or the snapshot failed, so there is nothing to share.
+    Failed(String),
+}
+
+/// What the dashboard draws.
+pub enum Screen<'a> {
+    Busy(&'static str),
+    Preview { post: String, editing: Option<(&'a [char], usize)>, note: Option<String>, warning: Option<&'a str> },
+    Done(&'a Done),
+    Failed(&'a str),
+}
+
+pub struct ShareView {
+    env: Env,
+    phase: Phase,
+    snapshot: Option<Snapshot>,
+    line: String,
+    note: Option<Note>,
+    /// The whole post after an `E` edit; editing or regenerating the line replaces it.
+    custom: Option<String>,
+    /// A failure to show above the keys: a regenerate that didn't work, a card that couldn't be written.
+    warning: Option<String>,
+    /// Set when the share is cancelled or closed, which kills a running `claude`.
+    cancel: Arc<AtomicBool>,
+    /// The badges of a snapshot just frozen after the share's own sync, until the dashboard takes them.
+    prepared: Option<crate::badges::Badges>,
+    pub scroll: u16,
+    /// The furthest the preview can scroll, set while drawing.
+    pub max_scroll: Cell<u16>,
+}
+
+impl Drop for ShareView {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+impl ShareView {
+    /// Starts drafting on a worker thread.
+    pub fn start(env: Env) -> Self {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = channel();
+        let (prepare, draft, flag) = (env.prepare.clone(), env.draft.clone(), cancel.clone());
+        std::thread::spawn(move || {
+            let res = prepare().map(|s| {
+                let d = draft(&s, &flag);
+                (s, d)
+            });
+            let _ = tx.send(res);
+        });
+        ShareView {
+            env,
+            phase: Phase::Drafting(rx),
+            snapshot: None,
+            line: String::new(),
+            note: None,
+            custom: None,
+            warning: None,
+            cancel,
+            prepared: None,
+            scroll: 0,
+            max_scroll: Cell::new(0),
+        }
+    }
+
+    /// The post as it would be shared now.
+    pub fn post(&self) -> String {
+        match (&self.custom, &self.snapshot) {
+            (Some(text), _) => text.clone(),
+            (None, Some(s)) => share::post(s, &self.line),
+            (None, None) => String::new(),
+        }
+    }
+
+    pub fn screen(&self) -> Screen<'_> {
+        match &self.phase {
+            Phase::Drafting(_) => Screen::Busy("Drafting your line with Claude Code"),
+            Phase::Regenerating(_) => Screen::Busy("Drafting a new line with Claude Code"),
+            Phase::Saving(_) => Screen::Busy("Saving the card"),
+            Phase::Opening { .. } => Screen::Busy("Opening LinkedIn"),
+            Phase::Done(done) => Screen::Done(done),
+            Phase::Failed(why) => Screen::Failed(why),
+            Phase::Preview | Phase::Editing { .. } => Screen::Preview {
+                post: self.post(),
+                editing: match &self.phase {
+                    Phase::Editing { text, cursor } => Some((text.as_slice(), *cursor)),
+                    _ => None,
+                },
+                note: self.note.as_ref().map(Note::message),
+                warning: self.warning.as_deref(),
+            },
+        }
+    }
+
+    /// The keys the footer offers now.
+    pub fn keys(&self) -> Vec<(&'static str, &'static str)> {
+        match &self.phase {
+            Phase::Preview => vec![("enter", "confirm"), ("e", "edit line"), ("E", "edit post"), ("r", "regenerate"), ("↑↓", "scroll"), ("q/esc", "cancel")],
+            Phase::Editing { .. } => vec![("enter", "keep"), ("esc", "discard")],
+            Phase::Drafting(_) => vec![("q/esc", "cancel")],
+            Phase::Regenerating(_) => vec![("esc", "keep the current line"), ("q", "cancel")],
+            Phase::Saving(_) | Phase::Opening { .. } => vec![],
+            Phase::Done(_) | Phase::Failed(_) => vec![("enter", "close")],
+        }
+    }
+
+    /// Collects finished work; call every frame on the main thread.
+    pub fn tick(&mut self) {
+        match &self.phase {
+            Phase::Drafting(rx) => match rx.try_recv() {
+                Ok(Ok((s, d))) => {
+                    self.prepared = Some(s.badges.clone());
+                    self.snapshot = Some(s);
+                    (self.line, self.note) = (d.line, d.note);
+                    self.phase = Phase::Preview;
+                }
+                Ok(Err(why)) => self.phase = Phase::Failed(why),
+                Err(TryRecvError::Disconnected) => self.phase = Phase::Failed("drafting stopped unexpectedly".into()),
+                Err(TryRecvError::Empty) => {}
+            },
+            Phase::Regenerating(rx) => match rx.try_recv() {
+                Ok(d) => {
+                    self.regenerated(d);
+                    self.phase = Phase::Preview;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.warning = Some("Couldn't regenerate: drafting stopped unexpectedly.".into());
+                    self.phase = Phase::Preview;
+                }
+                Err(TryRecvError::Empty) => {}
+            },
+            Phase::Saving(rx) => match rx.try_recv() {
+                Ok(Ok(())) => {
+                    let post = self.post();
+                    let copied = (self.env.copy)(&post);
+                    self.phase = Phase::Opening { rx: self.open(post), copied };
+                }
+                Ok(Err(why)) => {
+                    self.warning = Some(format!("Couldn't save the card, so nothing was copied or opened: {why}"));
+                    self.phase = Phase::Preview;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.warning = Some("Couldn't save the card: the save stopped unexpectedly.".into());
+                    self.phase = Phase::Preview;
+                }
+                Err(TryRecvError::Empty) => {}
+            },
+            Phase::Opening { rx, copied } => match rx.try_recv() {
+                Ok((url, opened, revealed)) => {
+                    let card = self.card_path();
+                    self.phase = Phase::Done(Done { card, copied: *copied, url, opened, revealed, post: self.post() });
+                }
+                Err(TryRecvError::Disconnected) => {
+                    let (card, copied, post) = (self.card_path(), *copied, self.post());
+                    let failed = || Launch::Failed("stopped unexpectedly".into());
+                    self.phase = Phase::Done(Done { card, copied, url: share::linkedin_url(&post), opened: failed(), revealed: failed(), post });
+                }
+                Err(TryRecvError::Empty) => {}
+            },
+            Phase::Preview | Phase::Editing { .. } | Phase::Done(_) | Phase::Failed(_) => {}
+        }
+    }
+
+    /// Takes a regenerated line, unless it fell back to the template while the current line is a real draft.
+    fn regenerated(&mut self, d: Draft) {
+        match (&d.note, &self.note) {
+            (Some(note), None) => self.warning = Some(format!("Couldn't regenerate, so the current line stays. {}", note.message())),
+            _ => {
+                (self.line, self.note, self.custom, self.warning) = (d.line, d.note, None, None);
+                self.scroll = 0;
+            }
+        }
+    }
+
+    fn card_path(&self) -> PathBuf {
+        self.snapshot.as_ref().map(|s| (self.env.card_path)(s)).unwrap_or_default()
+    }
+
+    fn confirm(&mut self) {
+        let Some(s) = self.snapshot.clone() else { return };
+        let path = self.card_path();
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(share::save_card(&s, &path).map_err(|e| format!("{e:#}")));
+        });
+        self.warning = None;
+        self.phase = Phase::Saving(rx);
+    }
+
+    fn open(&self, post: String) -> Receiver<(String, Launch, Launch)> {
+        let (tx, rx) = channel();
+        let (run, desktop, card) = (self.env.run.clone(), self.env.desktop, self.card_path());
+        std::thread::spawn(move || {
+            let (url, opened) = share::open_linkedin(&desktop, &post, &*run);
+            let revealed = share::reveal(&desktop, &card, &*run);
+            let _ = tx.send((url, opened, revealed));
+        });
+        rx
+    }
+
+    fn regenerate(&mut self) {
+        let Some(s) = self.snapshot.clone() else { return };
+        // A fresh flag, so stopping one regeneration doesn't poison the next.
+        self.cancel.store(true, Ordering::SeqCst);
+        self.cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = channel();
+        let (draft, flag) = (self.env.draft.clone(), self.cancel.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(draft(&s, &flag));
+        });
+        self.warning = None;
+        self.phase = Phase::Regenerating(rx);
+    }
+
+    /// The badges the share's sync produced, once: the dashboard announces them as after its own sync.
+    pub fn take_prepared(&mut self) -> Option<crate::badges::Badges> {
+        self.prepared.take()
+    }
+
+    /// Takes the post back from the user's editor.
+    pub fn edited_post(&mut self, edited: Result<String, String>) {
+        match edited {
+            Ok(text) if text.trim().is_empty() => self.warning = Some("The edited post was empty, so it was not used.".into()),
+            Ok(text) => {
+                // The user's own post: no longer the template, so a failed regenerate keeps it.
+                (self.custom, self.note, self.warning) = (Some(text.trim_end().to_string()), None, None);
+            }
+            Err(why) => self.warning = Some(format!("Couldn't edit the post: {why}")),
+        }
+    }
+
+    /// Inserts pasted text while editing the line; a line has no line breaks, so they become spaces.
+    pub fn on_paste(&mut self, pasted: &str) {
+        if let Phase::Editing { text, cursor } = &mut self.phase {
+            let flat = pasted.replace("\r\n", " ").replace(['\r', '\n'], " ");
+            for c in flat.chars() {
+                text.insert(*cursor, c);
+                *cursor += 1;
+            }
+        }
+    }
+
+    pub fn on_key(&mut self, key: KeyEvent) -> Outcome {
+        let code = key.code;
+        match &mut self.phase {
+            Phase::Drafting(_) => {
+                if matches!(code, KeyCode::Char('q') | KeyCode::Esc) {
+                    return Outcome::Close;
+                }
+            }
+            Phase::Regenerating(_) => match code {
+                KeyCode::Esc => {
+                    self.cancel.store(true, Ordering::SeqCst);
+                    self.phase = Phase::Preview;
+                }
+                KeyCode::Char('q') => return Outcome::Close,
+                _ => {}
+            },
+            Phase::Preview => match code {
+                KeyCode::Char('q') | KeyCode::Esc => return Outcome::Close,
+                KeyCode::Enter => self.confirm(),
+                KeyCode::Char('e') => {
+                    let text: Vec<char> = self.line.chars().collect();
+                    self.phase = Phase::Editing { cursor: text.len(), text };
+                }
+                KeyCode::Char('E') => return Outcome::EditPost(self.post()),
+                KeyCode::Char('r') => self.regenerate(),
+                KeyCode::Down | KeyCode::Char('j') => self.scroll_by(1),
+                KeyCode::Up | KeyCode::Char('k') => self.scroll_by(-1),
+                KeyCode::PageDown | KeyCode::Char(' ') => self.scroll_by(10),
+                KeyCode::PageUp => self.scroll_by(-10),
+                _ => {}
+            },
+            Phase::Editing { text, cursor } => match code {
+                KeyCode::Enter => {
+                    let line: String = text.iter().collect::<String>().trim().to_string();
+                    if !line.is_empty() {
+                        // The user's own line: no longer the template, so a failed regenerate keeps it.
+                        (self.line, self.custom, self.note) = (line, None, None);
+                    }
+                    self.phase = Phase::Preview;
+                }
+                KeyCode::Esc => self.phase = Phase::Preview,
+                KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    text.insert(*cursor, c);
+                    *cursor += 1;
+                }
+                KeyCode::Backspace if *cursor > 0 => {
+                    *cursor -= 1;
+                    text.remove(*cursor);
+                }
+                KeyCode::Delete if *cursor < text.len() => {
+                    text.remove(*cursor);
+                }
+                KeyCode::Left => *cursor = cursor.saturating_sub(1),
+                KeyCode::Right => *cursor = (*cursor + 1).min(text.len()),
+                KeyCode::Home => *cursor = 0,
+                KeyCode::End => *cursor = text.len(),
+                _ => {}
+            },
+            Phase::Saving(_) | Phase::Opening { .. } => {}
+            Phase::Done(_) | Phase::Failed(_) => {
+                if matches!(code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')) {
+                    return Outcome::Close;
+                }
+            }
+        }
+        Outcome::Stay
+    }
+
+    fn scroll_by(&mut self, delta: i32) {
+        self.scroll = (self.scroll as i32 + delta).clamp(0, self.max_scroll.get() as i32) as u16;
+    }
+}
+
+/// Opens `text` in `$VISUAL`, `$EDITOR`, or `vi` (`notepad` on Windows), and returns what was saved.
+pub fn edit_in_editor(text: &str) -> Result<String, String> {
+    let editor = ["VISUAL", "EDITOR"]
         .iter()
         .filter_map(|v| std::env::var(v).ok())
-        .find(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| if cfg!(windows) { "notepad".into() } else { "vi".into() })
-}
-
-/// Edits `text` in `editor` (which may carry arguments, as in `code -w`) through a temp file.
-pub fn edit_with(editor: &str, text: &str) -> anyhow::Result<String> {
-    use anyhow::Context;
+        .find(|e| !e.trim().is_empty())
+        .unwrap_or_else(|| if cfg!(windows) { "notepad".into() } else { "vi".into() });
     let mut parts = editor.split_whitespace();
-    let program = parts.next().context("no editor set")?;
-    let path = std::env::temp_dir().join(format!("marsad-post-{}.txt", std::process::id()));
-    std::fs::write(&path, text).context("couldn't write the post to a temp file")?;
+    let program = parts.next().ok_or("no editor is set")?;
+    // A fresh file that must not exist yet, so a planted file or symlink in the shared temp dir is never written through.
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let path = std::env::temp_dir().join(format!("marsad-post-{}-{nanos:x}.txt", std::process::id()));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()))
+        .map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
     let status = std::process::Command::new(program).args(parts).arg(&path).status();
     let result = match status {
-        Ok(s) if s.success() => std::fs::read_to_string(&path).context("couldn't read the edited post"),
-        Ok(s) => Err(anyhow::anyhow!("{program} exited with {s}")),
-        Err(e) => Err(anyhow::anyhow!("couldn't run {program}: {e}")),
+        Ok(s) if s.success() => std::fs::read_to_string(&path).map_err(|e| format!("couldn't read {}: {e}", path.display())),
+        Ok(s) => Err(format!("{program} exited with {s}")),
+        Err(e) => Err(format!("couldn't run {program}: {e}")),
     };
     let _ = std::fs::remove_file(&path);
     result
 }
 
-/// An Expert's stats for the tests.
-#[cfg(test)]
-fn test_snapshot() -> Snapshot {
-    let mut stats = crate::badges::Stats::default();
-    stats.0.insert(crate::badges::RANK_KEY, 386_200_000);
-    Snapshot {
-        date: "2026-10-24".into(),
-        today: 12_000_000,
-        week: 198_000_000,
-        month: 340_000_000,
-        daily_average: 11_300_000,
-        all_time: 386_200_000,
-        badges: crate::badges::badges(&stats),
-        name: Some("Ada".into()),
-        work: share::Work::default(),
-        home: None,
-    }
-}
-
-/// Deps that touch nothing real: an instant snapshot and line, the card at `card`, and desktop tools that fail.
-#[cfg(test)]
-pub(crate) fn fake_deps(card: PathBuf) -> Deps {
-    Deps {
-        snapshot: Arc::new(|| Ok(test_snapshot())),
-        draft: Arc::new(|_, _| Draft { line: "Drafted.".into(), note: None }),
-        run: Arc::new(|_| Err("not in tests".into())),
-        desktop: Desktop::from_env(|_| false),
-        card: Arc::new(move |_| card.clone()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
-    fn snapshot() -> Snapshot {
-        test_snapshot()
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -469,267 +482,246 @@ mod tests {
         dir
     }
 
-    /// Fakes for every outside part: the line drafts at once (or waits for the cancel), the card
-    /// goes to `card`, and every desktop tool is recorded instead of run.
-    struct Fakes {
-        deps: Deps,
-        ran: Arc<Mutex<Vec<String>>>,
-        drafts: Arc<Mutex<usize>>,
-    }
-
-    fn fakes(card: PathBuf, slow: bool) -> Fakes {
-        let ran = Arc::new(Mutex::new(Vec::new()));
-        let drafts = Arc::new(Mutex::new(0));
-        let (r, d) = (ran.clone(), drafts.clone());
-        let deps = Deps {
-            snapshot: Arc::new(|| Ok(snapshot())),
-            draft: Arc::new(move |s, cancel| {
-                *d.lock().unwrap() += 1;
-                if slow {
-                    while !cancel.load(Ordering::Relaxed) {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    return Draft::template(s, Note::Cancelled);
-                }
-                Draft { line: format!("Drafted line {}.", d.lock().unwrap()), note: None }
-            }),
-            run: Arc::new(move |step| {
-                r.lock().unwrap().push(step.program.to_string());
-                Ok(())
-            }),
-            desktop: Desktop::from_env(|_| false),
-            card: Arc::new(move |_| card.clone()),
-        };
-        Fakes { deps, ran, drafts }
-    }
-
-    /// Ticks until the view leaves `stage` (answering copy requests with `copy`), or panics after 10 s.
-    fn settle(v: &mut ShareView, copy: Copied) {
-        let start = Instant::now();
-        loop {
-            if let Some(_text) = v.tick() {
-                v.copied(copy);
-            }
-            if !matches!(v.stage, Stage::Drafting | Stage::Saving) {
-                return;
-            }
-            assert!(start.elapsed() < Duration::from_secs(10), "stuck in {:?}", v.stage);
-            std::thread::sleep(Duration::from_millis(5));
+    fn snapshot() -> Snapshot {
+        let stats = crate::badges::Stats([("rank", 300_000_000)].into_iter().collect());
+        Snapshot {
+            date: "2026-10-24".into(),
+            today: 12_000_000,
+            week: 80_000_000,
+            month: 200_000_000,
+            daily_average: 6_600_000,
+            all_time: 300_000_000,
+            badges: crate::badges::badges(&stats),
+            name: Some("Test User".into()),
+            work: share::Work::default(),
+            home: None,
         }
     }
 
-    fn preview(f: &Fakes) -> ShareView {
-        let mut v = ShareView::new(f.deps.clone());
-        settle(&mut v, Copied::Failed);
-        assert_eq!(v.stage, Stage::Preview);
-        v
+    /// Records every copy and launch; the card goes to `dir`; drafting answers `line` (after `wait`).
+    struct Fake {
+        copies: Arc<Mutex<Vec<String>>>,
+        runs: Arc<Mutex<Vec<Step>>>,
     }
 
-    #[test]
-    fn drafting_ends_in_a_preview_of_the_line_and_the_stats() {
-        let dir = scratch("preview");
-        let f = fakes(dir.join("c.png"), false);
-        let v = preview(&f);
-        assert_eq!(v.line, "Drafted line 1.");
-        assert!(v.post().starts_with("Drafted line 1.\n\nToday 12M tokens"), "{}", v.post());
-        assert!(v.post().contains("Rank: Expert"));
-        std::fs::remove_dir_all(dir).ok();
+    fn env(dir: &Path, line: &'static str, wait: Duration, copied: Copied) -> (Env, Fake) {
+        let (copies, runs) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())));
+        let (c, r, dir) = (copies.clone(), runs.clone(), dir.to_path_buf());
+        let env = Env {
+            prepare: Arc::new(|| Ok(snapshot())),
+            draft: Arc::new(move |_, cancel| {
+                let until = Instant::now() + wait;
+                while Instant::now() < until && !cancel.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Draft { line: line.into(), note: None }
+            }),
+            card_path: Arc::new(move |s| dir.join(format!("marsad-{}.png", s.date))),
+            copy: Arc::new(move |text| {
+                c.lock().unwrap().push(text.to_string());
+                copied
+            }),
+            run: Arc::new(move |step| {
+                r.lock().unwrap().push(step.clone());
+                Ok(())
+            }),
+            desktop: Desktop::for_tests(),
+        };
+        (env, Fake { copies, runs })
     }
 
-    #[test]
-    fn covers_ae2_cancelling_writes_nothing_and_opens_nothing() {
-        let dir = scratch("cancel");
-        let card = dir.join("Downloads").join("marsad.png");
-        // From Drafting: the running draft is told to stop.
-        let f = fakes(card.clone(), true);
-        let mut v = ShareView::new(f.deps.clone());
-        while *f.drafts.lock().unwrap() == 0 {
+    /// Ticks until the view leaves its busy phase.
+    fn settle(v: &mut ShareView) {
+        let until = Instant::now() + Duration::from_secs(30);
+        while matches!(v.screen(), Screen::Busy(_)) && Instant::now() < until {
             v.tick();
             std::thread::sleep(Duration::from_millis(5));
         }
-        let cancel = v.cancel.clone();
-        assert_eq!(v.on_key(KeyCode::Esc), Action::Close);
-        drop(v);
-        assert!(cancel.load(Ordering::Relaxed), "the child is killed");
-        // From Preview.
-        let f2 = fakes(card.clone(), false);
-        let mut v = preview(&f2);
-        assert_eq!(v.on_key(KeyCode::Char('q')), Action::Close);
-        drop(v);
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(!card.exists() && !dir.join("Downloads").exists(), "no file is written");
-        assert!(f.ran.lock().unwrap().is_empty() && f2.ran.lock().unwrap().is_empty(), "nothing is opened");
-        std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn preview(dir: &Path) -> (ShareView, Fake) {
+        let (env, fake) = env(dir, "I shipped a parser with two agents.", Duration::ZERO, Copied::Native("pbcopy"));
+        let mut v = ShareView::start(env);
+        settle(&mut v);
+        assert!(matches!(v.screen(), Screen::Preview { .. }));
+        (v, fake)
+    }
+
+    fn files(dir: &Path) -> usize {
+        std::fs::read_dir(dir).unwrap().count()
     }
 
     #[test]
-    fn typing_q_while_editing_inserts_it() {
-        let dir = scratch("edit-q");
-        let f = fakes(dir.join("c.png"), false);
-        let mut v = preview(&f);
-        v.on_key(KeyCode::Char('e'));
-        for code in [KeyCode::Home, KeyCode::Char('q'), KeyCode::Char(' '), KeyCode::Char('Q')] {
-            assert_eq!(v.on_key(code), Action::None);
+    fn cancelling_while_drafting_or_in_the_preview_writes_and_opens_nothing() {
+        // Covers AE2.
+        let dir = scratch("cancel");
+        let (env, fake) = env(&dir, "never shown", Duration::from_secs(20), Copied::Native("pbcopy"));
+        let mut v = ShareView::start(env);
+        assert!(matches!(v.screen(), Screen::Busy(_)));
+        assert_eq!(v.on_key(key(KeyCode::Esc)), Outcome::Close);
+        drop(v);
+
+        let (mut v, preview_fake) = preview(&dir);
+        assert_eq!(v.on_key(key(KeyCode::Char('q'))), Outcome::Close, "q cancels the share, not marsad");
+        drop(v);
+        assert_eq!(files(&dir), 0);
+        for f in [fake, preview_fake] {
+            assert!(f.copies.lock().unwrap().is_empty() && f.runs.lock().unwrap().is_empty());
         }
-        assert_eq!(v.stage, Stage::Editing { text: "q QDrafted line 1.".into(), cursor: 3 });
-        v.on_key(KeyCode::Enter);
-        assert_eq!((v.line.as_str(), &v.stage), ("q QDrafted line 1.", &Stage::Preview));
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
-    fn a_pasted_newline_becomes_a_space_in_one_line() {
-        let dir = scratch("paste");
-        let f = fakes(dir.join("c.png"), false);
-        let mut v = preview(&f);
-        v.on_paste("ignored outside the editor\n");
-        v.on_key(KeyCode::Char('e'));
-        v.on_key(KeyCode::End);
-        v.on_paste(" Then\nmore\r\nlines");
-        v.on_key(KeyCode::Enter);
-        assert_eq!(v.line, "Drafted line 1. Then more lines");
-        assert_eq!(v.post().lines().next(), Some("Drafted line 1. Then more lines"));
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn esc_while_editing_restores_the_line_and_stays_in_the_preview() {
-        let dir = scratch("edit-esc");
-        let f = fakes(dir.join("c.png"), false);
-        let mut v = preview(&f);
-        v.on_key(KeyCode::Char('e'));
-        v.on_key(KeyCode::Backspace);
-        v.on_key(KeyCode::Char('!'));
-        assert_eq!(v.on_key(KeyCode::Esc), Action::None);
-        assert_eq!((v.line.as_str(), &v.stage), ("Drafted line 1.", &Stage::Preview));
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn regenerate_drafts_again_and_a_failure_keeps_the_line() {
-        let dir = scratch("regen");
-        let f = fakes(dir.join("c.png"), false);
-        let mut v = preview(&f);
-        v.on_key(KeyCode::Char('r'));
-        settle(&mut v, Copied::Failed);
-        assert_eq!(v.line, "Drafted line 2.");
-        // A regenerate that falls back to the template keeps the drafted line.
-        v.deps.draft = Arc::new(|s, _| Draft::template(s, Note::Timeout));
-        v.on_key(KeyCode::Char('r'));
-        settle(&mut v, Copied::Failed);
-        assert_eq!(v.line, "Drafted line 2.");
-        assert!(v.status.as_deref().unwrap().contains("kept the line"), "{:?}", v.status);
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn the_whole_post_can_be_edited_and_a_new_line_rebuilds_it() {
-        let dir = scratch("edit-post");
-        let f = fakes(dir.join("c.png"), false);
-        let mut v = preview(&f);
-        let Action::EditPost(text) = v.on_key(KeyCode::Char('E')) else { panic!("E opens the editor") };
-        v.edited(Ok(format!("{text}\n#AI\n\n")));
-        assert!(v.post().ends_with("Rank: Expert\n#AI"), "{}", v.post());
-        v.edited(Ok("   \n".into()));
-        assert!(v.post().ends_with("#AI"), "an empty edit is ignored");
-        v.on_key(KeyCode::Char('e'));
-        v.on_key(KeyCode::Char('!'));
-        v.on_key(KeyCode::Enter);
-        assert!(v.edited_post.is_none() && v.post().starts_with("Drafted line 1.!"));
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn confirm_saves_then_copies_on_the_main_thread_then_opens() {
-        let dir = scratch("confirm");
-        let card = dir.join("Downloads").join("marsad-2026-10-24.png");
-        let mut f = fakes(card.clone(), false);
-        f.deps.desktop = Desktop::from_env(|name| name == "DISPLAY");
-        let mut v = preview(&f);
-        let post = v.post();
-        assert_eq!(v.on_key(KeyCode::Enter), Action::None);
-        assert_eq!(v.stage, Stage::Saving);
-        // The worker waits for the main thread's copy.
-        let start = Instant::now();
-        let asked = loop {
-            if let Some(text) = v.tick() {
-                break text;
+    fn closing_while_drafting_kills_the_draft() {
+        let dir = scratch("kill");
+        let flag = Arc::new(Mutex::new(None::<bool>));
+        let seen = flag.clone();
+        let (mut env, _) = env(&dir, "", Duration::ZERO, Copied::Failed);
+        env.draft = Arc::new(move |_, cancel| {
+            let until = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < until && !cancel.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
             }
-            assert!(start.elapsed() < Duration::from_secs(30), "no copy request");
-            std::thread::sleep(Duration::from_millis(5));
-        };
-        assert_eq!(asked, post);
-        assert!(card.exists(), "the card is written before the copy");
-        assert!(f.ran.lock().unwrap().is_empty(), "nothing opens before the copy");
-        v.copied(Copied::Native("pbcopy"));
-        settle(&mut v, Copied::Failed);
-        let Stage::Done(done) = &v.stage else { panic!("{:?}", v.stage) };
-        assert_eq!(done.copied, Copied::Native("pbcopy"));
-        assert_eq!(f.ran.lock().unwrap().len(), 2, "browser, then file manager");
-        assert_eq!(v.on_key(KeyCode::Char('x')), Action::Close, "any key closes the Done screen");
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn a_failed_card_write_keeps_the_preview_and_copies_and_opens_nothing() {
-        let dir = scratch("unwritable");
-        std::fs::write(dir.join("file"), "").unwrap();
-        let f = fakes(dir.join("file").join("marsad.png"), false);
-        let mut v = preview(&f);
-        v.on_key(KeyCode::Enter);
-        let start = Instant::now();
-        while v.stage == Stage::Saving {
-            assert!(v.tick().is_none(), "nothing is copied");
-            assert!(start.elapsed() < Duration::from_secs(30));
+            *seen.lock().unwrap() = Some(cancel.load(Ordering::SeqCst));
+            Draft { line: String::new(), note: None }
+        });
+        let v = ShareView::start(env);
+        std::thread::sleep(Duration::from_millis(50));
+        drop(v);
+        let until = Instant::now() + Duration::from_secs(5);
+        while flag.lock().unwrap().is_none() && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(v.stage, Stage::Preview);
-        assert!(v.status.as_deref().unwrap().starts_with("Couldn't save the card"), "{:?}", v.status);
-        assert!(f.ran.lock().unwrap().is_empty());
-        std::fs::remove_dir_all(dir).ok();
+        assert_eq!(*flag.lock().unwrap(), Some(true), "the draft saw the cancel");
     }
 
     #[test]
-    fn a_failed_snapshot_says_why_and_closes_on_any_key() {
-        let dir = scratch("snapshot");
-        let mut f = fakes(dir.join("c.png"), false);
-        f.deps.snapshot = Arc::new(|| Err(anyhow::anyhow!("database is locked")));
-        let mut v = ShareView::new(f.deps.clone());
-        settle(&mut v, Copied::Failed);
-        assert_eq!(v.stage, Stage::Failed("Couldn't gather today's stats: database is locked".into()));
-        assert_eq!(v.on_key(KeyCode::Enter), Action::Close);
-        std::fs::remove_dir_all(dir).ok();
+    fn editing_the_line_takes_every_letter_and_esc_restores_it() {
+        let dir = scratch("edit");
+        let (mut v, _) = preview(&dir);
+        let before = v.post();
+        v.on_key(key(KeyCode::Char('e')));
+        for c in " q".chars() {
+            assert_eq!(v.on_key(key(KeyCode::Char(c))), Outcome::Stay, "typing {c:?} while editing never closes");
+        }
+        assert!(matches!(v.screen(), Screen::Preview { editing: Some((t, _)), .. } if t.ends_with(&[' ', 'q'])));
+        assert_eq!(v.on_key(key(KeyCode::Esc)), Outcome::Stay, "esc leaves the edit, not the share");
+        assert_eq!(v.post(), before, "esc restores the previous line");
+
+        v.on_key(key(KeyCode::Char('e')));
+        v.on_key(key(KeyCode::Home));
+        v.on_key(key(KeyCode::Char('>')));
+        v.on_key(key(KeyCode::Enter));
+        assert!(v.post().starts_with(">I shipped"), "{}", v.post());
     }
 
     #[test]
-    fn the_done_screen_says_a_clipboard_failure_and_still_lists_the_card() {
-        let done = Confirmed {
-            card: PathBuf::from("/d/marsad-2026-10-24.png"),
-            copied: Copied::Failed,
-            url: "https://www.linkedin.com/feed/".into(),
-            opened: Launch::Skipped("over SSH"),
-            revealed: Launch::Failed("not installed".into()),
-        };
-        let lines = done_lines(&done);
-        assert_eq!(lines[0], (Mark::Done, "Card saved to /d/marsad-2026-10-24.png".into()));
-        assert_eq!(lines[1].0, Mark::Failed);
-        assert!(lines[1].1.contains("Couldn't reach a clipboard"));
-        assert_eq!(lines[2], (Mark::Skipped, "Browser not opened (over SSH); open https://www.linkedin.com/feed/".into()));
-        assert_eq!(lines[3], (Mark::Failed, "Couldn't show the card (not installed); it is in /d".into()));
+    fn a_pasted_newline_becomes_a_space_in_the_line() {
+        let dir = scratch("paste");
+        let (mut v, _) = preview(&dir);
+        v.on_paste("ignored outside editing\n");
+        v.on_key(key(KeyCode::Char('e')));
+        v.on_key(key(KeyCode::End));
+        v.on_paste(" And\r\nmore\nlines.");
+        v.on_key(key(KeyCode::Enter));
+        let post = v.post();
+        let first = post.lines().next().unwrap();
+        assert_eq!(first, "I shipped a parser with two agents. And more lines.");
+        assert!(!post.contains("ignored"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn the_editor_round_trip_returns_the_edited_text() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = scratch("editor");
-        let script = dir.join("ed");
-        std::fs::write(&script, "#!/bin/sh\nprintf ' and more' >> \"$2\"\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let got = edit_with(&format!("{} --wait", script.display()), "my post").unwrap();
-        assert_eq!(got, "my post and more");
-        assert!(edit_with("marsad-no-such-editor", "x").is_err());
-        assert!(edit_with("false", "x").is_err());
-        std::fs::remove_dir_all(dir).ok();
+    fn confirm_saves_copies_on_the_main_thread_opens_and_reveals() {
+        let dir = scratch("confirm");
+        let (mut v, fake) = preview(&dir);
+        v.on_key(key(KeyCode::Enter));
+        settle(&mut v);
+        let Screen::Done(done) = v.screen() else { panic!("not done") };
+        assert!(done.card.exists() && done.card.starts_with(&dir));
+        assert_eq!(fake.copies.lock().unwrap().as_slice(), std::slice::from_ref(&done.post));
+        let runs = fake.runs.lock().unwrap();
+        assert!(runs[0].args.iter().any(|a| a.contains("linkedin.com")), "opened LinkedIn first: {runs:?}");
+        assert!(runs.len() >= 2, "then revealed the card");
+        assert_eq!(done.steps().iter().map(|s| s.1).collect::<Vec<_>>(), [Mark::Done; 4]);
+        assert_eq!(done.manual_url(), None);
+        drop(runs);
+        assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Close);
+    }
+
+    #[test]
+    fn a_card_that_cant_be_written_keeps_the_preview_and_copies_nothing() {
+        let dir = scratch("unwritable");
+        let blocker = dir.join("not-a-folder");
+        std::fs::write(&blocker, "").unwrap();
+        let (mut env, fake) = env(&dir, "line", Duration::ZERO, Copied::Native("pbcopy"));
+        env.card_path = Arc::new(move |_| blocker.join("card.png"));
+        let mut v = ShareView::start(env);
+        settle(&mut v);
+        v.on_key(key(KeyCode::Enter));
+        settle(&mut v);
+        let Screen::Preview { warning: Some(w), .. } = v.screen() else { panic!("left the preview") };
+        assert!(w.contains("Couldn't save the card"), "{w}");
+        assert!(fake.copies.lock().unwrap().is_empty() && fake.runs.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_failed_clipboard_is_reported_with_the_card_path() {
+        let dir = scratch("noclip");
+        let (env, _) = env(&dir, "line", Duration::ZERO, Copied::Failed);
+        let mut v = ShareView::start(env);
+        settle(&mut v);
+        v.on_key(key(KeyCode::Enter));
+        settle(&mut v);
+        let Screen::Done(done) = v.screen() else { panic!("not done") };
+        let steps = done.steps();
+        assert_eq!(steps[0].0, "card");
+        assert!(steps[0].2.contains("marsad-2026-10-24.png"));
+        assert_eq!((steps[1].0, steps[1].1), ("clipboard", Mark::Failed));
+        assert!(steps[1].2.contains("by hand"));
+    }
+
+    #[test]
+    fn a_regenerate_that_falls_back_keeps_the_drafted_line() {
+        let dir = scratch("regen");
+        let (mut v, _) = preview(&dir);
+        v.env.draft = Arc::new(|s, _| Draft::template(s, Note::Timeout));
+        v.on_key(key(KeyCode::Char('r')));
+        settle(&mut v);
+        let Screen::Preview { post, warning: Some(w), .. } = v.screen() else { panic!("no warning") };
+        assert!(post.starts_with("I shipped"), "{post}");
+        assert!(w.contains("Couldn't regenerate"));
+    }
+
+    #[test]
+    fn an_edited_post_replaces_the_text_until_the_line_changes() {
+        let dir = scratch("post");
+        let (mut v, _) = preview(&dir);
+        assert_eq!(v.on_key(key(KeyCode::Char('E'))), Outcome::EditPost(v.post()));
+        v.edited_post(Ok("My own words.\n".into()));
+        assert_eq!(v.post(), "My own words.");
+        v.edited_post(Ok("  \n".into()));
+        assert_eq!(v.post(), "My own words.", "an empty edit is not used");
+        v.on_key(key(KeyCode::Char('e')));
+        v.on_key(key(KeyCode::Enter));
+        assert!(v.post().starts_with("I shipped"), "editing the line rebuilds the post");
+    }
+
+    #[test]
+    fn a_failed_regenerate_keeps_a_hand_edited_template_line_and_post() {
+        let dir = scratch("regen-edited");
+        let (mut v, _) = preview(&dir);
+        v.env.draft = Arc::new(|s, _| Draft::template(s, Note::NotInstalled));
+        // The line on screen is the template, then the user writes their own.
+        (v.line, v.note) = ("Template.".into(), Some(Note::NotInstalled));
+        v.on_key(key(KeyCode::Char('e')));
+        v.on_paste(" Mine.");
+        v.on_key(key(KeyCode::Enter));
+        v.on_key(key(KeyCode::Char('r')));
+        settle(&mut v);
+        assert!(v.post().starts_with("Template. Mine."), "{}", v.post());
+        assert!(matches!(v.screen(), Screen::Preview { warning: Some(_), .. }));
+        v.edited_post(Ok("My own words.".into()));
+        v.on_key(key(KeyCode::Char('r')));
+        settle(&mut v);
+        assert_eq!(v.post(), "My own words.", "the edited post survives too");
     }
 }

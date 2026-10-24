@@ -178,7 +178,7 @@ fn prepare(conn: &mut Connection) -> anyhow::Result<()> {
 pub(crate) fn backfill_skills_seen(conn: &Connection) -> anyhow::Result<()> {
     conn.execute(
         "INSERT INTO skills_seen SELECT skill, MIN(day) FROM skill_runs WHERE skill IS NOT NULL AND day IS NOT NULL
-         GROUP BY skill ON CONFLICT(skill) DO UPDATE SET first_day = MIN(first_day, excluded.first_day)",
+         GROUP BY skill ON CONFLICT(skill) DO UPDATE SET first_day = MIN(COALESCE(first_day, excluded.first_day), excluded.first_day)",
         [],
     )?;
     Ok(())
@@ -326,14 +326,20 @@ pub struct SyncReport {
     pub failed: usize,
     /// Rows removed by the retention setting.
     pub pruned: usize,
+    /// The badge stats recorded after a sync that changed anything.
+    pub badges: Option<crate::badges::Stats>,
 }
 
 /// Indexes new or changed transcripts under `~/.claude/projects`, then prunes detail rows
 /// older than the retention (unless it is forever). The permanent counter is never pruned.
 pub fn sync(conn: &mut Connection) -> anyhow::Result<SyncReport> {
-    let report = sync_dir(conn, &crate::claude_dir().join("projects"), retention())?;
-    // Raised after every sync, so later pruning or a lowering import never revokes a badge.
-    crate::badges::record(conn, lifetime(conn)?.total)?;
+    let mut report = sync_dir(conn, &crate::claude_dir().join("projects"), retention())?;
+    // Raised after every sync that changed data, so later pruning or a lowering import never revokes a badge.
+    // The indexed rows are already committed, so a failure here must not fail the sync: the shown values
+    // are recomputed from the counters anyway, and the next changed sync records them.
+    if report.updated + report.pruned > 0 {
+        report.badges = lifetime(conn).and_then(|l| crate::badges::record(conn, l.total)).ok();
+    }
     Ok(report)
 }
 
@@ -424,7 +430,7 @@ fn write_unit(
         if let Some(day) = &day {
             tx.execute(
                 "INSERT INTO skills_seen VALUES (?1, ?2)
-                 ON CONFLICT(skill) DO UPDATE SET first_day = MIN(first_day, excluded.first_day)",
+                 ON CONFLICT(skill) DO UPDATE SET first_day = MIN(COALESCE(first_day, excluded.first_day), excluded.first_day)",
                 params![run.name, day],
             )?;
         }
@@ -479,6 +485,22 @@ fn prune(conn: &mut Connection, cutoff: &str) -> anyhow::Result<usize> {
 }
 
 // ---------- queries shared by the TUI and `marsad report` ----------
+
+/// Highest value ever stored per badge stat.
+pub fn badge_best(conn: &Connection) -> anyhow::Result<std::collections::HashMap<String, i64>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM badge_best")?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Raises one stat's best value to `value`; a lower value leaves it as it was.
+pub fn raise_best(conn: &Connection, key: &str, value: i64) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO badge_best VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+        params![key, value],
+    )?;
+    Ok(())
+}
 
 /// All-time token totals: the permanent counter plus totals pruned by earlier versions.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
@@ -1090,6 +1112,32 @@ mod tests {
         assert_eq!(runs(&conn), 2, "only today's two runs are kept");
         assert_eq!(skills_seen(&conn), seen);
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_seen_skill_without_a_first_day_takes_the_next_known_one() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        prepare(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO skills_seen VALUES ('ce-plan', NULL);
+             INSERT INTO skill_runs VALUES ('s1', 'main', 'main', 0, 'ce-plan', 'tool', 't', '2026-10-02', 1, 0, 1, 0, 0, 1);",
+        )
+        .unwrap();
+        backfill_skills_seen(&conn).unwrap();
+        assert_eq!(skills_seen(&conn), [json!(["ce-plan", "2026-10-02"])], "a NULL day never sticks");
+    }
+
+    #[test]
+    fn best_values_never_go_down() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        prepare(&mut conn).unwrap();
+        assert!(badge_best(&conn).unwrap().is_empty());
+        raise_best(&conn, "streak", 7).unwrap();
+        raise_best(&conn, "streak", 3).unwrap();
+        raise_best(&conn, "rank", 10).unwrap();
+        raise_best(&conn, "rank", 12).unwrap();
+        let best = badge_best(&conn).unwrap();
+        assert_eq!((best["streak"], best["rank"], best.len()), (7, 12, 2), "lower keeps the old value; higher replaces it");
     }
 
     #[test]

@@ -42,14 +42,13 @@ An import the user marks as this machine's own earlier data, for a reinstall wit
 ## Badges
 
 ### Rank
-The craft tier the user's all-time token total has reached, from Novice to Grandmaster. It counts the header's all-time figure, cache reads included, so the badge, the post and the dashboard agree.
-*Avoid:* level (that is an achievement's)
+The user's step on a craft ladder, Novice to Grandmaster, set by all-time tokens with cache reads included: the same figure as the dashboard header's all-time total. Each step has its own badge art.
 
 ### Achievement
-A bronze, silver or gold level earned for one usage stat: the longest streak of days with usage, distinct skills used, subagents run, or the busiest single day.
+A bronze, silver or gold level for breadth of use rather than volume: longest streak of days with usage, distinct skills, subagents run, and busiest day. Its value comes from the never-pruned tables, so it reaches past the retention window.
 
 ### Best value
-The highest value ever computed for the rank total or an achievement's stat, stored for good. A shown value never falls below it, so pruning detail history or importing an older export never revokes a rank or level.
+The highest value a rank or achievement ever reached, stored and never lowered. The shown value is the larger of it and the value computed now, so pruning or an import that lowers the numbers never revokes a level.
 
 ## Coordination
 

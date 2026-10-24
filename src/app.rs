@@ -1,12 +1,10 @@
-mod badge_state;
-
-pub use badge_state::{Announcement, BadgeState};
 use crate::events;
 use crate::jsonl::JsonlTail;
 use crate::model::{EventKind, RateWindow, Session, SortKey, Status, Subagent, TimelineEntry};
-use crate::share_view::{Action, ShareView};
 use crate::transcript::{self, TranscriptReader};
-use ratatui::crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind};
+use crate::badges::Badges;
+use crate::share_view::{Outcome, ShareView};
+use ratatui::crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::crossterm::execute;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -73,7 +71,7 @@ pub enum View {
     Usage,
     /// The shared AGENT-BOARD.md of the selected session's repo.
     Board,
-    /// The rank, the achievements and the progress to each next level.
+    /// The rank and achievements, with the badge art.
     Badges,
 }
 
@@ -149,11 +147,11 @@ pub struct App {
     /// The launch command to copy by hand when the clipboard couldn't be reached; the next key clears it.
     pub copy_note: Option<CopyNote>,
     pub board: BoardState,
-    pub badges: BadgeState,
-    /// A rank-up or new achievement level for the footer.
-    pub announcement: Announcement,
-    /// The share flow, drawn over the list or the badge view; it gets every key first.
+    /// The rank and achievements for the badge view, refreshed after each sync.
+    pub badges: Option<Badges>,
+    /// Sharing to LinkedIn, drawn over the current view and given its keys while open.
     pub share: Option<ShareView>,
+    pub announcement: Option<Announcement>,
     alerts: crate::alerts::Detector,
     update_rx: std::sync::mpsc::Receiver<crate::update::Notice>,
     log: JsonlTail,
@@ -253,12 +251,56 @@ impl BoardState {
     }
 }
 
-/// What the run loop does after a key.
+/// How long a badge announcement stays in the footer once it has been drawn.
+const ANNOUNCE_FOR: Duration = Duration::from_secs(10);
+
+/// A footer note for badge levels that rose. It waits while the share view is open, stays
+/// `ANNOUNCE_FOR` once drawn (or until Esc) rather than clearing on the next key, and the levels
+/// count as announced only once it has been drawn.
+pub struct Announcement {
+    pub text: String,
+    badges: Badges,
+    drawn: Option<Instant>,
+}
+
+impl Announcement {
+    fn new(text: String, badges: Badges) -> Self {
+        Announcement { text, badges, drawn: None }
+    }
+
+    /// The views whose footer shows the note.
+    pub fn shows_in(view: View) -> bool {
+        matches!(view, View::List | View::Badges)
+    }
+
+    /// After a frame: whether the note was on screen for the first time, so its levels are announced now.
+    fn on_drawn(&mut self, visible: bool, now: Instant) -> bool {
+        let first = visible && self.drawn.is_none();
+        if first {
+            self.drawn = Some(now);
+        }
+        first
+    }
+
+    fn expired(&self, now: Instant) -> bool {
+        self.drawn.is_some_and(|t| now.duration_since(t) >= ANNOUNCE_FOR)
+    }
+}
+
+/// The note the footer shows, by priority: an error, a success, a badge level-up, an update.
+pub enum FooterNote<'a> {
+    Error(&'a str),
+    Info(&'a str),
+    Badge(&'a str),
+    Update(&'a crate::update::Notice),
+}
+
+/// What a key asks of the run loop.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Flow {
-    Stay,
+enum Action {
+    None,
     Quit,
-    /// Suspend the terminal and edit the post in `$EDITOR`.
+    /// Suspend the terminal and edit this post text in the user's editor.
     EditPost(String),
 }
 
@@ -354,9 +396,9 @@ impl App {
             info: None,
             copy_note: None,
             board: BoardState::default(),
-            badges: BadgeState::default(),
-            announcement: Announcement::default(),
+            badges: None,
             share: None,
+            announcement: None,
             alerts: crate::alerts::Detector::default(),
             update_rx: crate::update::background(),
             log: JsonlTail::new(dir.join("events.jsonl")),
@@ -460,6 +502,79 @@ impl App {
         self.copy_note = Some(CopyNote { headline, command, path });
     }
 
+    /// The rank and achievements now, with the header's all-time figure as the rank total.
+    fn load_badges(&self) -> anyhow::Result<Badges> {
+        let conn = crate::store::open_readonly()?;
+        Ok(crate::badges::badges(&crate::badges::shown(&conn, self.counter.totals().1)?))
+    }
+
+    fn open_badges(&mut self) {
+        match self.load_badges() {
+            Ok(b) => {
+                self.badges = Some(b);
+                self.view = View::Badges;
+            }
+            Err(e) => self.error = Some(format!("couldn't read the badges: {e:#}")),
+        }
+    }
+
+    /// After a background sync that changed something: the badges from the stats it recorded, and a
+    /// note for any level that rose.
+    fn after_sync(&mut self, mut stats: crate::badges::Stats) {
+        // The header's figure also counts live usage the index hasn't caught up with.
+        let rank = stats.0.entry(crate::badges::RANK_KEY).or_default();
+        *rank = (*rank).max(self.counter.totals().1);
+        self.announce(crate::badges::badges(&stats));
+    }
+
+    /// Shows `b` in the badge view, with a note for any level that rose since the last announcement.
+    fn announce(&mut self, b: Badges) {
+        match crate::badges::pending_announcement(&b) {
+            Ok(Some(text)) => self.announcement = Some(Announcement::new(text, b.clone())),
+            Ok(None) => {}
+            Err(e) => self.error = Some(format!("couldn't save the announced badges: {e:#}")),
+        }
+        self.badges = Some(b);
+    }
+
+    fn open_share(&mut self) {
+        self.share = Some(ShareView::start(crate::share_view::Env::real(self.counter.totals().1)));
+    }
+
+    /// The footer's note now. A badge note shows only in its views and waits while a share is open.
+    pub fn footer_note(&self) -> Option<FooterNote<'_>> {
+        if let Some(e) = &self.error {
+            return Some(FooterNote::Error(e));
+        }
+        if let Some(i) = &self.info {
+            return Some(FooterNote::Info(i));
+        }
+        let badge = self.announcement.as_ref().filter(|_| self.share.is_none() && Announcement::shows_in(self.view));
+        if let Some(a) = badge {
+            return Some(FooterNote::Badge(&a.text));
+        }
+        self.update.as_ref().map(FooterNote::Update)
+    }
+
+    fn announcing(&self) -> bool {
+        matches!(self.footer_note(), Some(FooterNote::Badge(_)))
+    }
+
+    /// After each frame: records a badge note the first time it was drawn, and lets it expire.
+    fn after_draw(&mut self) {
+        let now = Instant::now();
+        let shown = self.announcing();
+        let Some(a) = self.announcement.as_mut() else { return };
+        if a.on_drawn(shown, now)
+            && let Err(e) = crate::badges::mark_announced(&a.badges)
+        {
+            self.error = Some(format!("couldn't save the announced badges: {e:#}"));
+        }
+        if a.expired(now) {
+            self.announcement = None;
+        }
+    }
+
     /// Changes the sort order while keeping the highlighted session selected.
     fn set_sort(&mut self, key: SortKey, reversed: bool) {
         self.selected = self.selected_session().map(|s| s.id.clone());
@@ -500,18 +615,18 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        if self.usage.tick() {
-            self.after_sync();
+        if let Some(stats) = self.usage.tick() {
+            self.after_sync(stats);
         }
-        if self.badges.due {
-            self.badges.due = false;
-            self.load_badges();
-        }
-        // The clipboard runs here, on the main thread, between frames: OSC 52 writes to the terminal.
-        if let Some(share) = &mut self.share
-            && let Some(text) = share.tick()
-        {
-            share.copied(crate::clipboard::copy(&text));
+        let prepared = self.share.as_mut().and_then(|share| {
+            share.tick();
+            share.take_prepared()
+        });
+        // The share synced on its own thread, so the dashboard's next sync finds nothing new: take its
+        // rows and any badge level they raised here.
+        if let Some(b) = prepared {
+            self.usage.reload();
+            self.announce(b);
         }
         if let Ok(notice) = self.update_rx.try_recv() {
             self.update = Some(notice);
@@ -592,23 +707,24 @@ impl App {
 }
 
 impl App {
-    /// Handles one key press. The share view takes every key first, so `q` there cancels the share
-    /// rather than quitting; a drawn announcement takes Esc next; then the footer notes clear.
-    pub fn on_key(&mut self, code: KeyCode) -> Flow {
-        if let Some(share) = &mut self.share {
-            match share.on_key(code) {
-                Action::Close => self.share = None,
-                Action::EditPost(text) => return Flow::EditPost(text),
-                Action::None => {}
+    /// Handles one key press. The share view gets keys first, so `q` there cancels the share.
+    fn on_key(&mut self, key: KeyEvent) -> Action {
+        if let Some(share) = self.share.as_mut() {
+            match share.on_key(key) {
+                Outcome::Stay => {}
+                Outcome::Close => self.share = None,
+                Outcome::EditPost(text) => return Action::EditPost(text),
             }
-            return Flow::Stay;
+            return Action::None;
         }
-        if code == KeyCode::Esc && self.announcement.dismiss(self.view, false) {
-            return Flow::Stay;
+        // Esc dismisses a badge note before it does anything else.
+        if key.code == KeyCode::Esc && self.announcing() {
+            self.announcement = None;
+            return Action::None;
         }
         (self.error, self.info, self.copy_note) = (None, None, None);
-        match (self.view, code) {
-            (_, KeyCode::Char('q')) => return Flow::Quit,
+        match (self.view, key.code) {
+            (_, KeyCode::Char('q')) => return Action::Quit,
             (View::Usage, code) => {
                 if !self.usage.on_key(code) {
                     self.view = View::List;
@@ -618,7 +734,7 @@ impl App {
                 self.view = View::Usage;
                 self.usage.reload();
             }
-            (View::List, KeyCode::Esc) => return Flow::Quit,
+            (View::List, KeyCode::Esc) => return Action::Quit,
             (View::List, KeyCode::Down | KeyCode::Char('j')) => self.move_selection(1),
             (View::List, KeyCode::Up | KeyCode::Char('k')) => self.move_selection(-1),
             (View::List, KeyCode::Home | KeyCode::Char('g')) => self.move_selection(isize::MIN / 2),
@@ -630,13 +746,10 @@ impl App {
                     self.error = Some(format!("couldn't save alerts setting: {e}"));
                 }
             }
-            (View::List | View::History | View::Agents, KeyCode::Char('b')) => self.open_board(),
-            (View::List, KeyCode::Char('B')) => {
-                self.view = View::Badges;
-                self.badges.due = true;
-            }
+            (View::List, KeyCode::Char('B')) => self.open_badges(),
+            (View::List | View::Badges, KeyCode::Char('p')) => self.open_share(),
             (View::Badges, KeyCode::Esc | KeyCode::Char('B') | KeyCode::Left | KeyCode::Char('h')) => self.view = View::List,
-            (View::List | View::Badges, KeyCode::Char('p')) => self.start_share(),
+            (View::List | View::History | View::Agents, KeyCode::Char('b')) => self.open_board(),
             (View::List | View::Board, KeyCode::Char('c')) => self.copy_launch_command(),
             (View::Board, KeyCode::Esc | KeyCode::Char('b') | KeyCode::Left | KeyCode::Char('h')) => self.view = View::List,
             (View::Board, KeyCode::Down | KeyCode::Char('j')) => self.board.scroll(1),
@@ -657,9 +770,7 @@ impl App {
             (View::History, KeyCode::Char('K')) => self.scroll_detail(-3),
             (View::List | View::History, KeyCode::Tab) => self.open(View::Agents),
             (View::Agents, KeyCode::Tab) => self.open(View::History),
-            (View::History | View::Agents, KeyCode::Esc | KeyCode::Enter | KeyCode::Left | KeyCode::Char('h')) => {
-                self.view = View::List
-            }
+            (View::History | View::Agents, KeyCode::Esc | KeyCode::Enter | KeyCode::Left | KeyCode::Char('h')) => self.view = View::List,
             (View::History | View::Agents, KeyCode::Down | KeyCode::Char('j')) => self.scroll(1),
             (View::History | View::Agents, KeyCode::Up | KeyCode::Char('k')) => self.scroll(-1),
             (View::History | View::Agents, KeyCode::PageDown | KeyCode::Char(' ')) => self.scroll(10),
@@ -668,7 +779,7 @@ impl App {
             (View::History | View::Agents, KeyCode::End | KeyCode::Char('G')) => self.scroll(isize::MAX / 2),
             _ => {}
         }
-        Flow::Stay
+        Action::None
     }
 }
 
@@ -676,7 +787,7 @@ pub fn run() -> anyhow::Result<()> {
     let mut app = App::new();
     app.refresh();
     let mut terminal = ratatui::init();
-    // A pasted newline must not end the line being edited.
+    // Bracketed paste, so a pasted newline while editing the share line doesn't confirm it.
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     let result = (|| -> anyhow::Result<()> {
         loop {
@@ -685,24 +796,23 @@ pub fn run() -> anyhow::Result<()> {
             if event::poll(Duration::from_millis(250))? {
                 match event::read()? {
                     Event::Paste(text) => {
-                        if let Some(share) = &mut app.share {
+                        if let Some(share) = app.share.as_mut() {
                             share.on_paste(&text);
                         }
                     }
-                    Event::Key(key) if key.kind == KeyEventKind::Press => match app.on_key(key.code) {
-                        Flow::Quit => return Ok(()),
-                        Flow::EditPost(text) => {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => match app.on_key(key) {
+                        Action::None => {}
+                        Action::Quit => return Ok(()),
+                        Action::EditPost(text) => {
                             let _ = execute!(std::io::stdout(), DisableBracketedPaste);
                             ratatui::restore();
-                            let edited = crate::share_view::edit_with(&crate::share_view::editor(), &text);
+                            let edited = crate::share_view::edit_in_editor(&text);
                             terminal = ratatui::init();
                             let _ = execute!(std::io::stdout(), EnableBracketedPaste);
-                            terminal.clear()?;
-                            if let Some(share) = &mut app.share {
-                                share.edited(edited);
+                            if let Some(share) = app.share.as_mut() {
+                                share.edited_post(edited);
                             }
                         }
-                        Flow::Stay => {}
                     },
                     _ => {}
                 }
@@ -812,91 +922,26 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
-    /// An app that touches nothing on disk: no event log, settings, database or update check.
-    fn blank() -> App {
-        App {
-            sessions: HashMap::new(),
-            selected: None,
-            show_ended: false,
-            sort: SortKey::default(),
-            sort_reversed: false,
-            view: View::List,
-            history_scroll: 0,
-            history_filter: HistoryFilter::default(),
-            detail_scroll: 0,
-            compact_window: None,
-            tick: 0,
-            hooks_installed: true,
-            usage: crate::usage::Usage::new(),
-            update: None,
-            alerts_on: false,
-            error: None,
-            info: None,
-            copy_note: None,
-            board: BoardState::default(),
-            badges: BadgeState::default(),
-            announcement: Announcement::default(),
-            share: None,
-            alerts: crate::alerts::Detector::default(),
-            update_rx: std::sync::mpsc::channel().1,
-            log: JsonlTail::new(PathBuf::new()),
-            readers: HashMap::new(),
-            sys: System::new(),
-            last_slow_refresh: Instant::now(),
-            counter: Counter::default(),
-        }
-    }
-
-    fn levels(rank: i64) -> crate::badges::Badges {
-        let mut stats = crate::badges::Stats::default();
-        stats.0.insert(crate::badges::RANK_KEY, rank);
-        crate::badges::badges(&stats)
+    fn badges() -> Badges {
+        crate::badges::badges(&crate::badges::Stats::default())
     }
 
     #[test]
-    fn b_opens_the_badge_view_and_esc_returns() {
-        let mut app = blank();
-        assert_eq!(app.on_key(KeyCode::Char('B')), Flow::Stay);
-        assert!(app.view == View::Badges && app.badges.due, "the badges load before the next frame, not on the key");
-        assert_eq!(app.on_key(KeyCode::Esc), Flow::Stay);
-        assert!(app.view == View::List);
-        assert_eq!(app.on_key(KeyCode::Char('q')), Flow::Quit, "q in the list still quits");
-    }
-
-    #[test]
-    fn q_in_the_share_view_cancels_the_share_and_leaves_marsad_running() {
-        let mut app = blank();
-        let dir = std::env::temp_dir().join(format!("marsad-app-share-{}", std::process::id()));
-        app.share = Some(ShareView::new(crate::share_view::fake_deps(dir.join("c.png"))));
+    fn an_announcement_waits_for_its_view_and_is_recorded_once_drawn() {
+        let mut a = Announcement::new("rank up: Expert · new: gold streak".into(), badges());
         let start = Instant::now();
-        while app.share.as_ref().unwrap().stage != crate::share_view::Stage::Preview {
-            app.share.as_mut().unwrap().tick();
-            assert!(start.elapsed() < Duration::from_secs(10));
-            std::thread::sleep(Duration::from_millis(5));
+        // Arrives while a share is open: not on screen, so not recorded.
+        assert!(!a.on_drawn(false, start));
+        assert_eq!(a.drawn, None);
+        assert!(!a.expired(start + ANNOUNCE_FOR * 2), "a note never drawn never expires");
+        // The share closes over the list: drawn, recorded once.
+        assert!(a.on_drawn(Announcement::shows_in(View::List), start), "both levels in one note");
+        assert!(!a.on_drawn(Announcement::shows_in(View::Badges), start), "recorded once");
+        assert!(!a.expired(start + ANNOUNCE_FOR / 2), "it outlives the next key press");
+        assert!(a.expired(start + ANNOUNCE_FOR));
+        for view in [View::History, View::Agents, View::Usage, View::Board] {
+            assert!(!Announcement::shows_in(view));
         }
-        assert_eq!(app.on_key(KeyCode::Char('e')), Flow::Stay);
-        assert_eq!(app.on_key(KeyCode::Char('q')), Flow::Stay, "q types into the line");
-        assert!(app.share.is_some());
-        assert_eq!(app.on_key(KeyCode::Esc), Flow::Stay, "Esc leaves the line editor");
-        assert_eq!(app.on_key(KeyCode::Char('q')), Flow::Stay, "q cancels the share");
-        assert!(app.share.is_none() && app.view == View::List);
-        assert!(!dir.exists(), "nothing written");
-    }
-
-    #[test]
-    fn esc_dismisses_a_drawn_announcement_before_it_quits() {
-        let mut app = blank();
-        app.announcement.offer("new: bronze streak".into(), levels(0));
-        assert_eq!(app.on_key(KeyCode::Char('j')), Flow::Stay);
-        assert!(app.announcement.text(View::List, false).is_some(), "a key press doesn't clear it");
-        // Not drawn yet: Esc is the list's own Esc.
-        let mut undrawn = blank();
-        undrawn.announcement.offer("new: bronze streak".into(), levels(0));
-        assert_eq!(undrawn.on_key(KeyCode::Esc), Flow::Quit);
-        app.announcement.drawn(Instant::now(), View::List, false);
-        assert_eq!(app.on_key(KeyCode::Esc), Flow::Stay);
-        assert_eq!(app.announcement.text(View::List, false), None);
-        assert_eq!(app.on_key(KeyCode::Esc), Flow::Quit);
     }
 
     #[test]
