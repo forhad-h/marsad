@@ -64,11 +64,6 @@ fn intersect(p: Point, u: Point, q: Point, v: Point) -> Option<Point> {
     Some((p.0 + s * u.0, p.1 + s * u.1))
 }
 
-/// The {n/k} star: contact πk/n sends each ray to the tip k steps on.
-fn star_contact(n: usize, k: usize) -> f64 {
-    PI * k as f64 / n as f64
-}
-
 /// What a stroke is part of; `svg` renders strapwork (`Strap`, `Rosette`) as a wide band under a narrow
 /// line, and rim and grout (`Ring`, `Tile`) as one thin line. The badge view colours by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,21 +174,39 @@ fn ring_points(radius: f64) -> Vec<Point> {
     (0..RING_SEGMENTS).map(|i| polar(radius, 2.0 * PI * i as f64 / RING_SEGMENTS as f64 + PI / 2.0)).collect()
 }
 
-/// A Mamluk/Seljuk carved roundel: an 8-point strap outline in the material's raised tone, with a
-/// carved inset line just inside it standing for the groove, and — past Novice — a raised centre boss.
+/// A plain n-gon, flat-sided and unpointed, its first vertex at angle `rotation`.
+fn regular_polygon(n: usize, radius: f64, rotation: f64) -> Vec<Point> {
+    (0..n).map(|i| polar(radius, rotation + 2.0 * PI * i as f64 / n as f64)).collect()
+}
+
+/// A scalloped guilloche ring at mean radius `r0`, its edge gently waving `waves` times: a finely
+/// beaded border rather than a pointed star, the standard trim of a certificate or a coin's rim.
+fn rope(r0: f64, amp: f64, waves: usize, phase: f64) -> Vec<Point> {
+    const SEGS_PER_WAVE: usize = 8;
+    let segs = waves * SEGS_PER_WAVE;
+    (0..segs)
+        .map(|i| {
+            let t = 2.0 * PI * i as f64 / segs as f64;
+            polar(r0 + amp * (waves as f64 * t + phase).cos(), t)
+        })
+        .collect()
+}
+
+/// A Mamluk/Seljuk carved roundel: a flat octagonal boss in the material's raised tone, with a carved
+/// inset line just inside it standing for the groove, and — past Novice — a raised centre medallion.
 fn carved(palette: Palette, richness: usize) -> Badge {
     let up = PI / 2.0;
     let mut fills = Vec::new();
     let mut strokes = rings(richness);
 
-    let outline = hankin_star(8, 0.80, up, star_contact(8, 3)).expect("contact in bounds");
+    let outline = regular_polygon(8, 0.8, up + PI / 8.0);
     fills.push(Fill { points: outline.clone(), color: palette.field });
     strokes.push(Stroke { points: outline.clone(), closed: true, role: Role::Strap });
     let inset: Vec<Point> = outline.iter().map(|&(x, y)| (x * 0.9, y * 0.9)).collect();
     strokes.push(Stroke { points: inset, closed: true, role: Role::Ring });
 
     if richness > 1 {
-        let boss = hankin_star(8, 0.36, up + PI / 8.0, star_contact(8, 3)).expect("contact in bounds");
+        let boss = regular_polygon(8, 0.36, up + PI / 8.0);
         fills.push(Fill { points: boss.clone(), color: palette.rosette });
         strokes.push(Stroke { points: boss, closed: true, role: Role::Rosette });
     }
@@ -212,16 +225,16 @@ fn wedge(r0: f64, r1: f64, a0: f64, a1: f64, segs: usize) -> Vec<Point> {
     out
 }
 
-/// A Moorish zellij medallion: a central khatam rosette, concentric rings of small cut-tile wedges
-/// (finer and more colourful outward with `richness`), and one or two broad interlaced strap rings on top.
+/// A Moorish zellij medallion: a flat octagonal centrepiece, concentric rings of small cut-tile wedges
+/// (finer and more colourful outward with `richness`), and one or two scalloped guilloche borders on top.
 fn zellij(palette: Palette, tiles: &'static [Rgb], richness: usize) -> Badge {
     let up = PI / 2.0;
     let mut fills = Vec::new();
     let mut strokes = rings(richness);
 
-    let rosette = hankin_star(8, 0.3, up, star_contact(8, 3)).expect("contact in bounds");
-    fills.push(Fill { points: rosette.clone(), color: palette.rosette });
-    strokes.push(Stroke { points: rosette, closed: true, role: Role::Rosette });
+    let centre = regular_polygon(8, 0.3, up + PI / 8.0);
+    fills.push(Fill { points: centre.clone(), color: palette.rosette });
+    strokes.push(Stroke { points: centre, closed: true, role: Role::Rosette });
 
     let bands: &[(f64, f64, usize)] = match richness {
         1 => &[(0.32, 0.58, 8)],
@@ -237,46 +250,46 @@ fn zellij(palette: Palette, tiles: &'static [Rgb], richness: usize) -> Badge {
         }
     }
 
-    let strap = |turn: f64| Stroke { points: hankin_star(8, 0.9, up + turn, star_contact(8, 2)).expect("contact in bounds"), closed: true, role: Role::Strap };
-    strokes.push(strap(0.0));
+    strokes.push(Stroke { points: rope(0.88, 0.022, 16, 0.0), closed: true, role: Role::Strap });
     if richness > 1 {
-        strokes.push(strap(PI / 8.0));
+        strokes.push(Stroke { points: rope(0.88, 0.018, 22, PI / 11.0), closed: true, role: Role::Strap });
     }
     Badge { fills, strokes, palette }
 }
 
-/// A Persian girih medallion: a central decagon rosette with ten long strap arms reaching to the rim,
-/// and — for Grandmaster — a second ring of small gold studs set between them.
+/// A Persian girih medallion: a flat decagon centrepiece in a tessellation of bowtie and hexagon tiles
+/// — girih's own tile set, not a radiating star — under a scalloped guilloche border, richest at the top.
 fn girih(palette: Palette, richness: usize) -> Badge {
     let up = PI / 2.0;
     let mut fills = Vec::new();
     let mut strokes = rings(richness + 1);
 
-    let rosette = hankin_star(10, 0.28, up, star_contact(10, 3)).expect("contact in bounds");
-    fills.push(Fill { points: rosette.clone(), color: palette.rosette });
-    strokes.push(Stroke { points: rosette, closed: true, role: Role::Rosette });
+    let centre = regular_polygon(10, 0.26, up);
+    fills.push(Fill { points: centre.clone(), color: palette.rosette });
+    strokes.push(Stroke { points: centre, closed: true, role: Role::Rosette });
 
-    let tip_out = if richness > 1 { 0.84 } else { 0.8 };
-    let spread = PI / 22.0;
-    for i in 0..10 {
-        let a = up + 2.0 * PI * i as f64 / 10.0;
-        let strap = vec![polar(0.26, a), polar(0.55, a - spread), polar(tip_out, a), polar(0.55, a + spread)];
-        fills.push(Fill { points: strap.clone(), color: palette.field });
-        strokes.push(Stroke { points: strap, closed: true, role: Role::Strap });
-    }
-
-    // Bowtie tiles between the arms, the girih tile set's own filler piece, closing the ground up to the rim.
+    // Bowtie tiles ringing the centrepiece, girih's own filler piece between neighbouring decagons.
+    let spread = PI / 16.0;
     for i in 0..10 {
         let a = up + 2.0 * PI * i as f64 / 10.0 + PI / 10.0;
-        let bowtie = vec![polar(0.3, a), polar(0.52, a - spread * 1.6), polar(0.68, a), polar(0.52, a + spread * 1.6)];
-        fills.push(Fill { points: bowtie.clone(), color: palette.rosette });
+        let bowtie = vec![polar(0.28, a), polar(0.48, a - spread), polar(0.6, a), polar(0.48, a + spread)];
+        fills.push(Fill { points: bowtie.clone(), color: palette.field });
         strokes.push(Stroke { points: bowtie, closed: true, role: Role::Tile });
     }
 
     if richness > 1 {
-        // A second, finer decagram laced through the bowties: Grandmaster's richer interlace.
-        let decagram = hankin_star(10, 0.52, up + PI / 10.0, star_contact(10, 4)).expect("contact in bounds");
-        strokes.push(Stroke { points: decagram, closed: true, role: Role::Strap });
+        // Grandmaster's outer ring: small flat hexagon tiles, girih's third piece, completing the tessellation.
+        for i in 0..10 {
+            let a = up + 2.0 * PI * i as f64 / 10.0;
+            let hexagon: Vec<Point> = regular_polygon(6, 0.085, a).iter().map(|&(x, y)| (x + 0.72 * a.cos(), y + 0.72 * a.sin())).collect();
+            fills.push(Fill { points: hexagon.clone(), color: palette.rosette });
+            strokes.push(Stroke { points: hexagon, closed: true, role: Role::Tile });
+        }
+    }
+
+    strokes.push(Stroke { points: rope(0.87, 0.022, 18, 0.0), closed: true, role: Role::Strap });
+    if richness > 1 {
+        strokes.push(Stroke { points: rope(0.79, 0.016, 26, PI / 13.0), closed: true, role: Role::Strap });
     }
     Badge { fills, strokes, palette }
 }
@@ -454,16 +467,32 @@ mod tests {
     }
 
     #[test]
-    fn girih_tiers_have_a_tenfold_rosette_and_ten_strap_arms() {
+    fn girih_tiers_have_a_flat_tenfold_centrepiece_and_ten_bowtie_tiles() {
         for tier in [5, 6] {
             let b = badge(tier);
-            let straps = b.strokes.iter().filter(|s| s.role == Role::Strap).count();
-            assert!(straps >= 10, "tier {tier} has only {straps} straps");
             let rosette = b.strokes.iter().find(|s| s.role == Role::Rosette).expect("a rosette");
-            assert_eq!(rosette.points.len(), 20, "a decagon star has 20 points");
+            assert_eq!(rosette.points.len(), 10, "a flat decagon has 10 points, not a star's 20");
+            let tiles = b.strokes.iter().filter(|s| s.role == Role::Tile).count();
+            assert!(tiles >= 10, "tier {tier} has only {tiles} tiles");
         }
-        // Grandmaster's extra decagram laces through the bowties, on top of the ten arms.
-        assert_eq!(badge(6).strokes.iter().filter(|s| s.role == Role::Strap).count(), 11);
+        // Grandmaster adds a ring of ten hexagon tiles and a second guilloche border.
+        assert_eq!(badge(6).strokes.iter().filter(|s| s.role == Role::Tile).count(), 20);
+        assert_eq!(badge(6).strokes.iter().filter(|s| s.role == Role::Strap).count(), 2);
+    }
+
+    #[test]
+    fn no_badge_shape_has_a_sharp_outward_point() {
+        // Every closed fill should be a convex-ish polygon or wedge, not a star with deep inward valleys:
+        // each vertex stays within a modest distance of the shape's own centroid.
+        for tier in 0..TIERS {
+            for f in &badge(tier).fills {
+                let n = f.points.len() as f64;
+                let (cx, cy) = f.points.iter().fold((0.0, 0.0), |(sx, sy), p| (sx + p.0 / n, sy + p.1 / n));
+                let radii: Vec<f64> = f.points.iter().map(|&(x, y)| dist((x - cx, y - cy))).collect();
+                let (min, max) = (radii.iter().copied().fold(f64::INFINITY, f64::min), radii.iter().copied().fold(0.0, f64::max));
+                assert!(max < min * 3.0 || min < 1e-6, "tier {tier} fill has a spiky point: {radii:?}");
+            }
+        }
     }
 
     #[test]
