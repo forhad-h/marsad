@@ -46,6 +46,20 @@ marsad coordination --format json   # {command, protocol_path}: starts a session
 
 Sessions started with that command coordinate on `AGENT-BOARD.md` at the root of the repo's main checkout: beside the absolute `git rev-parse --git-common-dir` when that is a `.git` dir, inside it otherwise (a bare clone or a submodule). Read it to see which sessions are active and which files they have claimed; the dashboard's `b` key shows it too.
 
+## Badges and sharing
+
+```sh
+marsad badges --format json          # rank (tier, next, next_threshold, progress) and each achievement's level and progress
+marsad share --print --out <png>     # the LinkedIn post text on stdout, and its PNG card; opens nothing
+marsad share --print --no-ai         # template line instead of one drafted by an isolated `claude -p`
+```
+
+Ranks go Novice, Apprentice (1M all-time tokens), Practitioner (10M), Specialist (50M), Expert
+(250M), Master (1B), Grandmaster (5B). Achievements have bronze/silver/gold levels: longest streak
+3/7/30 days, distinct skills 3/10/25, subagents run 10/100/1000, busiest day 10M/50M/200M tokens.
+Levels never drop (`badge_best`). The dashboard's `B` shows them and `p` shares to LinkedIn after
+the user reviews the post; never post for the user.
+
 ## Ready-made reports
 
 ```sh

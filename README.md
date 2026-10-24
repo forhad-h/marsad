@@ -48,7 +48,7 @@ marsad update      # install the latest version (shows current → latest and wh
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `b` agent board · `c` copy the coordination command · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `B` badges · `p` share to LinkedIn · `b` agent board · `c` copy the coordination command · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
 In session history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session history also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
 
@@ -207,6 +207,78 @@ marsad retention forever
 The all-time total starts from the oldest day marsad indexed, so usage that was already gone from
 Claude Code's transcripts when marsad first ran isn't included. Days pruned by versions before 0.4
 survive only as one sum, so they count toward all time but have no daily rows.
+
+### Badges
+
+`B` opens the badge view: your rank with its progress to the next one, and four achievements, each
+with its level, the number behind it and how far it is to the next level. The rank's badge is drawn
+beside them when the terminal is tall enough. `marsad badges` prints the same (`--format json|csv`
+for scripts).
+
+| Rank | All-time tokens |
+|---|---|
+| Novice | 0 |
+| Apprentice | 1M |
+| Practitioner | 10M |
+| Specialist | 50M |
+| Expert | 250M |
+| Master | 1B |
+| Grandmaster | 5B |
+
+| Achievement | Bronze | Silver | Gold |
+|---|---|---|---|
+| Longest streak (consecutive days with usage) | 3 days | 7 days | 30 days |
+| Distinct skills used | 3 | 10 | 25 |
+| Subagents run | 10 | 100 | 1,000 |
+| Busiest day | 10M tokens | 50M tokens | 200M tokens |
+
+The rank counts the same all-time figure as the header, cache reads included. Everything comes
+from marsad's local data and keeps its best value for good, so a rank or level never drops when
+old history is pruned or an older export is imported. When one rises, the footer says so once
+(`rank up: Expert · new: gold streak`) for 10 seconds or until `esc`.
+
+Each rank's badge is Islamic geometric art in a historical style, with no figures or text:
+Novice and Apprentice are Mamluk and Seljuk carved roundels (ivory, then cedar), Practitioner to
+Expert are Moorish zellij in cut tile, and Master and Grandmaster are Persian girih strapwork in
+turquoise, lapis and gold.
+
+### Sharing to LinkedIn
+
+`p`, from the session list or the badge view, prepares a LinkedIn post about today's work:
+
+1. marsad syncs, then freezes today's tokens, the last 7 and 30 days, the per-day average, the
+   all-time total and your rank, so the post and the card agree.
+2. Claude Code drafts a 1-3 sentence line about the kind of work you did, for recruiters and
+   business owners. When `claude` is missing, too old or fails, a template line built from the
+   stats is used and the preview says why.
+3. You review the post. `e` edits the line in place, `E` opens the whole post in `$VISUAL` /
+   `$EDITOR`, `r` drafts the line again, `enter` shares, and `esc` or `q` cancels with nothing
+   saved, copied or opened.
+4. On `enter`, marsad saves a 1200×627 PNG card (your badge, rank, name from `git config
+   user.name`, token stats and earned achievements) as `marsad-YYYY-MM-DD.png` in your Downloads
+   folder (or `~/.claude/marsad/cards/`), copies the post to the clipboard, opens LinkedIn's post
+   composer with the text filled in, and shows the card in your file manager so you can drag it
+   into the post. A last screen lists what each step did.
+
+LinkedIn's fill-in link is undocumented and works on desktop web only; if the post box opens
+empty, paste: the post is on your clipboard. Over SSH or without a display, the browser and file
+manager steps are skipped and the screen shows the link and the card's path instead.
+
+What leaves your machine before you share: only the summary Claude Code drafts the line from.
+It holds today's session titles, skill names and subagent types with counts, and the token figures,
+with every project and folder name of today's sessions (and the words in them) removed. Project
+names and working directories themselves are never sent. The draft runs as one isolated
+`claude -p` call (`--safe-mode`, `--no-session-persistence`, no tools, the haiku model) in an empty
+temp folder, so it loads none of your hooks, CLAUDE.md or MCP servers and leaves no session behind;
+it does use a little of your Claude usage. A drafted line that mentions one of those names is
+discarded for the template. A client or company named only inside a session title, matching no
+project or folder name, is not removed, so read the post before you share it: your review is
+what catches that. Nothing is ever posted for you.
+
+```sh
+marsad share --print                  # print the post and write the card; opens nothing
+marsad share --print --out card.png --no-ai   # template line, card at a path of your choice
+```
 
 ### Export and import
 

@@ -20,6 +20,14 @@ GitHub release. Keep each bullet to one short line.
 - Coordination rules let several sessions in one repo share an `AGENT-BOARD.md` and avoid editing the same files
 - `c` copies the command that starts a session with them (`marsad coordination` prints it)
 - `b` shows a repo's agent board: who is working on what, stale claims and `needs-human` conflicts
+- A rank from all-time tokens, Novice to Grandmaster, and bronze/silver/gold achievements
+- `B` shows your rank and achievements with progress; `marsad badges` prints them
+- Ranks and achievement levels never drop when old history is pruned
+- The footer announces a rank-up or a new achievement level once
+- `p` shares today's work to LinkedIn: a drafted line you review, a PNG badge card, the post filled in
+- Only a summary with project and folder names removed is sent to draft the line
+- `marsad share --print` prints the post and writes the card without opening anything
+- Skills already pruned before this version, with their transcripts gone, don't count toward distinct skills
 
 ## 0.3.2 - 2026-10-11
 
