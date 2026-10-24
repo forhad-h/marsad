@@ -4,7 +4,7 @@
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
-fn path() -> PathBuf {
+pub(crate) fn path() -> PathBuf {
     crate::data_dir().join("settings.json")
 }
 
@@ -95,6 +95,17 @@ pub fn set_context_warning(pct: Option<u32>) -> anyhow::Result<()> {
     set_at(&path(), "context_warning_pct", pct.map_or(json!(false), |p| json!(p)))
 }
 
+/// Badge levels last announced on this machine (`badges_announced`), or None when never
+/// recorded or unreadable. Per machine, so not in `PORTABLE`.
+pub(crate) fn badges_announced_at(path: &Path) -> Option<std::collections::BTreeMap<String, u64>> {
+    let map = load_at(path).get("badges_announced")?.as_object()?.clone();
+    Some(map.into_iter().filter_map(|(k, v)| v.as_u64().map(|n| (k, n))).collect())
+}
+
+pub(crate) fn set_badges_announced_at(path: &Path, levels: &std::collections::BTreeMap<String, u64>) -> anyhow::Result<()> {
+    set_at(path, "badges_announced", json!(levels))
+}
+
 /// The preferences that travel in an export.
 pub fn portable() -> Map<String, Value> {
     // Moves a retention still in `history.json` into the settings first.
@@ -171,6 +182,22 @@ mod tests {
         assert_eq!(context_warning_at(&file), None);
         set_at(&file, "context_warning_pct", json!(70)).unwrap();
         assert_eq!(context_warning_at(&file), Some(70));
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn badges_announced_round_trips_and_is_none_when_missing_or_corrupt() {
+        let (file, _) = temp("badges");
+        assert_eq!(badges_announced_at(&file), None, "never recorded");
+        let levels = std::collections::BTreeMap::from([("rank".to_string(), 4), ("streak".to_string(), 2)]);
+        set_badges_announced_at(&file, &levels).unwrap();
+        set_at(&file, "alerts", json!(false)).unwrap();
+        assert_eq!(badges_announced_at(&file), Some(levels));
+        set_at(&file, "badges_announced", json!("oops")).unwrap();
+        assert_eq!(badges_announced_at(&file), None, "not an object");
+        std::fs::write(&file, "{").unwrap();
+        assert_eq!(badges_announced_at(&file), None, "corrupt file");
+        assert!(!PORTABLE.contains(&"badges_announced"), "per machine");
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 

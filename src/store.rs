@@ -331,7 +331,10 @@ pub struct SyncReport {
 /// Indexes new or changed transcripts under `~/.claude/projects`, then prunes detail rows
 /// older than the retention (unless it is forever). The permanent counter is never pruned.
 pub fn sync(conn: &mut Connection) -> anyhow::Result<SyncReport> {
-    sync_dir(conn, &crate::claude_dir().join("projects"), retention())
+    let report = sync_dir(conn, &crate::claude_dir().join("projects"), retention())?;
+    // Raised after every sync, so later pruning or a lowering import never revokes a badge.
+    crate::badges::record(conn, lifetime(conn)?.total)?;
+    Ok(report)
 }
 
 pub fn sync_dir(conn: &mut Connection, projects: &Path, retention: Option<u32>) -> anyhow::Result<SyncReport> {
@@ -478,7 +481,6 @@ fn prune(conn: &mut Connection, cutoff: &str) -> anyhow::Result<usize> {
 // ---------- queries shared by the TUI and `marsad report` ----------
 
 /// Highest value ever stored per badge stat.
-#[allow(dead_code)] // used by the badge model (U2)
 pub fn badge_best(conn: &Connection) -> anyhow::Result<std::collections::HashMap<String, i64>> {
     let mut stmt = conn.prepare("SELECT key, value FROM badge_best")?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -486,7 +488,6 @@ pub fn badge_best(conn: &Connection) -> anyhow::Result<std::collections::HashMap
 }
 
 /// Raises one stat's best value to `value`; a lower value leaves it as it was.
-#[allow(dead_code)] // used by the badge model (U2)
 pub fn raise_best(conn: &Connection, key: &str, value: i64) -> anyhow::Result<()> {
     conn.execute(
         "INSERT INTO badge_best VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",

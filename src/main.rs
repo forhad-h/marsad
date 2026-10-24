@@ -1,6 +1,7 @@
 mod alerts;
 mod app;
 mod badge_art;
+mod badges;
 mod board;
 mod clipboard;
 mod context;
@@ -52,6 +53,8 @@ enum Cmd {
     Retention(report::RetentionArgs),
     /// Total tokens used since marsad started counting, including days no longer kept.
     Total(report::TotalArgs),
+    /// Show your rank and achievement levels, with progress to the next.
+    Badges(badges::BadgesArgs),
     /// Summarize token usage (by day, session, skill, project, model, agent).
     Report(report::ReportArgs),
     /// Run a read-only SQL query against the usage history.
@@ -116,6 +119,7 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::Sync) => report::sync_now(),
         Some(Cmd::Retention(args)) => report::retention(args),
         Some(Cmd::Total(args)) => report::total(args),
+        Some(Cmd::Badges(args)) => badges::run(args),
         Some(Cmd::Report(args)) => report::report(args),
         Some(Cmd::Sql(args)) => report::sql(args),
         Some(Cmd::Schema) => {
