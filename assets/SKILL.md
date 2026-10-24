@@ -46,6 +46,23 @@ marsad coordination --format json   # {command, protocol_path}: starts a session
 
 Sessions started with that command coordinate on `AGENT-BOARD.md` at the root of the repo's main checkout: beside the absolute `git rev-parse --git-common-dir` when that is a `.git` dir, inside it otherwise (a bare clone or a submodule). Read it to see which sessions are active and which files they have claimed; the dashboard's `b` key shows it too.
 
+## Badges and the share card
+
+```sh
+marsad badges --format json          # rank and the four achievements, with progress to the next level
+marsad share --print --no-ai         # the LinkedIn post on stdout, the card PNG written; opens nothing
+marsad share --print --out card.png  # drafts the post's first line with an isolated `claude -p` call
+```
+
+`badges` JSON: `rank` has `tier` (0 Novice to 6 Grandmaster), `name`, `tokens` (all-time, cache
+reads included), `next`, `next_threshold` and `progress` (0-1 to the next rank); `achievements` lists
+`streak`, `skills`, `subagents` and `busiest_day`, each with `value`, `unit`, `level` (0 none, 1
+bronze, 2 silver, 3 gold), `level_name`, `next_level`, `next_threshold` and `progress`. Values never
+go down (see `badge_best`). Thresholds: ranks at 1M, 10M, 50M, 250M, 1B and 5B tokens; streak
+3/7/30 days, skills 3/10/25, subagents 10/100/1000, busiest day 10M/50M/200M tokens.
+`share` without `--print` exits with a hint: sharing to LinkedIn is the dashboard's `p` key, where
+the user reviews the post first.
+
 ## Ready-made reports
 
 ```sh

@@ -48,7 +48,7 @@ marsad update      # install the latest version (shows current → latest and wh
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `b` agent board · `c` copy the coordination command · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `B` badges · `p` share to LinkedIn · `b` agent board · `c` copy the coordination command · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
 In session history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session history also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
 
@@ -152,6 +152,65 @@ The rules are added to the session's system prompt, so they survive `/clear` and
 Over SSH, `c` sends the command through your terminal (OSC 52, which kitty, WezTerm, Alacritty and iTerm2 with clipboard access allow; tmux needs `set-clipboard on`) and also shows it so you can copy it by hand. `marsad coordination` prints it too (`--format json` for scripts).
 
 `b` on a session opens its repo's board, read-only and live: agents with their last-seen times, claims, decisions, messages, conflicts and handoff notes. Agents and their claims not seen for more than 2 hours are marked `[stale]`, and `needs-human` conflicts are tagged in yellow. marsad never edits the board; the sessions own it. The rules live in marsad's data dir and are rewritten by each version, so copy the file elsewhere if you want to change them.
+
+### Badges and sharing
+
+`B` shows your rank and four achievements, each with its level in words and how far it is to the
+next, beside a drawing of your badge. The rank counts every token, cache reads included, so it
+matches the header's all-time figure.
+
+| Rank | All-time tokens | Badge |
+|---|---|---|
+| Novice | 0 | carved sandstone |
+| Apprentice | 1M | carved cedar |
+| Practitioner | 10M | bronze, Moorish tilework |
+| Specialist | 50M | silver, Moorish tilework |
+| Expert | 250M | gold, Moorish tilework |
+| Master | 1B | gold, Persian tilework |
+| Grandmaster | 5B | jewelled gold, Persian tilework |
+
+| Achievement | Bronze | Silver | Gold |
+|---|---|---|---|
+| Longest streak (days in a row with usage) | 3 | 7 | 30 |
+| Distinct skills | 3 | 10 | 25 |
+| Subagents run | 10 | 100 | 1,000 |
+| Busiest day (tokens) | 10M | 50M | 200M |
+
+marsad keeps the best value each one ever reached, so retention pruning or an import never takes a
+badge away. When a rank or level rises, the footer says so once (Esc dismisses it). `marsad badges`
+prints the same (`--format json` or `csv` for scripts).
+
+`p`, from the list or the badge view, prepares a LinkedIn post: a line about today's work drafted by
+Claude Code, then today's, the last 7 and 30 days', the daily average and all-time tokens, and your
+rank. You see the whole post first: `enter` confirms, `e` edits the line, `E` opens the whole post
+in `$VISUAL`/`$EDITOR`, `r` drafts a new line, and `q`/`esc` cancels without writing or opening
+anything. Confirming:
+
+1. saves a 1200×627 card with your badge, rank, stats, achievements and `git config user.name` to
+   `Downloads/marsad-YYYY-MM-DD.png` (or `~/.claude/marsad/cards/`); sharing again the same day
+   replaces it,
+2. copies the post to your clipboard,
+3. opens LinkedIn's post composer with the text filled in,
+4. shows the card in your file manager, so you can attach it.
+
+LinkedIn's prefill link is undocumented, so if the composer opens empty, paste the post; a post
+whose link would be too long opens the plain feed instead. Over SSH or without a display, steps 3
+and 4 are skipped and the link and the card's path are shown.
+
+**What leaves your machine.** Only the drafting does, and only through your own Claude Code login:
+one `claude -p` call (Haiku, no tools, no hooks, CLAUDE.md, plugins or MCP, and no transcript, so it
+doesn't appear as a session) gets today's session titles, the skills and subagent types you used
+with their counts, and the token figures. Every project and folder name from today's sessions is
+removed from them first, and project and folder fields are never sent. If the reply still names one,
+marsad uses a template line instead and says why. A client or company named only inside a session
+title, and not in any project or folder name, is **not** removed: read the line in the preview
+before you confirm. Without Claude Code, or if drafting fails or takes over a minute, the post uses
+a template line built from the stats, with a note saying so.
+
+```sh
+marsad share --print               # print the post and write the card; opens nothing
+marsad share --print --no-ai --out card.png
+```
 
 ## How it works
 
