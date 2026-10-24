@@ -1,6 +1,6 @@
 //! Turns hook events into per-session state.
 
-use crate::model::{Session, Status, Subagent};
+use crate::model::{IdleCause, Session, Status, Subagent};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -11,6 +11,10 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
     let ts = ev["ts"].as_f64().unwrap_or_else(crate::now);
     let session = sessions.entry(id.to_string()).or_insert_with(|| Session::new(id, ts));
     session.last_event = session.last_event.max(ts);
+    if ev.get("agent_id").is_none() {
+        session.last_hook = session.last_hook.max(ts);
+        session.stopped = matches!(event, "Stop" | "SessionStart");
+    }
 
     if let Some(cwd) = s("cwd") {
         // Subagents can run elsewhere; keep the session's own directory once known.
@@ -40,7 +44,11 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
 
     match event {
         "SessionStart" => {
-            session.set_status(Status::Idle, ts);
+            // Compaction restarts the session inside the same process; startup and resume don't.
+            if s("source") != Some("compact") {
+                session.run_started = ts;
+            }
+            session.set_idle(IdleCause::Other, ts);
             session.detail.clear();
         }
         "UserPromptSubmit" => {
@@ -63,13 +71,19 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
                 session.set_status(Status::Active, ts);
             }
         }
+        // Claude Code also asks permission to show a question; it is still a question.
+        "PermissionRequest" if tool == "AskUserQuestion" => {
+            session.set_status(Status::Question, ts);
+            session.detail = summary.to_string();
+        }
         "PermissionRequest" => {
-            session.set_status(Status::Permission, ts);
+            session.set_status(Status::Approve, ts);
             session.detail = tool_detail();
         }
         "Notification" => match s("notification_type").unwrap_or("") {
+            "permission_prompt" if session.status == Status::Question => {}
             "permission_prompt" => {
-                session.set_status(Status::Permission, ts);
+                session.set_status(Status::Approve, ts);
                 if session.detail.is_empty() {
                     session.detail = s("message").unwrap_or("").to_string();
                 }
@@ -78,7 +92,7 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
                 session.set_status(Status::Question, ts);
                 session.detail = s("message").unwrap_or("").to_string();
             }
-            "idle_prompt" => session.set_status(Status::Idle, ts),
+            "idle_prompt" if session.status != Status::Idle => session.set_idle(IdleCause::Other, ts),
             _ => {}
         },
         "Elicitation" => {
@@ -86,7 +100,7 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
             session.detail = s("message").unwrap_or("MCP input requested").to_string();
         }
         "Stop" => {
-            session.set_status(Status::Idle, ts);
+            session.set_idle(IdleCause::Finished, ts);
             session.detail.clear();
         }
         "StopFailure" => {
@@ -157,7 +171,7 @@ mod tests {
             json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "summary": "npm test"}),
             json!({"hook_event_name": "PermissionRequest", "tool_name": "Bash", "summary": "npm test"}),
         ]);
-        assert_eq!(s.status, Status::Permission);
+        assert_eq!(s.status, Status::Approve);
         assert_eq!(s.detail, "Bash: npm test");
         assert_eq!(s.project(), "web");
         assert_eq!(s.pid, Some(42));
@@ -172,12 +186,133 @@ mod tests {
     }
 
     #[test]
-    fn subagent_tool_does_not_hide_permission() {
+    fn question_is_not_reported_as_approval() {
+        let ask = json!({"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "summary": "Which?"});
+        let perm = json!({"hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion", "summary": "Which?"});
+        let note = json!({"hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs your permission"});
+        let s = run(&[ask, perm.clone(), note.clone()]);
+        assert_eq!((s.status, s.detail.as_str()), (Status::Question, "Which?"));
+        // A question's permission request alone, without its PreToolUse, still reads as a question.
+        assert_eq!(run(std::slice::from_ref(&perm)).status, Status::Question);
+        // A permission notification for anything else is an approval.
+        assert_eq!(run(&[note]).status, Status::Approve);
+    }
+
+    #[test]
+    fn reconcile_tells_finished_from_interrupted_turns() {
+        let turn = [
+            json!({"hook_event_name": "UserPromptSubmit", "prompt": "go"}),
+            json!({"hook_event_name": "PreToolUse", "tool_name": "Read"}),
+        ];
+        // A normal finish: Stop lands just after (or before) the transcript's turn end.
+        for ended in [1.5, 2.5] {
+            let mut s = run(&[turn[0].clone(), turn[1].clone(), json!({"hook_event_name": "Stop"})]);
+            s.stats.turn_ended_at = Some(ended);
+            s.reconcile(10.0);
+            assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Finished));
+        }
+        // Esc, then a new prompt: the old turn end must not idle the new turn.
+        let mut s = run(&[turn[0].clone(), turn[1].clone(), json!({"hook_event_name": "UserPromptSubmit", "prompt": "no, this"})]);
+        s.stats.turn_ended_at = Some(1.5);
+        s.reconcile(10.0);
+        assert_eq!(s.status, Status::Active);
+        // A subagent's later tool call is not the main agent's hook.
+        let mut s = run(&[turn[0].clone(), turn[1].clone(), json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "agent_id": "a1"})]);
+        s.stats.turn_ended_at = Some(1.5);
+        s.reconcile(10.0);
+        assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Interrupted));
+        // A background agent keeps working or asks approval after the main Stop, whose transcript
+        // turn end lands about 0.4s later: neither is an interrupt.
+        let stop = json!({"hook_event_name": "Stop"});
+        for (later, status) in [
+            (json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "agent_id": "a1"}), Status::Active),
+            (json!({"hook_event_name": "PermissionRequest", "tool_name": "Bash", "agent_id": "a1"}), Status::Approve),
+        ] {
+            let mut s = run(&[turn[0].clone(), turn[1].clone(), stop.clone(), later]);
+            s.stats.turn_ended_at = Some(2.4);
+            s.reconcile(10.0);
+            assert_eq!(s.status, status);
+        }
+        // Stop with a background shell open, then the follow-up turn after it finishes.
+        let mut s = run(&[turn[0].clone(), turn[1].clone(), stop]);
+        s.stats.turn_ended_at = Some(2.4);
+        s.stats.background = vec![(1.0, "cargo build".into())];
+        s.reconcile(10.0);
+        assert_eq!((s.status, s.detail.as_str()), (Status::Active, "background: cargo build"));
+        s.stats.background.clear();
+        s.reconcile(11.0);
+        assert_eq!(s.status, Status::Active, "stays active until the follow-up turn's Stop");
+        for (i, e) in [json!({"hook_event_name": "UserPromptSubmit"}), json!({"hook_event_name": "Stop"})].iter().enumerate() {
+            let mut e = e.clone();
+            e["session_id"] = json!("s1");
+            e["ts"] = json!(20.0 + i as f64);
+            let mut map = HashMap::from([("s1".to_string(), s)]);
+            apply(&mut map, &e);
+            s = map.remove("s1").unwrap();
+        }
+        s.reconcile(30.0);
+        assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Finished));
+    }
+
+    #[test]
+    fn subagent_work_between_stop_and_turn_end_is_not_an_interrupt() {
+        // A refresh lands after the subagent's call but before the transcript's turn end is read.
+        let mut s = run(&[
+            json!({"hook_event_name": "UserPromptSubmit", "prompt": "go"}),
+            json!({"hook_event_name": "Stop"}),
+            json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "agent_id": "a1"}),
+        ]);
+        s.stats.turn_ended_at = Some(2.4);
+        s.reconcile(10.0);
+        assert_eq!(s.status, Status::Active);
+        // The next main-agent hook makes interrupts count again.
+        let mut s = run(&[json!({"hook_event_name": "Stop"}), json!({"hook_event_name": "UserPromptSubmit"})]);
+        s.stats.turn_ended_at = Some(1.5);
+        s.reconcile(10.0);
+        assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Interrupted));
+    }
+
+    #[test]
+    fn idle_notification_keeps_a_finished_turn_finished() {
+        let s = run(&[json!({"hook_event_name": "Stop"}), json!({"hook_event_name": "Notification", "notification_type": "idle_prompt"})]);
+        assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Finished));
+    }
+
+    #[test]
+    fn shells_from_before_a_resume_are_ignored() {
+        let start = |source: &str| json!({"hook_event_name": "SessionStart", "source": source});
+        // Shell launched at 0.5, then the session restarts at 1.
+        let mut s = run(&[json!({"hook_event_name": "Stop"}), start("resume")]);
+        s.stats.background = vec![(0.5, "npm run dev".into())];
+        s.reconcile(10.0);
+        assert_eq!(s.status, Status::Idle);
+        // A shell from the resumed process still counts.
+        s.stats.background.push((5.0, "cargo build".into()));
+        s.reconcile(11.0);
+        assert_eq!((s.status, s.detail.as_str()), (Status::Active, "background: cargo build"));
+        // Compaction keeps the same process, so its shells keep running.
+        let mut s = run(&[json!({"hook_event_name": "Stop"}), start("compact")]);
+        s.stats.background = vec![(0.5, "npm run dev".into())];
+        s.reconcile(10.0);
+        assert_eq!(s.status, Status::Active);
+    }
+
+    #[test]
+    fn later_event_supplies_a_missing_pid() {
+        let s = run(&[
+            json!({"hook_event_name": "SessionStart"}),
+            json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "pid": 7}),
+        ]);
+        assert_eq!(s.pid, Some(7));
+    }
+
+    #[test]
+    fn subagent_tool_does_not_hide_approval() {
         let s = run(&[
             json!({"hook_event_name": "PermissionRequest", "tool_name": "Bash"}),
             json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "agent_id": "a1"}),
         ]);
-        assert_eq!(s.status, Status::Permission);
+        assert_eq!(s.status, Status::Approve);
     }
 
     #[test]

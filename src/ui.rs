@@ -68,7 +68,7 @@ fn runs_table(rows: Vec<Row<'static>>, block: Block<'static>) -> Table<'static> 
 
 fn status_style(s: Status) -> (Style, &'static str) {
     match s {
-        Status::Permission => (Style::new().fg(Color::Yellow).bold(), "PERMISSION"),
+        Status::Approve => (Style::new().fg(Color::Yellow).bold(), "APPROVE"),
         Status::Question => (Style::new().fg(Color::Magenta).bold(), "QUESTION"),
         Status::Error => (Style::new().fg(Color::Red).bold(), "ERROR"),
         Status::Active => (Style::new().fg(Color::Green), "ACTIVE"),
@@ -79,7 +79,7 @@ fn status_style(s: Status) -> (Style, &'static str) {
 
 fn status_glyph(s: Status, tick: u64) -> &'static str {
     match s {
-        Status::Permission => "●",
+        Status::Approve => "●",
         Status::Question => "?",
         Status::Error => "✗",
         Status::Active => SPINNER[(tick / 2 % 4) as usize],
@@ -211,6 +211,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("tab", "subagents".into()),
                 ("u", "usage".into()),
                 ("a", ended.into()),
+                ("m", format!("alerts: {}", if app.alerts_on { "on" } else { "off" })),
                 ("s/S", format!("sort: {}", app.sort.label())),
                 ("q", "quit".into()),
             ]
@@ -221,15 +222,17 @@ pub fn draw(f: &mut Frame, app: &App) {
         spans.push(k.to_string().bold());
         spans.push(format!(" {label}  ").dark_gray());
     }
-    let footer = match &app.update {
-        Some(notice) => {
-            let text = match notice {
-                Notice::Available(v) => format!("v{v} available · run `marsad update` "),
-                Notice::Installed(v) => format!("updated to v{v} · restart marsad "),
-            };
+    let note = match (&app.error, &app.update) {
+        (Some(e), _) => Some((format!("{e} "), Color::Red)),
+        (None, Some(Notice::Available(v))) => Some((format!("v{v} available · run `marsad update` "), Color::Yellow)),
+        (None, Some(Notice::Installed(v))) => Some((format!("updated to v{v} · restart marsad "), Color::Yellow)),
+        (None, None) => None,
+    };
+    let footer = match note {
+        Some((text, color)) => {
             let [keys, note] =
                 Layout::horizontal([Constraint::Min(0), Constraint::Length(text.chars().count() as u16)]).areas(footer);
-            f.render_widget(Paragraph::new(Span::styled(text, Style::new().fg(Color::Yellow))), note);
+            f.render_widget(Paragraph::new(Span::styled(text, Style::new().fg(color))), note);
             keys
         }
         None => footer,

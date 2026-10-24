@@ -5,7 +5,7 @@ use std::path::PathBuf;
 /// Ordered by urgency: sessions that need the user sort first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Status {
-    Permission,
+    Approve,
     Question,
     Error,
     Active,
@@ -16,7 +16,7 @@ pub enum Status {
 impl Status {
     pub fn as_str(self) -> &'static str {
         match self {
-            Status::Permission => "permission",
+            Status::Approve => "approve",
             Status::Question => "question",
             Status::Error => "error",
             Status::Active => "active",
@@ -26,9 +26,24 @@ impl Status {
     }
 
     pub fn needs_user(self) -> bool {
-        matches!(self, Status::Permission | Status::Question)
+        matches!(self, Status::Approve | Status::Question)
     }
 }
+
+/// Why a session last went idle; only a finished turn plays the done sound.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IdleCause {
+    /// Session start or an idle notification.
+    #[default]
+    Other,
+    /// Claude finished its turn (Stop) with no background shell left running.
+    Finished,
+    /// The user pressed Esc or interrupted the turn, which fires no hook.
+    Interrupted,
+}
+
+/// How long a turn end with no later hook waits for a late Stop before it counts as an interrupt.
+const INTERRUPT_GRACE_SECS: f64 = 2.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TokenUsage {
@@ -147,6 +162,10 @@ pub struct TranscriptStats {
     pub busy_secs: f64,
     /// Unix time the turn in progress started, if one is open.
     pub turn_started: Option<f64>,
+    /// Unix time the latest turn ended, interrupted or not.
+    pub turn_ended_at: Option<f64>,
+    /// Background shells still running, oldest first, as (unix launch time, command).
+    pub background: Vec<(f64, String)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -333,6 +352,15 @@ pub struct Session {
     /// When marsad first saw the session; a stable tie-breaker for sorting.
     pub started: f64,
     pub last_event: f64,
+    /// Time of the latest hook event from the main agent (not a subagent).
+    pub last_hook: f64,
+    pub idle_cause: IdleCause,
+    /// True after the main agent's Stop or SessionStart until its next hook: the turn closed with a
+    /// hook, so a transcript turn end landing just after it is not an interrupt.
+    pub stopped: bool,
+    /// Time of the latest SessionStart from a new process (not a compaction); background shells
+    /// launched before it belonged to an earlier process and never report finishing.
+    pub run_started: f64,
     /// What the session is doing right now, e.g. "Bash: cargo test".
     pub detail: String,
     pub permission_mode: Option<String>,
@@ -354,6 +382,10 @@ impl Session {
             status_since: ts,
             started: ts,
             last_event: ts,
+            last_hook: ts,
+            idle_cause: IdleCause::Other,
+            stopped: false,
+            run_started: 0.0,
             detail: String::new(),
             permission_mode: None,
             model: None,
@@ -370,6 +402,42 @@ impl Session {
             self.status = status;
             self.status_since = ts;
         }
+    }
+
+    pub fn set_idle(&mut self, cause: IdleCause, ts: f64) {
+        self.set_status(Status::Idle, ts);
+        self.idle_cause = cause;
+    }
+
+    /// Corrects the hook-driven status with what only the transcript knows: a turn that ended
+    /// without a Stop was interrupted, and a background shell still running keeps the session active.
+    pub fn reconcile(&mut self, now: f64) {
+        if self.status == Status::Ended {
+            return;
+        }
+        let running = self.shells().next().is_some();
+        // Only a status entered before the turn ended can be its interruption: the transcript's turn
+        // end lands just after Stop, so later background-agent work or approvals are not undone.
+        let interrupted = !self.stopped && self.stats.turn_ended_at.is_some_and(|t| {
+            t > self.last_hook && self.status_since <= t && now - t >= INTERRUPT_GRACE_SECS
+        });
+        // A session kept active by a background shell has no hook newer than its last turn end.
+        let waiting = self.status.needs_user() || (self.status == Status::Active && !running);
+        if interrupted && waiting {
+            self.set_idle(IdleCause::Interrupted, now);
+            self.detail.clear();
+        }
+        if self.status == Status::Idle && running {
+            let shells: Vec<&str> = self.shells().collect();
+            let more = if shells.len() > 1 { format!(" +{}", shells.len() - 1) } else { String::new() };
+            self.detail = format!("background: {}{more}", shells[0]);
+            self.set_status(Status::Active, now);
+        }
+    }
+
+    /// Background shells this process launched that are still running, oldest first.
+    fn shells(&self) -> impl Iterator<Item = &str> {
+        self.stats.background.iter().filter(|(launched, _)| *launched >= self.run_started).map(|(_, cmd)| cmd.as_str())
     }
 
     /// Time spent working across the whole session, including earlier runs of a resumed one.
@@ -580,7 +648,7 @@ mod tests {
             s
         };
         let a = mk("a", "/x/beta", Status::Idle, 1.0, Some(50_000));
-        let b = mk("b", "/x/Alpha", Status::Permission, 2.0, None);
+        let b = mk("b", "/x/Alpha", Status::Approve, 2.0, None);
         let c = mk("c", "/x/gamma", Status::Active, 3.0, Some(150_000));
         let order = |key, reversed| {
             let mut list = vec![&a, &b, &c];
@@ -603,12 +671,57 @@ mod tests {
         s.stats.turn_started = Some(1_000.0);
         s.set_status(Status::Active, 1_000.0);
         assert_eq!(s.running_secs(1_030.0), 130.0, "the turn in progress counts live");
-        s.set_status(Status::Permission, 1_030.0);
+        s.set_status(Status::Approve, 1_030.0);
         assert_eq!(s.running_secs(1_050.0), 150.0);
         for idle in [Status::Idle, Status::Ended] {
             s.set_status(idle, 1_060.0);
             assert_eq!(s.running_secs(9_999.0), 100.0, "{idle:?} adds nothing");
         }
+    }
+
+    /// A session in `status` since the hook at `hook`, whose transcript recorded a turn end at `ended`.
+    fn reconciling(status: Status, hook: f64, ended: Option<f64>, background: &[&str]) -> Session {
+        let mut s = Session::new("s", 0.0);
+        s.set_status(status, hook);
+        s.last_hook = hook;
+        s.stats.turn_ended_at = ended;
+        s.stats.background = background.iter().map(|b| (hook, b.to_string())).collect();
+        s
+    }
+
+    #[test]
+    fn interrupts_go_idle_after_a_grace_period() {
+        for status in [Status::Question, Status::Approve, Status::Active] {
+            let mut s = reconciling(status, 10.0, Some(12.0), &[]);
+            s.reconcile(13.0);
+            assert_eq!(s.status, status, "{status:?}: within the grace period, Stop may still arrive");
+            s.reconcile(15.0);
+            assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Interrupted), "{status:?}");
+        }
+        // A turn end from before the latest hook belongs to an earlier turn.
+        let mut s = reconciling(Status::Active, 13.0, Some(12.0), &[]);
+        s.reconcile(20.0);
+        assert_eq!(s.status, Status::Active);
+        // Ended sessions are left alone.
+        let mut s = reconciling(Status::Ended, 10.0, Some(12.0), &["cargo build"]);
+        s.reconcile(20.0);
+        assert_eq!(s.status, Status::Ended);
+    }
+
+    #[test]
+    fn background_shells_keep_a_session_active() {
+        let mut s = reconciling(Status::Idle, 10.0, Some(10.0), &["cargo build", "npm test"]);
+        s.idle_cause = IdleCause::Finished;
+        s.reconcile(11.0);
+        assert_eq!((s.status, s.detail.as_str()), (Status::Active, "background: cargo build +1"));
+        // It stays active while they run, even though the turn ended without a later hook.
+        s.reconcile(30.0);
+        assert_eq!(s.status, Status::Active);
+        // Escaping a question while a shell runs still leaves the question, then shows the shell.
+        let mut s = reconciling(Status::Question, 10.0, Some(12.0), &["cargo build"]);
+        s.reconcile(15.0);
+        assert_eq!(s.status, Status::Active);
+        assert_eq!(s.idle_cause, IdleCause::Interrupted);
     }
 
     #[test]

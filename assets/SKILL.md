@@ -17,7 +17,7 @@ marsad status --format json        # running sessions: status, activity, context
 marsad status --all                # include sessions that have ended
 ```
 
-Each session has `status` (`permission`, `question`, `error`, `active`, `idle`, `ended`),
+Each session has `status` (`approve`, `question`, `error`, `active`, `idle`, `ended`),
 `activity`, `context_used` / `context_limit` / `context_left` / `context_pct` (tokens until
 auto-compact; `context_estimated: true` means the window size was inferred from the model id), and
 `tokens_total`. The top-level `rate_limits.five_hour` / `seven_day` give `used_pct` and `resets_at`

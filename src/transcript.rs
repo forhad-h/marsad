@@ -65,6 +65,11 @@ pub struct TranscriptReader {
     estimated_secs: f64,
     /// Unix start and latest entry time of the turn in progress.
     open_turn: Option<(f64, f64)>,
+    turn_ended_at: Option<f64>,
+    /// Bash tool_use id -> its command, until its result says whether it went to the background.
+    bash: HashMap<String, String>,
+    /// (task id, unix launch time, command) of background shells not yet reported finished.
+    background: Vec<(String, f64, String)>,
 }
 
 /// Tokens and assistant turns for one local calendar day.
@@ -109,6 +114,9 @@ impl TranscriptReader {
             busy_secs: 0.0,
             estimated_secs: 0.0,
             open_turn: None,
+            turn_ended_at: None,
+            bash: HashMap::new(),
+            background: Vec::new(),
         }
     }
 
@@ -150,6 +158,12 @@ impl TranscriptReader {
                 self.busy_secs += ms / 1000.0 - self.estimated_secs;
                 self.estimated_secs = 0.0;
                 self.open_turn = None;
+                self.turn_ended_at = unix_ts(e);
+            }
+            // A background shell finishing mid-turn is recorded only as a queued command.
+            Some("queue-operation") => self.close_task(e["content"].as_str().unwrap_or("")),
+            Some("attachment") if e["attachment"]["type"] == "queued_command" => {
+                self.close_task(e["attachment"]["prompt"].as_str().unwrap_or(""))
             }
             _ => {}
         }
@@ -212,6 +226,10 @@ impl TranscriptReader {
                 let kind = EventKind::Agent { agent_type, description: s("description"), tool_use_id: id.to_string(), result: None };
                 let i = self.push(kind, e);
                 self.pending.entry(id.to_string()).or_default().push(i);
+            }
+            Some("Bash") => {
+                let label = crate::hook::truncate(input["command"].as_str().unwrap_or_default().lines().next().unwrap_or(""), 60);
+                self.bash.insert(id.to_string(), label);
             }
             Some("AskUserQuestion") => {
                 for q in input["questions"].as_array().into_iter().flatten() {
@@ -292,8 +310,16 @@ impl TranscriptReader {
         }
     }
 
+    /// A finished background task's notification names it by task id.
+    fn close_task(&mut self, text: &str) {
+        if let (Some(id), Some(_)) = (tag(text, "task-id"), tag(text, "status")) {
+            self.background.retain(|(task, _, _)| task != id);
+        }
+    }
+
     /// A background agent finishing is announced in a `<task-notification>` naming its tool call.
     fn task_notification(&mut self, text: &str) {
+        self.close_task(text);
         let Some(id) = tag(text, "tool-use-id") else { return };
         let report = tag(text, "result").or_else(|| tag(text, "summary")).unwrap_or_default();
         // The full report may come separately, as a hand-back message.
@@ -325,6 +351,11 @@ impl TranscriptReader {
             Value::String(s) => s.as_str(),
             Value::Array(blocks) => {
                 if blocks.iter().any(|b| b["type"] == "tool_result") {
+                    // A Bash command Claude ran in the background, or one moved there on timeout.
+                    let tool = blocks.iter().find_map(|b| b["tool_use_id"].as_str()).unwrap_or_default();
+                    if let (Some(label), Some(task)) = (self.bash.remove(tool), e["toolUseResult"]["backgroundTaskId"].as_str()) {
+                        self.background.push((task.to_string(), unix_ts(e).unwrap_or(0.0), label));
+                    }
                     for b in blocks.iter().filter(|b| b["type"] == "tool_result") {
                         self.tool_result(b, e);
                     }
@@ -342,6 +373,7 @@ impl TranscriptReader {
         // An interrupted turn usually gets its duration recorded next; until then, estimate it.
         if text.starts_with("[Request interrupted") {
             self.close_turn();
+            self.turn_ended_at = unix_ts(e);
         }
         // Output of a local command, or an interruption marker: not something the user typed.
         let Some(prompt) = prompt_text(text) else { return };
@@ -420,6 +452,8 @@ impl TranscriptReader {
             started: self.first_at.clone(),
             busy_secs: self.busy_secs,
             turn_started: self.open_turn.map(|(start, _)| start),
+            turn_ended_at: self.turn_ended_at,
+            background: self.background.iter().map(|(_, at, label)| (*at, label.clone())).collect(),
         }
     }
 
@@ -556,6 +590,60 @@ mod tests {
         r.poll();
         std::fs::remove_dir_all(dir).ok();
         r
+    }
+
+    const BASH: &str = r#"{"type":"assistant","timestamp":"2026-10-11T10:00:00Z","message":{"id":"m1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo build --release\nmore","run_in_background":true}}]}}"#;
+    const LAUNCHED: &str = r#"{"type":"user","timestamp":"2026-10-11T10:00:01Z","toolUseResult":{"backgroundTaskId":"b1"},"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: b1."}]}}"#;
+
+    fn notification(status: &str) -> String {
+        format!("<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>t1</tool-use-id>\n<status>{status}</status>\n<summary>done</summary>\n</task-notification>")
+    }
+
+    #[test]
+    fn background_shells_stay_open_until_notified() {
+        let launched = unix_ts(&serde_json::json!({"timestamp": "2026-10-11T10:00:01Z"})).unwrap();
+        assert_eq!(reader_for(&[BASH, LAUNCHED]).stats().background, [(launched, "cargo build --release".to_string())]);
+        for status in ["completed", "failed", "killed"] {
+            let done = serde_json::json!({"type": "user", "timestamp": "2026-10-11T10:05:00Z", "origin": {"kind": "task-notification"}, "message": {"content": notification(status)}}).to_string();
+            assert!(reader_for(&[BASH, LAUNCHED, &done]).stats().background.is_empty(), "{status} closes it");
+        }
+        // A notification absorbed mid-turn is only recorded as a queued command and a queue operation.
+        let queued = serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "prompt": notification("completed")}}).to_string();
+        let op = serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": notification("completed")}).to_string();
+        assert!(reader_for(&[BASH, LAUNCHED, &queued]).stats().background.is_empty());
+        assert!(reader_for(&[BASH, LAUNCHED, &op, &queued]).stats().background.is_empty());
+        // Unrelated notifications change nothing.
+        let other = op.replace("<task-id>b1", "<task-id>zz");
+        assert_eq!(reader_for(&[BASH, LAUNCHED, &other]).stats().background.len(), 1);
+    }
+
+    #[test]
+    fn timed_out_commands_moved_to_the_background_are_tracked() {
+        let fg = BASH.replace(r#","run_in_background":true"#, "");
+        let moved = LAUNCHED.replace(r#"{"backgroundTaskId":"b1"}"#, r#"{"backgroundTaskId":"b1","timedOutAfterMs":120000}"#);
+        assert_eq!(reader_for(&[&fg, &moved]).stats().background.len(), 1);
+        // A foreground command that finishes normally opens nothing.
+        let finished = LAUNCHED.replace(r#"{"backgroundTaskId":"b1"}"#, r#"{"stdout":"ok"}"#);
+        assert!(reader_for(&[&fg, &finished]).stats().background.is_empty());
+        // A background agent is not a shell.
+        let agent = r#"{"type":"user","timestamp":"2026-10-11T10:00:01Z","toolUseResult":{"agentId":"a1"},"message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":"Async agent launched successfully. agentId: a1"}]}}"#;
+        assert!(reader_for(&[agent]).stats().background.is_empty());
+    }
+
+    #[test]
+    fn turn_end_is_recorded() {
+        let at = |iso: &str| chrono::DateTime::parse_from_rfc3339(iso).unwrap().timestamp() as f64;
+        let ended = reader_for(&[
+            r#"{"type":"user","timestamp":"2026-10-11T10:00:00Z","message":{"content":"go"}}"#,
+            r#"{"type":"system","subtype":"turn_duration","durationMs":5000,"timestamp":"2026-10-11T10:00:05Z"}"#,
+        ]);
+        assert_eq!(ended.stats().turn_ended_at, Some(at("2026-10-11T10:00:05Z")));
+        let interrupted = reader_for(&[
+            r#"{"type":"user","timestamp":"2026-10-11T10:00:00Z","message":{"content":"go"}}"#,
+            r#"{"type":"user","timestamp":"2026-10-11T10:00:09Z","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+        ]);
+        assert_eq!(interrupted.stats().turn_ended_at, Some(at("2026-10-11T10:00:09Z")));
+        assert_eq!(reader_for(&[r#"{"type":"user","timestamp":"2026-10-11T10:00:00Z","message":{"content":"go"}}"#]).stats().turn_ended_at, None);
     }
 
     #[test]

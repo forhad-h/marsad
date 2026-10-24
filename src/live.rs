@@ -39,6 +39,7 @@ fn load_sessions(include_ended: bool) -> HashMap<String, Session> {
             reader.poll();
             s.stats = reader.stats();
         }
+        s.reconcile(crate::now());
     }
     sessions
 }
