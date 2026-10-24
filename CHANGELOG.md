@@ -3,7 +3,7 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.4.0 - 2026-10-24
 
 - Questions show QUESTION instead of PERMISSION, and PERMISSION is now APPROVE
 - Pressing Esc on a prompt, or interrupting a turn, sets the session back to IDLE
