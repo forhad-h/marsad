@@ -160,8 +160,14 @@ fn rate_spans(label: &str, w: RateWindow) -> Vec<Span<'static>> {
 
 pub fn draw(f: &mut Frame, app: &App) {
     let visible = app.visible();
-    let [header, body, footer] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(4), Constraint::Length(1)]).areas(f.area());
+    let note_height = if app.copy_note.is_some() { 4 } else { 0 };
+    let [header, body, copy_note, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(4),
+        Constraint::Length(note_height),
+        Constraint::Length(1),
+    ])
+    .areas(f.area());
     draw_header(f, header, app, &visible);
 
     let keys: Vec<(&str, String)> = match (app.view, app.selected_session()) {
@@ -188,6 +194,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("f", format!("filter: {}", app.history_filter.label())),
                 ("g/G", "top/bottom".into()),
                 ("tab", "subagents".into()),
+                ("b", "board".into()),
                 ("esc", "back".into()),
                 ("q", "quit".into()),
             ]
@@ -198,6 +205,17 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("↑↓", "scroll".into()),
                 ("g/G", "top/bottom".into()),
                 ("tab", "history".into()),
+                ("b", "board".into()),
+                ("esc", "back".into()),
+                ("q", "quit".into()),
+            ]
+        }
+        (View::Board, _) => {
+            draw_board(f, body, app);
+            vec![
+                ("↑↓", "scroll".into()),
+                ("g/G", "top/bottom".into()),
+                ("c", "copy launch command".into()),
                 ("esc", "back".into()),
                 ("q", "quit".into()),
             ]
@@ -210,6 +228,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("enter", "history".into()),
                 ("tab", "subagents".into()),
                 ("u", "usage".into()),
+                ("b", "board".into()),
+                ("c", "coord cmd".into()),
                 ("a", ended.into()),
                 ("m", format!("alerts: {}", if app.alerts_on { "on" } else { "off" })),
                 ("s/S", format!("sort: {}", app.sort.label())),
@@ -222,12 +242,16 @@ pub fn draw(f: &mut Frame, app: &App) {
         spans.push(k.to_string().bold());
         spans.push(format!(" {label}  ").dark_gray());
     }
-    let note = match (&app.error, &app.update) {
-        (Some(e), _) => Some((format!("{e} "), Color::Red)),
-        (None, Some(Notice::Available(v))) => Some((format!("v{v} available · run `marsad update` "), Color::Yellow)),
-        (None, Some(Notice::Installed(v))) => Some((format!("updated to v{v} · restart marsad "), Color::Yellow)),
-        (None, None) => None,
+    let note = match (&app.error, &app.info, &app.update) {
+        (Some(e), _, _) => Some((format!("{e} "), Color::Red)),
+        (None, Some(i), _) => Some((i.clone(), Color::Green)),
+        (None, None, Some(Notice::Available(v))) => Some((format!("v{v} available · run `marsad update` "), Color::Yellow)),
+        (None, None, Some(Notice::Installed(v))) => Some((format!("updated to v{v} · restart marsad "), Color::Yellow)),
+        (None, None, None) => None,
     };
+    if let Some(note) = &app.copy_note {
+        draw_copy_note(f, copy_note, note);
+    }
     let footer = match note {
         Some((text, color)) => {
             let [keys, note] =
@@ -296,6 +320,12 @@ fn draw_empty(f: &mut Frame, area: Rect, app: &App) {
             Line::from("No sessions yet.".bold()),
             Line::from(""),
             Line::from("Start (or restart) a Claude Code session and it will appear here.".dark_gray()),
+            Line::from(""),
+            Line::from(vec![
+                "Press ".dark_gray(),
+                "c".bold(),
+                " to copy a command that starts sessions coordinating on a shared board.".dark_gray(),
+            ]),
         ]
     } else {
         vec![
@@ -307,8 +337,196 @@ fn draw_empty(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().dark_gray());
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let [_, mid, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(3), Constraint::Fill(1)]).areas(inner);
+    let height = msg.len() as u16;
+    let [_, mid, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(height), Constraint::Fill(1)]).areas(inner);
     f.render_widget(Paragraph::new(msg).alignment(Alignment::Center), mid);
+}
+
+/// The launch command to copy by hand, drawn without borders so a mouse selection copies only the
+/// command. When it is wider than the terminal, the flag and the path go on separate lines.
+fn draw_copy_note(f: &mut Frame, area: Rect, note: &crate::app::CopyNote) {
+    let mut lines = vec![Line::from(note.headline.yellow())];
+    if note.command.chars().count() <= area.width as usize {
+        lines.push(Line::from(note.command.clone().bold()));
+    } else {
+        lines.push(Line::from("claude --append-system-prompt-file".bold()));
+        lines.push(Line::from(note.path.clone().bold()));
+    }
+    lines.push(Line::from(dim("or run `marsad coordination` in another terminal")));
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_board(f: &mut Frame, area: Rect, app: &App) {
+    let state = &app.board;
+    let path = state.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+    let repo = state
+        .path
+        .as_ref()
+        .and_then(|p| p.parent())
+        .and_then(|d| d.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().dark_gray())
+        .title(Line::from(format!(" Board · {repo} ")).fg(ACCENT));
+    let inner = block.inner(area).inner(Margin::new(1, 0));
+    f.render_widget(block, area);
+
+    let Some(board) = &state.board else {
+        let msg = match &state.read_error {
+            Some(e) => vec![Line::from(format!("Couldn't read the board: {e}").red())],
+            None => {
+                let command = crate::coordination::launch_command(&crate::coordination::protocol_path());
+                vec![
+                    Line::from(format!("No board for {repo} yet.").bold()),
+                    Line::from(""),
+                    Line::from(dim("Sessions started with the coordination rules create it when they begin work.")),
+                    Line::from(vec![dim("Press "), "c".bold(), dim(" to copy the command that starts one:")]),
+                    Line::from(command.fg(ACCENT)),
+                ]
+            }
+        };
+        let height = msg.len() as u16;
+        let [_, mid, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(height), Constraint::Fill(1)]).areas(inner);
+        f.render_widget(Paragraph::new(msg).alignment(Alignment::Center).wrap(Wrap { trim: false }), mid);
+        state.max_scroll.set(0);
+        return;
+    };
+
+    let now = chrono::Local::now().naive_local();
+    let stale = crate::board::staleness(board, now);
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(e) = &state.read_error {
+        lines.push(Line::from(format!("Couldn't re-read the board ({e}); showing the last version.").red()));
+    }
+    if state.truncated {
+        lines.push(Line::from(dim(format!("The board is over {} KB; the rest is not shown.", crate::board::READ_CAP / 1024))));
+    }
+    lines.push(Line::from(dim(path)));
+    lines.push(Line::from(dim("Only sessions started with the coordination rules register here; `c` copies that command.")));
+    let tag = |stale: bool, orphan: bool| match (orphan, stale) {
+        (true, _) => dim("  [orphan]"),
+        (false, true) => dim("  [stale]"),
+        _ => Span::raw(""),
+    };
+
+    heading(&mut lines, "Agents", board.agents.len());
+    for (a, &is_stale) in board.agents.iter().zip(&stale.agents) {
+        let name = if is_stale { dim(a.name.clone()) } else { a.name.clone().bold() };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            name,
+            Span::raw(format!("  {}", a.task)),
+            dim(format!("  last seen {}", a.last_seen)),
+            tag(is_stale, false),
+        ]));
+    }
+    heading(&mut lines, "Claims", board.claims.len());
+    // An orphan claim is always stale too.
+    for ((c, &is_stale), &orphan) in board.claims.iter().zip(&stale.claims).zip(&stale.orphans) {
+        let path = if is_stale { dim(c.path.clone()) } else { c.path.clone().bold() };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            path,
+            Span::raw(format!("  {}", c.agent)),
+            dim(format!("  since {}", c.since)),
+            tag(is_stale, orphan),
+        ]));
+    }
+    heading(&mut lines, "Decisions", board.decisions.len());
+    lines.extend(board.decisions.iter().map(|d| Line::from(format!("  {d}"))));
+    heading(&mut lines, "Messages", board.messages.len());
+    lines.extend(board.messages.iter().map(|m| Line::from(format!("  {m}"))));
+    heading(&mut lines, "Conflicts", board.conflicts.len());
+    for c in &board.conflicts {
+        // The status already shows as the tag or the styling, so drop its trailing `| status` cell.
+        let text = match c.status {
+            crate::board::ConflictStatus::Unknown => c.text.clone(),
+            _ => c.text.rsplit_once('|').map_or(c.text.as_str(), |(t, _)| t.trim_end()).to_string(),
+        };
+        lines.push(match c.status {
+            crate::board::ConflictStatus::NeedsHuman => Line::from(vec![
+                Span::raw("  "),
+                Span::styled("NEEDS HUMAN ", Style::new().fg(Color::Yellow).bold()),
+                Span::styled(text, Style::new().fg(Color::Yellow)),
+            ]),
+            crate::board::ConflictStatus::Resolved => Line::from(vec![Span::raw("  "), dim(format!("{text}  (resolved)"))]),
+            _ => Line::from(format!("  {text}")),
+        });
+    }
+    heading(&mut lines, "Handoff notes", board.handoffs.len());
+    lines.extend(board.handoffs.iter().map(|h| Line::from(format!("  {h}"))));
+    if !board.other.is_empty() {
+        heading(&mut lines, "Other lines", board.other.len());
+        lines.extend(board.other.iter().map(|o| Line::from(dim(format!("  {o}")))));
+    }
+
+    // Wrapped here rather than by the Paragraph, so the scroll limit counts exactly the rows drawn.
+    let rows: Vec<Line> = lines.into_iter().flat_map(|l| wrap_line(l, inner.width as usize)).collect();
+    state.max_scroll.set(rows.len().saturating_sub(inner.height as usize));
+    let scroll = state.scroll.min(state.max_scroll.get()) as u16;
+    f.render_widget(Paragraph::new(rows).scroll((scroll, 0)), inner);
+}
+
+/// Splits a line into rows of at most `width` columns, breaking after whitespace where it can and
+/// mid-word only when a word is wider than a row. Whitespace that falls at a break is dropped.
+fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let base = line.style;
+    let mut rows: Vec<Vec<(String, Style, usize)>> = vec![Vec::new()];
+    let (mut used, mut brk) = (0, None);
+    for g in line.spans.iter().flat_map(|s| s.styled_graphemes(base)) {
+        let w = Span::raw(g.symbol).width();
+        let space = g.symbol.chars().all(char::is_whitespace);
+        if used + w > width && used > 0 {
+            if space {
+                (used, brk) = (0, None);
+                rows.push(Vec::new());
+                continue;
+            }
+            // Carry the word in progress to the next row when the row has a break before it.
+            let row = rows.last_mut().unwrap();
+            let carry = match brk {
+                Some(i) if i < row.len() => row.split_off(i),
+                _ => Vec::new(),
+            };
+            used = carry.iter().map(|c| c.2).sum();
+            brk = None;
+            rows.push(carry);
+            if used + w > width && used > 0 {
+                used = 0;
+                rows.push(Vec::new());
+            }
+        }
+        used += w;
+        let row = rows.last_mut().unwrap();
+        row.push((g.symbol.to_string(), g.style, w));
+        if space {
+            brk = Some(row.len());
+        }
+    }
+    rows.into_iter()
+        .map(|row| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (sym, style, _) in row {
+                match spans.last_mut() {
+                    Some(last) if last.style == style => last.content.to_mut().push_str(&sym),
+                    _ => spans.push(Span::styled(sym, style)),
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// A board section's heading with its count, and `(none)` under it when empty.
+fn heading(lines: &mut Vec<Line<'static>>, name: &str, count: usize) {
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(name.to_string(), Style::new().fg(ACCENT).bold()), dim(format!("  {count}"))]));
+    if count == 0 {
+        lines.push(Line::from(dim("  (none)")));
+    }
 }
 
 fn draw_table(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
@@ -1073,4 +1291,32 @@ fn draw_drill(f: &mut Frame, area: Rect, u: &Usage) {
         .collect();
     let table = runs_table(rows, block);
     f.render_stateful_widget(table, list, &mut TableState::default().with_selected(Some(d.scroll)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(rows: &[Line]) -> Vec<String> {
+        rows.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect()).collect()
+    }
+
+    #[test]
+    fn wrapping_breaks_at_spaces_and_counts_every_row() {
+        // Width alone would say two rows; word wrapping needs three.
+        let rows = wrap_line(Line::from("aaaaaa bbbbbb cccccc"), 10);
+        assert_eq!(text(&rows), ["aaaaaa ", "bbbbbb ", "cccccc"]);
+        assert_eq!(text(&wrap_line(Line::from("abcdefghijkl"), 5)), ["abcde", "fghij", "kl"], "a long word breaks mid-word");
+        assert_eq!(text(&wrap_line(Line::from("short"), 10)), ["short"]);
+        assert_eq!(text(&wrap_line(Line::from(""), 10)), [""], "an empty line still takes a row");
+        assert_eq!(text(&wrap_line(Line::from("ab cd"), 0)), ["a", "b", "c", "d"], "a zero width still makes progress");
+    }
+
+    #[test]
+    fn wrapping_keeps_each_span_style() {
+        let rows = wrap_line(Line::from(vec![Span::raw("  "), "name".bold(), Span::raw(" task text")]), 8);
+        assert_eq!(text(&rows), ["  name ", "task ", "text"]);
+        assert_eq!(rows[0].spans[1], "name".bold());
+        assert!(rows.iter().all(|r| r.width() <= 8));
+    }
 }

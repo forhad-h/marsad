@@ -1,6 +1,9 @@
 mod alerts;
 mod app;
+mod board;
+mod clipboard;
 mod context;
+mod coordination;
 mod events;
 mod hook;
 mod install;
@@ -71,6 +74,8 @@ enum Cmd {
     },
     /// How full this session's context is, and the automatic handoff warning (--warn).
     Context(context::ContextArgs),
+    /// Print the `claude` command that starts a session with the multi-session coordination rules.
+    Coordination(coordination::CoordinationArgs),
     /// Update marsad to the latest release (or turn automatic updates on/off with --auto).
     Update(update::UpdateArgs),
 }
@@ -118,6 +123,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Cmd::Status(args)) => live::status(args),
         Some(Cmd::Context(args)) => context::run(args),
+        Some(Cmd::Coordination(args)) => coordination::run(args),
         Some(Cmd::Export { file }) => portable::export(file),
         Some(Cmd::Import { file, restore }) => portable::import(&file, restore),
         Some(Cmd::Update(args)) => update::run(args),

@@ -38,6 +38,14 @@ note, or `context_pct` is high, offer to write a handoff prompt: the goal, what 
 made, open questions, and the next steps, with file paths, so a fresh session can continue.
 `marsad context --warn <pct|off>` changes the threshold.
 
+## Several sessions in one repo
+
+```sh
+marsad coordination --format json   # {command, protocol_path}: starts a session with the coordination rules
+```
+
+Sessions started with that command coordinate on `AGENT-BOARD.md` at the root of the repo's main checkout: beside the absolute `git rev-parse --git-common-dir` when that is a `.git` dir, inside it otherwise (a bare clone or a submodule). Read it to see which sessions are active and which files they have claimed; the dashboard's `b` key shows it too.
+
 ## Ready-made reports
 
 ```sh
