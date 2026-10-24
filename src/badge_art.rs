@@ -1,4 +1,6 @@
-//! Badge art: a deterministic Islamic geometric star per tier, as strokes in a unit space and as an SVG fragment.
+//! Badge art: a deterministic Islamic ornament per tier, in three historical idioms — Mamluk/Seljuk
+//! carved roundel (tiers 0-1), Moorish zellij tilework (tiers 2-4), Persian girih strapwork (tiers 5-6) —
+//! as strokes/fills in a unit space and as an SVG fragment.
 // used by the card (U4) and the badge view (U6)
 #![allow(dead_code)]
 
@@ -67,11 +69,13 @@ fn star_contact(n: usize, k: usize) -> f64 {
     PI * k as f64 / n as f64
 }
 
-/// What a stroke is part of; the badge view colours by it.
+/// What a stroke is part of; `svg` renders strapwork (`Strap`, `Rosette`) as a wide band under a narrow
+/// line, and rim and grout (`Ring`, `Tile`) as one thin line. The badge view colours by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Ring,
-    Star,
+    Tile,
+    Strap,
     Rosette,
 }
 
@@ -90,65 +94,44 @@ pub struct Fill {
     pub color: Rgb,
 }
 
-/// A tier's colours.
+/// A tier's representative colours, used for the badge ground and strapwork and reused by the card for
+/// its own chrome (the ground tint, the frame band and rule, the badge's halo and shadow).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
-    /// The disc behind the pattern.
+    /// The disc behind the pattern; the darkest, recessed tone.
     pub ground: Rgb,
-    /// The main star's field.
+    /// The main motif's field; the badge's dominant tone.
     pub field: Rgb,
-    /// The inner rosette's field.
+    /// The central rosette's fill.
     pub rosette: Rgb,
-    /// The wide stroke under the strapwork.
+    /// The wide stroke under strapwork, and the rim/grout lines.
     pub band: Rgb,
-    /// The narrow stroke on top of the strapwork.
+    /// The narrow stroke on top of strapwork.
     pub line: Rgb,
 }
 
-/// How a tier's badge is built.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Recipe {
-    /// The main star's point count.
-    pub points: usize,
-    /// The main star is {points/k}.
-    pub k: usize,
-    /// A second {points/k} star, turned half a step and laced through the first.
-    pub double: Option<usize>,
-    /// Draw the stars' full chords so the lines cross, not just their outlines; the chords stop at the first rosette.
-    pub interlace: bool,
-    /// Inner rosettes, outermost first: each one's radius and k, turned half a step from the one outside it.
-    pub rosettes: &'static [(f64, usize)],
-    /// Concentric rings around the star.
-    pub rings: usize,
-    pub palette: Palette,
-}
+// Mamluk / Seljuk carved roundel (tiers 0-1): deep-relief interlace in one material, read through a
+// single hue's light and shadow, not colour.
+const MAMLUK_IVORY: Palette = Palette { ground: (0x5b, 0x4d, 0x36), field: (0xcf, 0xbf, 0x95), rosette: (0xe6, 0xda, 0xb8), band: (0x35, 0x2b, 0x1c), line: (0xf8, 0xf1, 0xdf) };
+const MAMLUK_CEDAR: Palette = Palette { ground: (0x3a, 0x1e, 0x11), field: (0x9c, 0x56, 0x30), rosette: (0xc9, 0x8a, 0x58), band: (0x22, 0x10, 0x08), line: (0xf1, 0xd9, 0xb6) };
 
-const SLATE: Palette = Palette { ground: (0x2b, 0x35, 0x40), field: (0x4a, 0x5a, 0x6a), rosette: (0x6b, 0x7d, 0x8c), band: (0x1a, 0x21, 0x29), line: (0xc9, 0xd3, 0xdb) };
-const SLATE_TEAL: Palette = Palette { ground: (0x24, 0x38, 0x3e), field: (0x3d, 0x63, 0x6a), rosette: (0x5f, 0x93, 0x96), band: (0x14, 0x23, 0x27), line: (0xcf, 0xe3, 0xe0) };
-const TEAL: Palette = Palette { ground: (0x0f, 0x3d, 0x3e), field: (0x1d, 0x6f, 0x6c), rosette: (0x3f, 0xa3, 0x96), band: (0x07, 0x24, 0x25), line: (0xd8, 0xf0, 0xe8) };
-const TEAL_LAPIS: Palette = Palette { ground: (0x13, 0x2f, 0x4c), field: (0x1f, 0x5f, 0x7a), rosette: (0x2e, 0x9c, 0x9a), band: (0x0a, 0x1a, 0x2d), line: (0xdc, 0xec, 0xf2) };
-const LAPIS: Palette = Palette { ground: (0x14, 0x23, 0x5c), field: (0x26, 0x47, 0x9e), rosette: (0x3b, 0x6f, 0xc9), band: (0x0a, 0x12, 0x36), line: (0xe2, 0xe8, 0xf8) };
-const LAPIS_GOLD: Palette = Palette { ground: (0x12, 0x1c, 0x52), field: (0x23, 0x3f, 0x96), rosette: (0xc9, 0x9a, 0x3b), band: (0x0b, 0x10, 0x30), line: (0xe8, 0xc9, 0x6a) };
-const GOLD: Palette = Palette { ground: (0x2a, 0x1c, 0x0c), field: (0x8a, 0x62, 0x1e), rosette: (0xd9, 0xa8, 0x3e), band: (0x1e, 0x12, 0x05), line: (0xf6, 0xdc, 0x8a) };
+// Moorish zellij (tiers 2-4): an 8-fold khatam rosette in a tiled field of small cut-tile pieces, with
+// broad interlaced bands over the top.
+const ZELLIJ_TURQUOISE: Palette = Palette { ground: (0x0c, 0x38, 0x3a), field: (0x1c, 0x8f, 0x8a), rosette: (0xf3, 0xec, 0xd8), band: (0x06, 0x1c, 0x1e), line: (0xf3, 0xec, 0xd8) };
+const ZELLIJ_COBALT: Palette = Palette { ground: (0x0a, 0x17, 0x3f), field: (0x20, 0x45, 0x97), rosette: (0xe7, 0xcc, 0x86), band: (0x05, 0x0b, 0x24), line: (0xe7, 0xcc, 0x86) };
+const ZELLIJ_RICH: Palette = Palette { ground: (0x07, 0x0d, 0x22), field: (0x19, 0x2c, 0x78), rosette: (0xd3, 0x8a, 0x27), band: (0x04, 0x04, 0x09), line: (0xf3, 0xe7, 0xc2) };
 
-/// The recipe for a tier; a tier past the top is Grandmaster.
-pub fn recipe(tier: usize) -> Recipe {
-    let r = |points, k, double, interlace, rosettes, rings, palette| Recipe { points, k, double, interlace, rosettes, rings, palette };
-    match tier.min(TIERS - 1) {
-        0 => r(8, 3, None, false, &[], 1, SLATE),
-        1 => r(8, 3, None, true, &[(0.42, 3)], 1, SLATE_TEAL),
-        2 => r(12, 4, None, true, &[(0.44, 4)], 2, TEAL),
-        3 => r(12, 5, None, true, &[(0.46, 4)], 3, TEAL_LAPIS),
-        4 => r(12, 5, Some(4), true, &[(0.46, 4)], 3, LAPIS),
-        5 => r(16, 6, Some(4), true, &[(0.48, 6)], 3, LAPIS_GOLD),
-        _ => r(16, 7, Some(5), true, &[(0.5, 6), (0.24, 6)], 3, GOLD),
-    }
-}
+const ZELLIJ_TILES_2: [Rgb; 2] = [(0x1c, 0x8f, 0x8a), (0xe9, 0xe2, 0xcf)];
+const ZELLIJ_TILES_3: [Rgb; 4] = [(0x20, 0x45, 0x97), (0x1c, 0x8f, 0x8a), (0xe7, 0xcc, 0x86), (0x16, 0x16, 0x1c)];
+const ZELLIJ_TILES_4: [Rgb; 6] = [(0x19, 0x2c, 0x78), (0x1c, 0x8f, 0x8a), (0x3e, 0x7d, 0x3a), (0xd3, 0x8a, 0x27), (0x14, 0x14, 0x18), (0xef, 0xe8, 0xd6)];
 
-/// The main star's tip radius, inside the rings.
-const STAR_RADIUS: f64 = 0.8;
-/// Ring radii, outermost first; a tier uses the first `rings` of them.
-const RINGS: [f64; 3] = [0.96, 0.88, 0.84];
+// Persian girih (tiers 5-6): 10-fold decagon rosettes with long interlaced strapwork, turquoise and
+// lapis with gold, richest at the top.
+const GIRIH_TURQUOISE: Palette = Palette { ground: (0x08, 0x12, 0x2c), field: (0x24, 0x4d, 0xb8), rosette: (0x2a, 0x9d, 0x93), band: (0x04, 0x08, 0x18), line: (0xdd, 0xb6, 0x4e) };
+const GIRIH_GOLD: Palette = Palette { ground: (0x06, 0x0a, 0x20), field: (0x2a, 0x35, 0x8c), rosette: (0xe3, 0xb8, 0x3c), band: (0x03, 0x04, 0x10), line: (0xf6, 0xda, 0x7e) };
+
+/// Ring radii, outermost first; a badge uses the first few of them as a rim.
+const RINGS: [f64; 3] = [0.97, 0.91, 0.855];
 /// Segments in a ring's polyline.
 const RING_SEGMENTS: usize = 96;
 
@@ -174,73 +157,128 @@ impl Badge {
     }
 }
 
-/// Builds a tier's badge.
+/// Builds a tier's badge; a tier past the top is Grandmaster.
 pub fn badge(tier: usize) -> Badge {
-    let rc = recipe(tier);
-    let n = rc.points;
-    let mut fills = Vec::new();
-    let mut strokes = Vec::new();
-    // Tips point straight up.
+    match tier.min(TIERS - 1) {
+        0 => carved(MAMLUK_IVORY, 1),
+        1 => carved(MAMLUK_CEDAR, 2),
+        2 => zellij(ZELLIJ_TURQUOISE, &ZELLIJ_TILES_2, 1),
+        3 => zellij(ZELLIJ_COBALT, &ZELLIJ_TILES_3, 2),
+        4 => zellij(ZELLIJ_RICH, &ZELLIJ_TILES_4, 3),
+        5 => girih(GIRIH_TURQUOISE, 1),
+        _ => girih(GIRIH_GOLD, 2),
+    }
+}
+
+/// The rim, outermost first, as `richness` concentric ring strokes.
+fn rings(richness: usize) -> Vec<Stroke> {
+    RINGS[..richness.min(RINGS.len())].iter().map(|&radius| Stroke { points: ring_points(radius), closed: true, role: Role::Ring }).collect()
+}
+
+fn ring_points(radius: f64) -> Vec<Point> {
+    (0..RING_SEGMENTS).map(|i| polar(radius, 2.0 * PI * i as f64 / RING_SEGMENTS as f64 + PI / 2.0)).collect()
+}
+
+/// A Mamluk/Seljuk carved roundel: an 8-point strap outline in the material's raised tone, with a
+/// carved inset line just inside it standing for the groove, and — past Novice — a raised centre boss.
+fn carved(palette: Palette, richness: usize) -> Badge {
     let up = PI / 2.0;
-    for &radius in &RINGS[..rc.rings] {
-        let ring = (0..RING_SEGMENTS).map(|i| polar(radius, 2.0 * PI * i as f64 / RING_SEGMENTS as f64 + up)).collect();
-        strokes.push(Stroke { points: ring, closed: true, role: Role::Ring });
+    let mut fills = Vec::new();
+    let mut strokes = rings(richness);
+
+    let outline = hankin_star(8, 0.80, up, star_contact(8, 3)).expect("contact in bounds");
+    fills.push(Fill { points: outline.clone(), color: palette.field });
+    strokes.push(Stroke { points: outline.clone(), closed: true, role: Role::Strap });
+    let inset: Vec<Point> = outline.iter().map(|&(x, y)| (x * 0.9, y * 0.9)).collect();
+    strokes.push(Stroke { points: inset, closed: true, role: Role::Ring });
+
+    if richness > 1 {
+        let boss = hankin_star(8, 0.36, up + PI / 8.0, star_contact(8, 3)).expect("contact in bounds");
+        fills.push(Fill { points: boss.clone(), color: palette.rosette });
+        strokes.push(Stroke { points: boss, closed: true, role: Role::Rosette });
     }
-    let rosettes: Vec<Vec<Point>> = rc.rosettes.iter().enumerate().map(|(i, &(radius, k))| hankin_star(n, radius, up + PI * (i + 1) as f64 / n as f64, star_contact(n, k)).expect("recipe contact in bounds")).collect();
-    let mut star = |k: usize, turn: f64, strokes: &mut Vec<Stroke>| {
-        let outline = hankin_star(n, STAR_RADIUS, up + turn, star_contact(n, k)).expect("recipe contact in bounds");
-        fills.push(Fill { points: outline.clone(), color: rc.palette.field });
-        if !rc.interlace {
-            strokes.push(Stroke { points: outline, closed: true, role: Role::Star });
-            return;
-        }
-        for i in 0..n {
-            let (a, b) = (polar(STAR_RADIUS, up + turn + 2.0 * PI * i as f64 / n as f64), polar(STAR_RADIUS, up + turn + 2.0 * PI * (i + k) as f64 / n as f64));
-            // Strapwork stops where it meets the rosette, so the chord splits in two there.
-            match rosettes.first().and_then(|r| clip(a, b, r)) {
-                Some((s, t)) => {
-                    strokes.push(Stroke { points: vec![a, lerp(a, b, s)], closed: false, role: Role::Star });
-                    strokes.push(Stroke { points: vec![lerp(a, b, t), b], closed: false, role: Role::Star });
-                }
-                None => strokes.push(Stroke { points: vec![a, b], closed: false, role: Role::Star }),
-            }
-        }
+    Badge { fills, strokes, palette }
+}
+
+/// A closed annular wedge from `a0` to `a1`, outer arc then inner arc, approximated in `segs` steps.
+fn wedge(r0: f64, r1: f64, a0: f64, a1: f64, segs: usize) -> Vec<Point> {
+    let mut out = Vec::with_capacity(2 * segs + 2);
+    for i in 0..=segs {
+        out.push(polar(r1, a0 + (a1 - a0) * i as f64 / segs as f64));
+    }
+    for i in 0..=segs {
+        out.push(polar(r0, a1 - (a1 - a0) * i as f64 / segs as f64));
+    }
+    out
+}
+
+/// A Moorish zellij medallion: a central khatam rosette, concentric rings of small cut-tile wedges
+/// (finer and more colourful outward with `richness`), and one or two broad interlaced strap rings on top.
+fn zellij(palette: Palette, tiles: &'static [Rgb], richness: usize) -> Badge {
+    let up = PI / 2.0;
+    let mut fills = Vec::new();
+    let mut strokes = rings(richness);
+
+    let rosette = hankin_star(8, 0.3, up, star_contact(8, 3)).expect("contact in bounds");
+    fills.push(Fill { points: rosette.clone(), color: palette.rosette });
+    strokes.push(Stroke { points: rosette, closed: true, role: Role::Rosette });
+
+    let bands: &[(f64, f64, usize)] = match richness {
+        1 => &[(0.32, 0.58, 8)],
+        2 => &[(0.32, 0.54, 8), (0.56, 0.76, 12)],
+        _ => &[(0.32, 0.50, 8), (0.52, 0.70, 12), (0.72, 0.84, 18)],
     };
-    if let Some(k) = rc.double {
-        star(k, PI / n as f64, &mut strokes);
-    }
-    star(rc.k, 0.0, &mut strokes);
-    for outline in rosettes {
-        fills.push(Fill { points: outline.clone(), color: rc.palette.rosette });
-        strokes.push(Stroke { points: outline, closed: true, role: Role::Rosette });
-    }
-    Badge { fills, strokes, palette: rc.palette }
-}
-
-/// The first and last places, as fractions along a→b, where the segment crosses a closed polygon.
-fn clip(a: Point, b: Point, poly: &[Point]) -> Option<(f64, f64)> {
-    let d = (b.0 - a.0, b.1 - a.1);
-    let mut hits = Vec::new();
-    for (i, &p) in poly.iter().enumerate() {
-        let q = poly[(i + 1) % poly.len()];
-        let e = (q.0 - p.0, q.1 - p.1);
-        let den = d.0 * e.1 - d.1 * e.0;
-        if den.abs() < 1e-12 {
-            continue;
-        }
-        let t = ((p.0 - a.0) * e.1 - (p.1 - a.1) * e.0) / den;
-        let u = ((p.0 - a.0) * d.1 - (p.1 - a.1) * d.0) / den;
-        if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
-            hits.push(t);
+    for (bi, &(r0, r1, n)) in bands.iter().enumerate() {
+        for i in 0..n {
+            let (a0, a1) = (up + 2.0 * PI * i as f64 / n as f64, up + 2.0 * PI * (i + 1) as f64 / n as f64);
+            let points = wedge(r0, r1, a0, a1, 6);
+            fills.push(Fill { points: points.clone(), color: tiles[(i + bi) % tiles.len()] });
+            strokes.push(Stroke { points, closed: true, role: Role::Tile });
         }
     }
-    let first = hits.iter().copied().fold(f64::INFINITY, f64::min);
-    let last = hits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    (first < last).then_some((first, last))
+
+    let strap = |turn: f64| Stroke { points: hankin_star(8, 0.9, up + turn, star_contact(8, 2)).expect("contact in bounds"), closed: true, role: Role::Strap };
+    strokes.push(strap(0.0));
+    if richness > 1 {
+        strokes.push(strap(PI / 8.0));
+    }
+    Badge { fills, strokes, palette }
 }
 
-fn lerp(a: Point, b: Point, t: f64) -> Point {
-    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+/// A Persian girih medallion: a central decagon rosette with ten long strap arms reaching to the rim,
+/// and — for Grandmaster — a second ring of small gold studs set between them.
+fn girih(palette: Palette, richness: usize) -> Badge {
+    let up = PI / 2.0;
+    let mut fills = Vec::new();
+    let mut strokes = rings(richness + 1);
+
+    let rosette = hankin_star(10, 0.28, up, star_contact(10, 3)).expect("contact in bounds");
+    fills.push(Fill { points: rosette.clone(), color: palette.rosette });
+    strokes.push(Stroke { points: rosette, closed: true, role: Role::Rosette });
+
+    let tip_out = if richness > 1 { 0.84 } else { 0.8 };
+    let spread = PI / 22.0;
+    for i in 0..10 {
+        let a = up + 2.0 * PI * i as f64 / 10.0;
+        let strap = vec![polar(0.26, a), polar(0.55, a - spread), polar(tip_out, a), polar(0.55, a + spread)];
+        fills.push(Fill { points: strap.clone(), color: palette.field });
+        strokes.push(Stroke { points: strap, closed: true, role: Role::Strap });
+    }
+
+    // Bowtie tiles between the arms, the girih tile set's own filler piece, closing the ground up to the rim.
+    for i in 0..10 {
+        let a = up + 2.0 * PI * i as f64 / 10.0 + PI / 10.0;
+        let bowtie = vec![polar(0.3, a), polar(0.52, a - spread * 1.6), polar(0.68, a), polar(0.52, a + spread * 1.6)];
+        fills.push(Fill { points: bowtie.clone(), color: palette.rosette });
+        strokes.push(Stroke { points: bowtie, closed: true, role: Role::Tile });
+    }
+
+    if richness > 1 {
+        // A second, finer decagram laced through the bowties: Grandmaster's richer interlace.
+        let decagram = hankin_star(10, 0.52, up + PI / 10.0, star_contact(10, 4)).expect("contact in bounds");
+        strokes.push(Stroke { points: decagram, closed: true, role: Role::Strap });
+    }
+    Badge { fills, strokes, palette }
 }
 
 fn polar(r: f64, a: f64) -> Point {
@@ -269,7 +307,8 @@ fn path(points: &[Point], closed: bool, cx: f64, cy: f64, r: f64) -> String {
     d
 }
 
-/// A tier's badge as an SVG `<g>`, centred on (cx, cy) with radius r: a ground disc, fills, then strapwork (a wide band stroke under a narrow line stroke).
+/// A tier's badge as an SVG `<g>`, centred on (cx, cy) with radius r: a ground disc, fills, a thin
+/// line for the rim and tile grout, then strapwork (a wide band stroke under a narrow line stroke).
 pub fn svg(tier: usize, cx: f64, cy: f64, r: f64) -> String {
     let b = badge(tier);
     let p = b.palette;
@@ -279,9 +318,14 @@ pub fn svg(tier: usize, cx: f64, cy: f64, r: f64) -> String {
         let _ = write!(out, "<path d=\"{}\" fill=\"{}\"/>", path(&f.points, true, cx, cy, r), hex(f.color));
     }
     let _ = write!(out, "<g fill=\"none\" stroke-linejoin=\"round\" stroke-linecap=\"round\">");
-    for (color, width) in [(p.band, 0.06), (p.line, 0.02)] {
+    let _ = write!(out, "<g stroke=\"{}\" stroke-width=\"{}\">", hex(p.band), num(0.012 * r));
+    for s in b.strokes.iter().filter(|s| matches!(s.role, Role::Ring | Role::Tile)) {
+        let _ = write!(out, "<path d=\"{}\"/>", path(&s.points, s.closed, cx, cy, r));
+    }
+    out.push_str("</g>");
+    for (color, width) in [(p.band, 0.065), (p.line, 0.022)] {
         let _ = write!(out, "<g stroke=\"{}\" stroke-width=\"{}\">", hex(color), num(width * r));
-        for s in &b.strokes {
+        for s in b.strokes.iter().filter(|s| matches!(s.role, Role::Strap | Role::Rosette)) {
             let _ = write!(out, "<path d=\"{}\"/>", path(&s.points, s.closed, cx, cy, r));
         }
         out.push_str("</g>");
@@ -304,9 +348,17 @@ mod tests {
         (p.0 * a.cos() - p.1 * a.sin(), p.0 * a.sin() + p.1 * a.cos())
     }
 
+    fn distinct_colors(tier: usize) -> usize {
+        let b = badge(tier);
+        let mut colors: Vec<Rgb> = b.fills.iter().map(|f| f.color).collect();
+        colors.sort();
+        colors.dedup();
+        colors.len()
+    }
+
     #[test]
     fn star_has_n_equidistant_tips_with_n_fold_symmetry() {
-        for n in [8, 12, 16] {
+        for n in [8, 10, 12, 16] {
             let (lo, hi) = contact_bounds(n);
             let star = hankin_star(n, 0.8, 0.3, (lo + hi) / 2.0).unwrap();
             assert_eq!(star.len(), 2 * n);
@@ -357,21 +409,6 @@ mod tests {
     }
 
     #[test]
-    fn higher_tiers_have_strictly_more_segments() {
-        let counts: Vec<usize> = (0..TIERS).map(|t| badge(t).segments().len()).collect();
-        assert!(counts[0] > 0);
-        for w in counts.windows(2) {
-            assert!(w[0] < w[1], "segment counts {counts:?}");
-        }
-    }
-
-    #[test]
-    fn star_points_grow_with_tier_from_8_through_12_to_16() {
-        let points: Vec<usize> = (0..TIERS).map(|t| recipe(t).points).collect();
-        assert_eq!(points, [8, 8, 12, 12, 12, 16, 16]);
-    }
-
-    #[test]
     fn tier_past_the_top_clamps_to_grandmaster() {
         assert_eq!(svg(99, 50.0, 50.0, 40.0), svg(TIERS - 1, 50.0, 50.0, 40.0));
     }
@@ -404,20 +441,37 @@ mod tests {
     }
 
     #[test]
-    fn interlace_stops_at_the_rosette() {
-        for tier in 0..TIERS {
-            let rc = recipe(tier);
-            let Some(&(radius, _)) = rc.rosettes.first() else { continue };
-            // A chord that passes inside the rosette's tips splits in two there; one that clears them stays whole.
-            let n = rc.points;
-            let chords = |k: usize| if STAR_RADIUS * (PI * k as f64 / n as f64).cos() < radius { 2 * n } else { n };
-            let want = chords(rc.k) + rc.double.map_or(0, chords);
-            let star: Vec<Stroke> = badge(tier).strokes.into_iter().filter(|s| s.role == Role::Star).collect();
-            assert_eq!(star.len(), want, "tier {tier}");
-            for p in star.iter().flat_map(|s| s.points.iter().copied()) {
-                assert!(dist(p) > radius * 0.6, "tier {tier} point {p:?} inside the rosette");
-            }
+    fn carved_tiers_read_as_one_material() {
+        // Novice has only the raised strap tone; Apprentice adds a single boss tone.
+        assert_eq!(distinct_colors(0), 1, "Novice should be one material tone");
+        assert_eq!(distinct_colors(1), 2, "Apprentice adds only the boss tone");
+    }
+
+    #[test]
+    fn zellij_tiers_grow_more_colourful_with_tier() {
+        let counts: Vec<usize> = (2..=4).map(distinct_colors).collect();
+        assert!(counts[0] < counts[1] && counts[1] < counts[2], "zellij colour counts {counts:?}");
+    }
+
+    #[test]
+    fn girih_tiers_have_a_tenfold_rosette_and_ten_strap_arms() {
+        for tier in [5, 6] {
+            let b = badge(tier);
+            let straps = b.strokes.iter().filter(|s| s.role == Role::Strap).count();
+            assert!(straps >= 10, "tier {tier} has only {straps} straps");
+            let rosette = b.strokes.iter().find(|s| s.role == Role::Rosette).expect("a rosette");
+            assert_eq!(rosette.points.len(), 20, "a decagon star has 20 points");
         }
+        // Grandmaster's extra decagram laces through the bowties, on top of the ten arms.
+        assert_eq!(badge(6).strokes.iter().filter(|s| s.role == Role::Strap).count(), 11);
+    }
+
+    #[test]
+    fn richer_tiers_within_a_style_have_more_geometry() {
+        let total = |t: usize| badge(t).fills.len() + badge(t).strokes.len();
+        assert!(total(0) < total(1), "carved: {} vs {}", total(0), total(1));
+        assert!(total(2) < total(3) && total(3) < total(4), "zellij: {} {} {}", total(2), total(3), total(4));
+        assert!(total(5) < total(6), "girih: {} vs {}", total(5), total(6));
     }
 
     #[test]
@@ -430,5 +484,20 @@ mod tests {
         }
         out.push_str("</svg>");
         std::fs::write(path, out).unwrap();
+    }
+
+    #[test]
+    #[ignore = "writes a preview PNG of all tiers to $BADGE_PREVIEW_PNG"]
+    fn preview_all_tiers_png() {
+        let path = std::env::var("BADGE_PREVIEW_PNG").expect("set BADGE_PREVIEW_PNG");
+        let mut svg_doc = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1680\" height=\"260\" viewBox=\"0 0 1680 260\"><rect width=\"1680\" height=\"260\" fill=\"#f4f1ea\"/>");
+        for tier in 0..TIERS {
+            svg_doc.push_str(&svg(tier, 120.0 + 240.0 * tier as f64, 130.0, 110.0));
+        }
+        svg_doc.push_str("</svg>");
+        let tree = resvg::usvg::Tree::from_str(&svg_doc, &resvg::usvg::Options::default()).unwrap();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(1680, 260).unwrap();
+        resvg::render(&tree, resvg::tiny_skia::Transform::default(), &mut pixmap.as_mut());
+        pixmap.save_png(path).unwrap();
     }
 }
