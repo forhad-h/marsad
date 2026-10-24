@@ -10,7 +10,7 @@ use std::fmt::Write;
 pub type Point = (f64, f64);
 
 /// The number of tiers, Novice (0) to Grandmaster (6).
-pub const TIERS: usize = 7;
+pub const TIERS: usize = crate::badges::TIERS.len();
 
 /// An sRGB colour.
 pub type Rgb = (u8, u8, u8);
@@ -74,11 +74,10 @@ pub enum Role {
     Tile,
 }
 
-/// A polyline in the unit space, with its colour and its width in unit-space terms.
+/// A closed polyline in the unit space, with its colour and its width in unit-space terms.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
     pub points: Vec<Point>,
-    pub closed: bool,
     pub role: Role,
     pub color: Rgb,
     pub width: f64,
@@ -91,20 +90,18 @@ pub struct Fill {
     pub color: Rgb,
 }
 
-/// A tier's representative colours, reused by the card for its own chrome (the ground tint, the
-/// frame band and its stars, the badge's halo and shadow).
+/// A tier's colours: the badge's rim material, and the tones the card reuses for its own chrome (the
+/// ground tint, the frame band and its stars, the badge's halo and shadow).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
     /// The darkest tone; the card's frame band.
     pub ground: Rgb,
     /// The dominant tone; the card's accent and lattice tint.
     pub field: Rgb,
-    /// The rim's mid tone.
-    pub rosette: Rgb,
     /// The shadow tone.
     pub band: Rgb,
-    /// The rim's light tone.
-    pub line: Rgb,
+    /// The rim's material.
+    pub metal: Metal,
 }
 
 /// A rim material's light, mid and dark tones.
@@ -166,7 +163,6 @@ enum Finish {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Centre {
-    Plain,
     Raised,
     Gilded,
     Jewelled,
@@ -174,7 +170,6 @@ enum Centre {
 
 /// Everything that sets one tier's badge apart.
 struct Spec {
-    metal: Metal,
     border: Border,
     pattern: Pattern,
     finish: Finish,
@@ -196,7 +191,6 @@ struct Spec {
 fn spec(tier: usize) -> Spec {
     match tier.min(TIERS - 1) {
         0 => Spec {
-            metal: SANDSTONE,
             border: Border::Plain,
             pattern: Pattern::Diamonds(0.38),
             finish: Finish::Carved,
@@ -207,10 +201,9 @@ fn spec(tier: usize) -> Spec {
             jewel: SANDSTONE.mid,
             gap: 0.016,
             gloss: 0.1,
-            palette: Palette { ground: (0x5a, 0x48, 0x2f), field: (0x8f, 0x74, 0x4c), rosette: SANDSTONE.mid, band: (0x3b, 0x2f, 0x1e), line: SANDSTONE.light },
+            palette: Palette { ground: (0x5a, 0x48, 0x2f), field: (0x8f, 0x74, 0x4c), band: (0x3b, 0x2f, 0x1e), metal: SANDSTONE },
         },
         1 => Spec {
-            metal: CEDAR,
             border: Border::Fillet,
             pattern: Pattern::Honeycomb(0.15),
             finish: Finish::Carved,
@@ -221,10 +214,9 @@ fn spec(tier: usize) -> Spec {
             jewel: CEDAR.mid,
             gap: 0.014,
             gloss: 0.12,
-            palette: Palette { ground: (0x3f, 0x22, 0x12), field: (0x9a, 0x58, 0x2c), rosette: CEDAR.mid, band: (0x26, 0x13, 0x09), line: CEDAR.light },
+            palette: Palette { ground: (0x3f, 0x22, 0x12), field: (0x9a, 0x58, 0x2c), band: (0x26, 0x13, 0x09), metal: CEDAR },
         },
         2 => Spec {
-            metal: BRONZE,
             border: Border::Beads,
             pattern: Pattern::Octagons(0.4),
             finish: Finish::Glazed,
@@ -235,10 +227,9 @@ fn spec(tier: usize) -> Spec {
             jewel: COBALT,
             gap: 0.013,
             gloss: 0.22,
-            palette: Palette { ground: (0x0e, 0x3c, 0x3a), field: (0x17, 0x86, 0x7f), rosette: BRONZE.mid, band: (0x07, 0x22, 0x21), line: BRONZE.light },
+            palette: Palette { ground: (0x0e, 0x3c, 0x3a), field: (0x17, 0x86, 0x7f), band: (0x07, 0x22, 0x21), metal: BRONZE },
         },
         3 => Spec {
-            metal: SILVER,
             border: Border::Rope,
             pattern: Pattern::Octagons(0.34),
             finish: Finish::Glazed,
@@ -249,10 +240,9 @@ fn spec(tier: usize) -> Spec {
             jewel: TURQUOISE,
             gap: 0.012,
             gloss: 0.25,
-            palette: Palette { ground: (0x13, 0x24, 0x57), field: (0x25, 0x4a, 0xa8), rosette: SILVER.mid, band: (0x0a, 0x13, 0x30), line: SILVER.light },
+            palette: Palette { ground: (0x13, 0x24, 0x57), field: (0x25, 0x4a, 0xa8), band: (0x0a, 0x13, 0x30), metal: SILVER },
         },
         4 => Spec {
-            metal: GOLD,
             border: Border::BeadsAndFillet,
             pattern: Pattern::Octagons(0.32),
             finish: Finish::Glazed,
@@ -263,10 +253,9 @@ fn spec(tier: usize) -> Spec {
             jewel: GREEN,
             gap: 0.011,
             gloss: 0.28,
-            palette: Palette { ground: (0x12, 0x2e, 0x22), field: (0x2a, 0x6e, 0x48), rosette: GOLD.mid, band: (0x08, 0x18, 0x11), line: GOLD.light },
+            palette: Palette { ground: (0x12, 0x2e, 0x22), field: (0x2a, 0x6e, 0x48), band: (0x08, 0x18, 0x11), metal: GOLD },
         },
         5 => Spec {
-            metal: GOLD,
             border: Border::Jewels,
             pattern: Pattern::Decagons(0.86),
             finish: Finish::Glazed,
@@ -277,10 +266,9 @@ fn spec(tier: usize) -> Spec {
             jewel: LAPIS,
             gap: 0.011,
             gloss: 0.3,
-            palette: Palette { ground: (0x10, 0x1e, 0x4c), field: (0x24, 0x47, 0xa8), rosette: GOLD.mid, band: (0x08, 0x0f, 0x2a), line: GOLD.light },
+            palette: Palette { ground: (0x10, 0x1e, 0x4c), field: (0x24, 0x47, 0xa8), band: (0x08, 0x0f, 0x2a), metal: GOLD },
         },
         _ => Spec {
-            metal: GOLD,
             border: Border::Crown,
             pattern: Pattern::Decagons(0.86),
             finish: Finish::Glazed,
@@ -291,7 +279,7 @@ fn spec(tier: usize) -> Spec {
             jewel: DEEP_LAPIS,
             gap: 0.01,
             gloss: 0.32,
-            palette: Palette { ground: (0x0d, 0x16, 0x38), field: (0x9a, 0x70, 0x1c), rosette: GOLD.mid, band: (0x05, 0x0a, 0x1e), line: GOLD.light },
+            palette: Palette { ground: (0x0d, 0x16, 0x38), field: (0x9a, 0x70, 0x1c), band: (0x05, 0x0a, 0x1e), metal: GOLD },
         },
     }
 }
@@ -309,8 +297,6 @@ pub struct Badge {
     pub fills: Vec<Fill>,
     pub strokes: Vec<Stroke>,
     pub palette: Palette,
-    /// The rim's material, for its bevel.
-    pub metal: Metal,
     /// The sheen's opacity: matte stone low, glaze and gold higher.
     pub gloss: f64,
 }
@@ -321,12 +307,17 @@ impl Badge {
         let mut out = Vec::new();
         for s in &self.strokes {
             out.extend(s.points.windows(2).map(|w| (w[0], w[1], s.role)));
-            if s.closed && s.points.len() > 2 {
+            if s.points.len() > 2 {
                 out.push((s.points[s.points.len() - 1], s.points[0], s.role));
             }
         }
         out
     }
+}
+
+/// A tier's colours, without building its geometry.
+pub fn palette(tier: usize) -> Palette {
+    spec(tier).palette
 }
 
 /// Builds a tier's badge; a tier past the top is Grandmaster.
@@ -337,11 +328,11 @@ pub fn badge(tier: usize) -> Badge {
     border(&sp, &mut fills, &mut strokes);
     field(&sp, &mut fills, &mut strokes);
     for radius in [1.0, BAND, FIELD] {
-        strokes.push(Stroke { points: circle((0.0, 0.0), radius, CIRCLE), closed: true, role: Role::Rim, color: sp.metal.dark, width: 0.008 });
+        strokes.push(Stroke { points: circle((0.0, 0.0), radius, CIRCLE), role: Role::Rim, color: sp.palette.metal.dark, width: 0.008 });
     }
     // Clipping a highlight to a sliver of a tile at the field's edge can leave nothing.
     fills.retain(|f| f.points.len() >= 3 && area(&f.points) > 1e-12);
-    Badge { fills, strokes, palette: sp.palette, metal: sp.metal, gloss: sp.gloss }
+    Badge { fills, strokes, palette: sp.palette, gloss: sp.gloss }
 }
 
 /// A tile of a tessellation: its outline, its colour kind, and whether it sits at the centre.
@@ -431,21 +422,21 @@ fn tiles(pattern: Pattern) -> Vec<Tile> {
 /// The field: the strapwork ground, then each tile inset by the strap's half-width, clipped to the
 /// field and finished, with its outline.
 fn field(sp: &Spec, fills: &mut Vec<Fill>, strokes: &mut Vec<Stroke>) {
-    let m = sp.metal;
+    let m = sp.palette.metal;
     let outline = match sp.finish {
         Finish::Carved => m.dark,
         Finish::Glazed => mix(sp.strap, (0, 0, 0), 0.55),
     };
     fills.push(Fill { points: circle((0.0, 0.0), FIELD, CIRCLE), color: sp.strap });
     let bound = circle((0.0, 0.0), FIELD - sp.gap, CIRCLE);
-    let edge = |points: Vec<Point>, strokes: &mut Vec<Stroke>| strokes.push(Stroke { points, closed: true, role: Role::Tile, color: outline, width: 0.0045 });
+    let edge = |points: Vec<Point>, strokes: &mut Vec<Stroke>| strokes.push(Stroke { points, role: Role::Tile, color: outline, width: 0.0045 });
     for t in tiles(sp.pattern) {
         let Some(inner) = inset(&t.points, sp.gap) else { continue };
         let piece = clip(&inner, &bound);
         if area(&piece) < 2e-4 {
             continue;
         }
-        if t.centre && sp.centre != Centre::Plain {
+        if t.centre {
             centrepiece(sp, &piece, &bound, fills);
             if sp.centre != Centre::Raised {
                 edge(scale(&piece, 0.62), strokes);
@@ -474,7 +465,7 @@ fn field(sp: &Spec, fills: &mut Vec<Fill>, strokes: &mut Vec<Stroke>) {
 /// The tile at the centre, made a focal point: raised and recessed in carving, a metal boss with an
 /// inlay in tilework, and a set gem at the top.
 fn centrepiece(sp: &Spec, piece: &[Point], bound: &[Point], fills: &mut Vec<Fill>) {
-    let m = sp.metal;
+    let m = sp.palette.metal;
     if sp.centre == Centre::Raised {
         raised(fills, piece, bound, m.light, m.dark);
         recessed(fills, &scale(piece, 0.5), m.mid, mix(m.mid, m.dark, 0.7));
@@ -526,13 +517,13 @@ fn gem(fills: &mut Vec<Fill>, c: Point, r: f64, color: Rgb, m: Metal) {
 
 /// The border band between the field and the rim, and its ornament.
 fn border(sp: &Spec, fills: &mut Vec<Fill>, strokes: &mut Vec<Stroke>) {
-    let m = sp.metal;
+    let m = sp.palette.metal;
     let mid = (FIELD + BAND) / 2.0;
     fills.push(Fill { points: circle((0.0, 0.0), BAND, CIRCLE), color: m.mid });
     let fillet = |r: f64, strokes: &mut Vec<Stroke>| {
         let ring = circle((0.0, 0.0), r, CIRCLE);
-        strokes.push(Stroke { points: shift(&ring, (0.005, -0.005)), closed: true, role: Role::Band, color: m.dark, width: 0.018 });
-        strokes.push(Stroke { points: shift(&ring, (-0.003, 0.003)), closed: true, role: Role::Band, color: m.light, width: 0.009 });
+        strokes.push(Stroke { points: shift(&ring, (0.005, -0.005)), role: Role::Band, color: m.dark, width: 0.018 });
+        strokes.push(Stroke { points: shift(&ring, (-0.003, 0.003)), role: Role::Band, color: m.light, width: 0.009 });
     };
     let around = |n: usize, turn: f64| (0..n).map(move |i| PI / 2.0 + turn + 2.0 * PI * i as f64 / n as f64);
     match sp.border {
@@ -689,7 +680,7 @@ fn clip(subject: &[Point], bound: &[Point]) -> Vec<Point> {
 }
 
 /// `a` moved towards `b` by `t`.
-fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
+pub(crate) fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
     let m = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round() as u8;
     (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
 }
@@ -698,25 +689,23 @@ fn polar(r: f64, a: f64) -> Point {
     (r * a.cos(), r * a.sin())
 }
 
-fn hex(c: Rgb) -> String {
+pub(crate) fn hex(c: Rgb) -> String {
     format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2)
 }
 
 /// A coordinate to two places, with no negative zero so equal shapes print equally.
-fn num(v: f64) -> String {
+pub(crate) fn num(v: f64) -> String {
     let s = format!("{v:.2}");
     if s == "-0.00" { "0.00".into() } else { s }
 }
 
-/// An SVG path's `d` for a polyline mapped to the badge's centre and radius.
-fn path(points: &[Point], closed: bool, cx: f64, cy: f64, r: f64) -> String {
+/// An SVG path's `d` for a closed polygon mapped to the centre (cx, cy) and radius r, y up.
+pub(crate) fn path(points: &[Point], cx: f64, cy: f64, r: f64) -> String {
     let mut d = String::new();
     for (i, p) in points.iter().enumerate() {
         let _ = write!(d, "{}{} {}", if i == 0 { "M" } else { " L" }, num(cx + p.0 * r), num(cy - p.1 * r));
     }
-    if closed {
-        d.push_str(" Z");
-    }
+    d.push_str(" Z");
     d
 }
 
@@ -724,7 +713,7 @@ fn path(points: &[Point], closed: bool, cx: f64, cy: f64, r: f64) -> String {
 /// strokes in order, then a vignette over the field and a sheen over the whole.
 pub fn svg(tier: usize, cx: f64, cy: f64, r: f64) -> String {
     let b = badge(tier);
-    let m = b.metal;
+    let m = b.palette.metal;
     let id = format!("badge{}", tier.min(TIERS - 1));
     let mut out = String::from("<g>");
     let _ = write!(out, "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"url(#{id}-rim)\"/>", num(cx), num(cy), num(r));
@@ -741,11 +730,11 @@ pub fn svg(tier: usize, cx: f64, cy: f64, r: f64) -> String {
     );
     let _ = write!(out, "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"url(#{id}-bevel)\"/>", num(cx), num(cy), num(0.96 * r));
     for f in &b.fills {
-        let _ = write!(out, "<path d=\"{}\" fill=\"{}\"/>", path(&f.points, true, cx, cy, r), hex(f.color));
+        let _ = write!(out, "<path d=\"{}\" fill=\"{}\"/>", path(&f.points, cx, cy, r), hex(f.color));
     }
     out.push_str("<g fill=\"none\" stroke-linejoin=\"round\" stroke-linecap=\"round\">");
     for s in &b.strokes {
-        let _ = write!(out, "<path d=\"{}\" stroke=\"{}\" stroke-width=\"{}\"/>", path(&s.points, s.closed, cx, cy, r), hex(s.color), num(s.width * r));
+        let _ = write!(out, "<path d=\"{}\" stroke=\"{}\" stroke-width=\"{}\"/>", path(&s.points, cx, cy, r), hex(s.color), num(s.width * r));
     }
     out.push_str("</g>");
     let _ = write!(out, "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"url(#{id}-vignette)\"/>", num(cx), num(cy), num(FIELD * r));

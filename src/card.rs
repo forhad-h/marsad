@@ -1,8 +1,8 @@
 //! The share card: a 1200×627 PNG with the rank badge, the rank, the token stats and the earned achievements on an ivory ground framed in girih, drawn as SVG and rasterized by resvg with a bundled font.
 
-use crate::badge_art::{self, Point, Rgb};
+use crate::badge_art::{self, Rgb, hex, mix};
 use crate::badges::Badges;
-use crate::model::fmt_tokens;
+use crate::model::fmt_count;
 use anyhow::{Context, Result};
 use resvg::{tiny_skia, usvg};
 use std::f64::consts::PI;
@@ -83,14 +83,13 @@ pub fn achievements(b: &Badges) -> Vec<Achievement> {
         .filter_map(|l| {
             let medal = Medal::from_level(l.level)?;
             let n = l.value.max(0) as u64;
-            let (label, value) = match l.key {
-                "streak" => ("Streak", format!("{n} {}", if n == 1 { "day" } else { "days" })),
-                "skills" => ("Skills", fmt_count(n)),
-                "subagents" => ("Subagents", fmt_count(n)),
-                "busiest_day" => ("Busiest day", fmt_count(n)),
-                _ => (l.name, fmt_count(n)),
+            let value = match l.unit {
+                "days" => format!("{n} {}", if n == 1 { "day" } else { "days" }),
+                _ => fmt_count(n),
             };
-            Some(Achievement { label: label.into(), value, medal })
+            let mut label = l.short.to_string();
+            label[..1].make_ascii_uppercase();
+            Some(Achievement { label, value, medal })
         })
         .collect();
     out.sort_by_key(|a| std::cmp::Reverse(a.medal));
@@ -114,29 +113,6 @@ const TILE: f64 = 58.0;
 const IVORY: Rgb = (0xf8, 0xf3, 0xe6);
 const INK: Rgb = (0x1b, 0x21, 0x2c);
 
-/// A token count for the card: the dashboard's format, with billions and trillions so big totals stay short, and no `.0`.
-pub fn fmt_count(n: u64) -> String {
-    let s = match n {
-        0..1_000_000_000 => fmt_tokens(n),
-        1_000_000_000..1_000_000_000_000 => format!("{:.1}B", n as f64 / 1e9),
-        _ => format!("{:.1}T", n as f64 / 1e12),
-    };
-    match s.find(".0") {
-        Some(i) if i + 3 == s.len() => format!("{}{}", &s[..i], &s[i + 2..]),
-        _ => s,
-    }
-}
-
-fn hex(c: Rgb) -> String {
-    format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2)
-}
-
-/// `a` moved towards `b` by `t`.
-fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
-    let m = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round() as u8;
-    (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
-}
-
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
@@ -146,24 +122,10 @@ fn fmt_date(day: &str) -> String {
     chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").map_or_else(|_| day.to_string(), |d| d.format("%-d %B %Y").to_string())
 }
 
-/// A closed polygon's path, two decimals, no negative zero.
-fn poly(points: &[Point]) -> String {
-    let num = |v: f64| {
-        let s = format!("{v:.2}");
-        if s == "-0.00" { "0.00".into() } else { s }
-    };
-    let mut d = String::new();
-    for (i, p) in points.iter().enumerate() {
-        let _ = write!(d, "{}{} {}", if i == 0 { "M" } else { "L" }, num(p.0), num(p.1));
-    }
-    d.push('Z');
-    d
-}
-
 /// An eight-point star centred on (x, y): {8/k} with k 2 (two squares) or 3 (the sharper star).
 fn star8(x: f64, y: f64, r: f64, k: usize, turn: f64) -> String {
     let outline = badge_art::hankin_star(8, r, turn, PI * k as f64 / 8.0).expect("contact in bounds");
-    poly(&outline.iter().map(|p| (x + p.0, y - p.1)).collect::<Vec<_>>())
+    badge_art::path(&outline, x, y, 1.0)
 }
 
 /// A text run's width in the bundled fonts.
@@ -184,9 +146,9 @@ fn fitted(family: &str, size: f64, spacing: f64, text: &str, max: f64) -> (f64, 
 
 /// One line of text, shrunk to fit `max`.
 #[allow(clippy::too_many_arguments)]
-fn line(s: &mut String, id: &str, x: f64, y: f64, family: &str, size: f64, spacing: f64, color: Rgb, text: &str, max: f64, anchor: &str) {
+fn line(s: &mut String, id: &str, x: f64, y: f64, family: &str, size: f64, spacing: f64, color: Rgb, text: &str, max: f64) {
     let (size, spacing) = fitted(family, size, spacing, text, max);
-    let _ = write!(s, "<text id=\"{id}\" x=\"{x}\" y=\"{y}\" font-size=\"{size}\" font-family=\"{family}\" letter-spacing=\"{spacing}\" text-anchor=\"{anchor}\" fill=\"{}\">{}</text>", hex(color), escape(text));
+    let _ = write!(s, "<text id=\"{id}\" x=\"{x}\" y=\"{y}\" font-size=\"{size}\" font-family=\"{family}\" letter-spacing=\"{spacing}\" fill=\"{}\">{}</text>", hex(color), escape(text));
 }
 
 /// The ground: ivory with a faint star-and-cross lattice, strongest behind the badge.
@@ -253,14 +215,14 @@ fn medal(s: &mut String, x: f64, y: f64, r: f64, m: Medal) {
 
 /// The card as an SVG document.
 pub fn svg(d: &CardData) -> String {
-    let p = badge_art::badge(d.tier).palette;
+    let p = badge_art::palette(d.tier);
     let accent = mix(p.field, INK, 0.15);
     let muted = mix(INK, IVORY, 0.36);
     let rule = mix(p.field, IVORY, 0.72);
     let mut s = String::new();
     let _ = write!(s, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{WIDTH}\" height=\"{HEIGHT}\" viewBox=\"0 0 {WIDTH} {HEIGHT}\" font-family=\"{FAMILY}\">");
     ground(&mut s, p.field);
-    frame(&mut s, p.ground, mix(p.line, p.rosette, 0.25), rule);
+    frame(&mut s, p.ground, mix(p.metal.light, p.metal.mid, 0.25), rule);
 
     // The badge on a cleared ivory disc, with a soft shadow and a halo ring.
     let _ = write!(s, "<defs><filter id=\"shadow\" x=\"-20%\" y=\"-20%\" width=\"140%\" height=\"140%\"><feGaussianBlur stdDeviation=\"9\"/></filter></defs>");
@@ -280,20 +242,20 @@ pub fn svg(d: &CardData) -> String {
     let y = top + (bottom - top - height) / 2.0 + 12.0;
 
     let tier = d.tier.min(badge_art::TIERS - 1) + 1;
-    line(&mut s, "kicker", TEXT_X, y, BOLD, 15.0, 2.2, accent, &format!("AI-ASSISTED ENGINEERING \u{b7} RANK {tier} OF {}", badge_art::TIERS), TEXT_W, "start");
+    line(&mut s, "kicker", TEXT_X, y, BOLD, 15.0, 2.2, accent, &format!("AI-ASSISTED ENGINEERING \u{b7} RANK {tier} OF {}", badge_art::TIERS), TEXT_W);
     if let Some(name) = name {
-        line(&mut s, "name", TEXT_X, y + name_gap, BOLD, 30.0, -0.2, INK, name, TEXT_W, "start");
+        line(&mut s, "name", TEXT_X, y + name_gap, BOLD, 30.0, -0.2, INK, name, TEXT_W);
     }
     let rank_y = y + name_gap + rank_gap;
-    line(&mut s, "rank", TEXT_X - 3.0, rank_y, BOLD, 86.0, -2.0, INK, &d.rank, TEXT_W, "start");
+    line(&mut s, "rank", TEXT_X - 3.0, rank_y, BOLD, 86.0, -2.0, INK, &d.rank, TEXT_W);
 
     let col = TEXT_W / STATS as f64;
     let label_y = rank_y + 64.0;
     let stats = [("all-time", "All time", d.all_time), ("week", "7 days", d.week), ("month", "30 days", d.month), ("daily", "Per day", d.daily_average)];
     for (i, (id, name, value)) in stats.into_iter().enumerate() {
         let x = TEXT_X + col * i as f64;
-        line(&mut s, &format!("{id}-label"), x, label_y, BOLD, 13.0, 1.8, muted, &name.to_uppercase(), col - 14.0, "start");
-        line(&mut s, id, x, label_y + 40.0, BOLD, 30.0, -0.6, if i == 0 { accent } else { INK }, &fmt_count(value), col - 14.0, "start");
+        line(&mut s, &format!("{id}-label"), x, label_y, BOLD, 13.0, 1.8, muted, &name.to_uppercase(), col - 14.0);
+        line(&mut s, id, x, label_y + 40.0, BOLD, 30.0, -0.6, if i == 0 { accent } else { INK }, &fmt_count(value), col - 14.0);
     }
 
     let award_y = label_y + 40.0 + 64.0;
@@ -307,20 +269,24 @@ pub fn svg(d: &CardData) -> String {
     }
 
     let _ = write!(s, "<rect x=\"{TEXT_X}\" y=\"504\" width=\"{TEXT_W}\" height=\"1.5\" fill=\"{}\"/>", hex(rule));
-    line(&mut s, "date", TEXT_X, 545.0, FAMILY, 17.0, 0.0, muted, &fmt_date(&d.date), TEXT_W / 2.0, "start");
+    line(&mut s, "date", TEXT_X, 545.0, FAMILY, 17.0, 0.0, muted, &fmt_date(&d.date), TEXT_W / 2.0);
     let _ = write!(s, "<text id=\"footer\" x=\"{}\" y=\"545\" font-size=\"17\" text-anchor=\"end\" fill=\"{}\">via <tspan font-family=\"{BOLD}\" fill=\"{}\">marsad</tspan></text>", TEXT_X + TEXT_W, hex(muted), hex(accent));
     s.push_str("</svg>");
     s
 }
 
-/// The parser options: only the bundled font, never the system's.
+/// The parser options: only the bundled font, never the system's. The fonts are parsed once, as a
+/// card measures a dozen text runs before it renders.
 fn options() -> usvg::Options<'static> {
-    let mut opt = usvg::Options { font_family: FAMILY.into(), ..Default::default() };
-    let db = opt.fontdb_mut();
-    db.load_font_data(FONT_REGULAR.to_vec());
-    db.load_font_data(FONT_SEMIBOLD.to_vec());
-    db.set_sans_serif_family(FAMILY);
-    opt
+    static FONTS: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> = std::sync::OnceLock::new();
+    let fonts = FONTS.get_or_init(|| {
+        let mut db = usvg::fontdb::Database::new();
+        db.load_font_data(FONT_REGULAR.to_vec());
+        db.load_font_data(FONT_SEMIBOLD.to_vec());
+        db.set_sans_serif_family(FAMILY);
+        std::sync::Arc::new(db)
+    });
+    usvg::Options { font_family: FAMILY.into(), fontdb: fonts.clone(), ..Default::default() }
 }
 
 fn tree(svg: &str) -> Result<usvg::Tree> {
@@ -464,17 +430,6 @@ mod tests {
         let blank = svg(&CardData { name: Some("  ".into()), ..d.clone() });
         assert!(!blank.contains("id=\"name\""), "a blank name is no name");
         assert!(tree(&s).is_ok());
-    }
-
-    #[test]
-    fn counts_switch_to_billions_and_trillions() {
-        assert_eq!(fmt_count(0), "0");
-        assert_eq!(fmt_count(11_300_000), "11.3M");
-        assert_eq!(fmt_count(344_000_000), "344M");
-        assert_eq!(fmt_count(2_000), "2k");
-        assert_eq!(fmt_count(10_050_000), "10.1M");
-        assert_eq!(fmt_count(12_300_000_000), "12.3B");
-        assert_eq!(fmt_count(4_200_000_000_000), "4.2T");
     }
 
     #[test]

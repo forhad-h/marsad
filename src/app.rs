@@ -73,8 +73,6 @@ pub enum View {
     Board,
     /// The rank and achievements, with the badge art.
     Badges,
-    /// Sharing to LinkedIn, drawn over the view it was opened from.
-    Share,
 }
 
 /// Which events the history shows; `f` cycles through them.
@@ -151,9 +149,8 @@ pub struct App {
     pub board: BoardState,
     /// The rank and achievements for the badge view, refreshed after each sync.
     pub badges: Option<Badges>,
+    /// Sharing to LinkedIn, drawn over the current view and given its keys while open.
     pub share: Option<ShareView>,
-    /// The view the share view returns to.
-    share_from: View,
     pub announcement: Option<Announcement>,
     alerts: crate::alerts::Detector,
     update_rx: std::sync::mpsc::Receiver<crate::update::Notice>,
@@ -276,17 +273,26 @@ impl Announcement {
         matches!(view, View::List | View::Badges)
     }
 
-    /// After a frame: the first time the note was on screen, records the levels with `mark`.
-    fn on_drawn(&mut self, visible: bool, now: Instant, mark: impl FnOnce(&Badges)) {
-        if visible && self.drawn.is_none() {
+    /// After a frame: whether the note was on screen for the first time, so its levels are announced now.
+    fn on_drawn(&mut self, visible: bool, now: Instant) -> bool {
+        let first = visible && self.drawn.is_none();
+        if first {
             self.drawn = Some(now);
-            mark(&self.badges);
         }
+        first
     }
 
     fn expired(&self, now: Instant) -> bool {
         self.drawn.is_some_and(|t| now.duration_since(t) >= ANNOUNCE_FOR)
     }
+}
+
+/// The note the footer shows, by priority: an error, a success, a badge level-up, an update.
+pub enum FooterNote<'a> {
+    Error(&'a str),
+    Info(&'a str),
+    Badge(&'a str),
+    Update(&'a crate::update::Notice),
 }
 
 /// What a key asks of the run loop.
@@ -392,7 +398,6 @@ impl App {
             board: BoardState::default(),
             badges: None,
             share: None,
-            share_from: View::List,
             announcement: None,
             alerts: crate::alerts::Detector::default(),
             update_rx: crate::update::background(),
@@ -513,9 +518,13 @@ impl App {
         }
     }
 
-    /// After a background sync: fresh badges, and a note for any level that rose.
-    fn after_sync(&mut self) {
-        let Ok(b) = self.load_badges() else { return };
+    /// After a background sync that changed something: the badges from the stats it recorded, and a
+    /// note for any level that rose.
+    fn after_sync(&mut self, mut stats: crate::badges::Stats) {
+        // The header's figure also counts live usage the index hasn't caught up with.
+        let rank = stats.0.entry(crate::badges::RANK_KEY).or_default();
+        *rank = (*rank).max(self.counter.totals().1);
+        let b = crate::badges::badges(&stats);
         match crate::badges::pending_announcement(&b) {
             Ok(Some(text)) => self.announcement = Some(Announcement::new(text, b.clone())),
             Ok(None) => {}
@@ -526,43 +535,39 @@ impl App {
 
     fn open_share(&mut self) {
         self.share = Some(ShareView::start(crate::share_view::Env::real(self.counter.totals().1)));
-        self.share_from = self.view;
-        self.view = View::Share;
     }
 
-    /// The view the share view is drawn over.
-    pub fn share_from(&self) -> View {
-        self.share_from
+    /// The footer's note now. A badge note shows only in its views and waits while a share is open.
+    pub fn footer_note(&self) -> Option<FooterNote<'_>> {
+        if let Some(e) = &self.error {
+            return Some(FooterNote::Error(e));
+        }
+        if let Some(i) = &self.info {
+            return Some(FooterNote::Info(i));
+        }
+        let badge = self.announcement.as_ref().filter(|_| self.share.is_none() && Announcement::shows_in(self.view));
+        if let Some(a) = badge {
+            return Some(FooterNote::Badge(&a.text));
+        }
+        self.update.as_ref().map(FooterNote::Update)
     }
 
-    fn close_share(&mut self) {
-        self.share = None;
-        self.view = self.share_from;
-    }
-
-    /// The badge note the footer shows now: only in its views, and not over an error or a success note.
-    pub fn announcing(&self) -> Option<&str> {
-        let a = self.announcement.as_ref()?;
-        (Announcement::shows_in(self.view) && self.error.is_none() && self.info.is_none()).then_some(a.text.as_str())
+    fn announcing(&self) -> bool {
+        matches!(self.footer_note(), Some(FooterNote::Badge(_)))
     }
 
     /// After each frame: records a badge note the first time it was drawn, and lets it expire.
     fn after_draw(&mut self) {
         let now = Instant::now();
-        let visible = self.announcing().is_some();
-        let mut failed = None;
-        if let Some(a) = self.announcement.as_mut() {
-            a.on_drawn(visible, now, |b| {
-                if let Err(e) = crate::badges::mark_announced(b) {
-                    failed = Some(format!("couldn't save the announced badges: {e:#}"));
-                }
-            });
-            if a.expired(now) {
-                self.announcement = None;
-            }
+        let shown = self.announcing();
+        let Some(a) = self.announcement.as_mut() else { return };
+        if a.on_drawn(shown, now)
+            && let Err(e) = crate::badges::mark_announced(&a.badges)
+        {
+            self.error = Some(format!("couldn't save the announced badges: {e:#}"));
         }
-        if failed.is_some() {
-            self.error = failed;
+        if a.expired(now) {
+            self.announcement = None;
         }
     }
 
@@ -606,9 +611,8 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        self.usage.tick();
-        if std::mem::take(&mut self.usage.synced) {
-            self.after_sync();
+        if let Some(stats) = self.usage.tick() {
+            self.after_sync(stats);
         }
         if let Some(share) = self.share.as_mut() {
             share.tick();
@@ -694,20 +698,16 @@ impl App {
 impl App {
     /// Handles one key press. The share view gets keys first, so `q` there cancels the share.
     fn on_key(&mut self, key: KeyEvent) -> Action {
-        if self.view == View::Share {
-            let Some(share) = self.share.as_mut() else {
-                self.view = self.share_from;
-                return Action::None;
-            };
+        if let Some(share) = self.share.as_mut() {
             match share.on_key(key) {
                 Outcome::Stay => {}
-                Outcome::Close => self.close_share(),
+                Outcome::Close => self.share = None,
                 Outcome::EditPost(text) => return Action::EditPost(text),
             }
             return Action::None;
         }
         // Esc dismisses a badge note before it does anything else.
-        if key.code == KeyCode::Esc && self.announcing().is_some() {
+        if key.code == KeyCode::Esc && self.announcing() {
             self.announcement = None;
             return Action::None;
         }
@@ -919,18 +919,16 @@ mod tests {
     fn an_announcement_waits_for_its_view_and_is_recorded_once_drawn() {
         let mut a = Announcement::new("rank up: Expert · new: gold streak".into(), badges());
         let start = Instant::now();
-        let mut marks = 0;
-        // Arrives while the share view is open: not on screen, so not recorded.
-        a.on_drawn(Announcement::shows_in(View::Share), start, |_| marks += 1);
-        assert_eq!((marks, a.drawn), (0, None));
+        // Arrives while a share is open: not on screen, so not recorded.
+        assert!(!a.on_drawn(false, start));
+        assert_eq!(a.drawn, None);
         assert!(!a.expired(start + ANNOUNCE_FOR * 2), "a note never drawn never expires");
-        // The share view closes back to the list: drawn, recorded once.
-        a.on_drawn(Announcement::shows_in(View::List), start, |_| marks += 1);
-        a.on_drawn(Announcement::shows_in(View::Badges), start, |_| marks += 1);
-        assert_eq!(marks, 1, "both levels in one note, recorded once");
+        // The share closes over the list: drawn, recorded once.
+        assert!(a.on_drawn(Announcement::shows_in(View::List), start), "both levels in one note");
+        assert!(!a.on_drawn(Announcement::shows_in(View::Badges), start), "recorded once");
         assert!(!a.expired(start + ANNOUNCE_FOR / 2), "it outlives the next key press");
         assert!(a.expired(start + ANNOUNCE_FOR));
-        for view in [View::History, View::Agents, View::Usage, View::Board, View::Share] {
+        for view in [View::History, View::Agents, View::Usage, View::Board] {
             assert!(!Announcement::shows_in(view));
         }
     }

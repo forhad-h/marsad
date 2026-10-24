@@ -1,4 +1,4 @@
-use crate::app::{App, HistoryFilter, View};
+use crate::app::{App, FooterNote, HistoryFilter, View};
 use crate::update::Notice;
 use crate::usage::{Pane, Usage};
 use crate::model::{ContextInfo, DAY_FMT, EventKind, Level, fmt_tokens, MAIN_AGENT, RateWindow, Session, SortKey, Status, TimelineEntry, TokenUsage, Via};
@@ -218,20 +218,6 @@ pub fn draw(f: &mut Frame, app: &App) {
             draw_badges(f, body, app);
             vec![("p", "share".into()), ("esc", "back".into()), ("q", "quit".into())]
         }
-        (View::Share, _) => {
-            if app.share_from() == View::Badges {
-                draw_badges(f, body, app);
-            } else {
-                draw_list(f, body, app, &visible);
-            }
-            match &app.share {
-                Some(share) => {
-                    draw_share(f, body, share, app.tick);
-                    share.keys().into_iter().map(|(k, label)| (k, label.to_string())).collect()
-                }
-                None => vec![],
-            }
-        }
         (View::Board, _) => {
             draw_board(f, body, app);
             vec![
@@ -261,19 +247,25 @@ pub fn draw(f: &mut Frame, app: &App) {
             ]
         }
     };
+    let keys = match &app.share {
+        Some(share) => {
+            draw_share(f, body, share, app.tick);
+            share.keys().into_iter().map(|(k, label)| (k, label.to_string())).collect()
+        }
+        None => keys,
+    };
     let mut spans = vec![Span::raw(" ")];
     for (k, label) in keys {
         spans.push(k.to_string().bold());
         spans.push(format!(" {label}  ").dark_gray());
     }
-    let note = match (&app.error, &app.info, app.announcing(), &app.update) {
-        (Some(e), ..) => Some((format!("{e} "), Color::Red)),
-        (None, Some(i), ..) => Some((i.clone(), Color::Green)),
-        (None, None, Some(a), _) => Some((format!("★ {a} "), Color::Green)),
-        (None, None, None, Some(Notice::Available(v))) => Some((format!("v{v} available · run `marsad update` "), Color::Yellow)),
-        (None, None, None, Some(Notice::Installed(v))) => Some((format!("updated to v{v} · restart marsad "), Color::Yellow)),
-        (None, None, None, None) => None,
-    };
+    let note = app.footer_note().map(|n| match n {
+        FooterNote::Error(e) => (format!("{e} "), Color::Red),
+        FooterNote::Info(i) => (i.to_string(), Color::Green),
+        FooterNote::Badge(a) => (format!("★ {a} "), Color::Green),
+        FooterNote::Update(Notice::Available(v)) => (format!("v{v} available · run `marsad update` "), Color::Yellow),
+        FooterNote::Update(Notice::Installed(v)) => (format!("updated to v{v} · restart marsad "), Color::Yellow),
+    });
     if let Some(note) = &app.copy_note {
         draw_copy_note(f, copy_note, note);
     }
@@ -387,8 +379,7 @@ fn rgb(c: crate::badge_art::Rgb) -> Color {
 
 /// `c` lightened towards white by `t`, so dark glazes stay visible on a dark terminal.
 fn lighten(c: crate::badge_art::Rgb, t: f64) -> Color {
-    let m = |x: u8| (x as f64 + (255.0 - x as f64) * t).round() as u8;
-    Color::Rgb(m(c.0), m(c.1), m(c.2))
+    rgb(crate::badge_art::mix(c, (0xff, 0xff, 0xff), t))
 }
 
 fn level_color(level: usize) -> Color {
@@ -397,14 +388,6 @@ fn level_color(level: usize) -> Color {
         2 => Color::Rgb(0xc0, 0xc8, 0xd0),
         1 => Color::Rgb(0xcd, 0x7f, 0x32),
         _ => Color::DarkGray,
-    }
-}
-
-/// An achievement's value in its unit: tokens in short form, counts as they are.
-fn badge_value(value: i64, unit: &str) -> String {
-    match unit {
-        "tokens" => format!("{} tokens", crate::card::fmt_count(value.max(0) as u64)),
-        _ => format!("{value} {unit}"),
     }
 }
 
@@ -432,17 +415,17 @@ fn draw_badges(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn badge_lines(b: &Badges, width: usize) -> Vec<Line<'static>> {
-    let palette = crate::badge_art::badge(b.rank.tier).palette;
+    let palette = crate::badge_art::palette(b.rank.tier);
     // Room for the longest label after a bar, " 1000 subagents to gold".
     let bar_width = width.saturating_sub(26).clamp(10, 40);
-    let tokens = crate::card::fmt_count(b.rank.tokens.max(0) as u64);
+    let tokens = crate::badges::fmt_value(b.rank.tokens, "tokens");
     let next = match (b.rank.next, b.rank.next_threshold) {
-        (Some(name), Some(at)) => format!("{tokens} tokens · {} to {name}", crate::card::fmt_count((at - b.rank.tokens).max(0) as u64)),
-        _ => format!("{tokens} tokens · top tier"),
+        (Some(name), Some(at)) => format!("{tokens} · {} to {name}", crate::badges::fmt_value(at - b.rank.tokens, "tokens")),
+        _ => format!("{tokens} · top tier"),
     };
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(b.rank.name.to_string(), Style::new().fg(lighten(palette.line, 0.0)).bold()),
+            Span::styled(b.rank.name.to_string(), Style::new().fg(rgb(palette.metal.light)).bold()),
             dim(format!("   rank {} of {}", b.rank.tier + 1, crate::badges::TIERS.len())),
         ]),
         Line::from(vec![
@@ -461,33 +444,49 @@ fn badge_lines(b: &Badges, width: usize) -> Vec<Line<'static>> {
 fn achievement_lines(a: &BadgeLevel, bar_width: usize) -> Vec<Line<'static>> {
     let level = a.level_name.unwrap_or("not yet");
     let progress = match (a.next_level, a.next_threshold) {
-        (Some(next), Some(at)) => format!(" {} to {next}", badge_value((at - a.value).max(0), a.unit)),
+        (Some(next), Some(at)) => format!(" {} to {next}", crate::badges::fmt_value((at - a.value).max(0), a.unit)),
         _ => " complete".to_string(),
     };
     vec![
         Line::from(vec![
             Span::styled(format!("{:<16}", a.name), Style::new().bold()),
             Span::styled(format!("{level:<8}"), Style::new().fg(level_color(a.level)).bold()),
-            Span::raw(badge_value(a.value, a.unit)),
+            Span::raw(crate::badges::fmt_value(a.value, a.unit)),
         ]),
         Line::from(vec![Span::styled(bar(a.progress, bar_width), Style::new().fg(level_color(a.level + 1))), dim(progress)]),
         Line::from(""),
     ]
 }
 
+/// A tier's badge as coloured line segments, built once per tier: the geometry is too costly to
+/// rebuild on every frame.
+fn badge_segments(tier: usize) -> &'static [CanvasLine] {
+    static SEGMENTS: [std::sync::OnceLock<Vec<CanvasLine>>; crate::badge_art::TIERS] = [const { std::sync::OnceLock::new() }; crate::badge_art::TIERS];
+    let tier = tier.min(crate::badge_art::TIERS - 1);
+    SEGMENTS[tier].get_or_init(|| {
+        let badge = crate::badge_art::badge(tier);
+        let (metal, field) = (badge.palette.metal, badge.palette.field);
+        badge
+            .segments()
+            .into_iter()
+            .map(|((x1, y1), (x2, y2), role)| {
+                let color = match role {
+                    crate::badge_art::Role::Rim => rgb(metal.mid),
+                    crate::badge_art::Role::Band => rgb(metal.light),
+                    crate::badge_art::Role::Tile => lighten(field, 0.3),
+                };
+                CanvasLine { x1, y1, x2, y2, color }
+            })
+            .collect()
+    })
+}
+
 /// The tier's badge drawn with braille lines: rim, band ornament and tile outlines.
 fn draw_badge_art(f: &mut Frame, area: Rect, tier: usize) {
-    let badge = crate::badge_art::badge(tier);
-    let (metal, field) = (badge.metal, badge.palette.field);
-    let segments = badge.segments();
-    let canvas = Canvas::default().marker(Marker::Braille).x_bounds([-1.05, 1.05]).y_bounds([-1.05, 1.05]).paint(move |ctx| {
-        for &((x1, y1), (x2, y2), role) in &segments {
-            let color = match role {
-                crate::badge_art::Role::Rim => rgb(metal.mid),
-                crate::badge_art::Role::Band => rgb(metal.light),
-                crate::badge_art::Role::Tile => lighten(field, 0.3),
-            };
-            ctx.draw(&CanvasLine { x1, y1, x2, y2, color });
+    let segments = badge_segments(tier);
+    let canvas = Canvas::default().marker(Marker::Braille).x_bounds([-1.05, 1.05]).y_bounds([-1.05, 1.05]).paint(|ctx| {
+        for line in segments {
+            ctx.draw(line);
         }
     });
     f.render_widget(canvas, area);
@@ -535,9 +534,9 @@ fn draw_share(f: &mut Frame, area: Rect, share: &ShareView, tick: u64) {
     }
 }
 
-fn draw_share_preview(f: &mut Frame, area: Rect, share: &ShareView, post: &str, editing: Option<(String, usize)>, note: Option<String>, warning: Option<&str>) {
+fn draw_share_preview(f: &mut Frame, area: Rect, share: &ShareView, post: &str, editing: Option<(&[char], usize)>, note: Option<String>, warning: Option<&str>) {
     let width = area.width as usize;
-    let edit_rows = editing.as_ref().map_or(0, |(t, _)| (t.chars().count() + 7) / width.max(1) + 3) as u16;
+    let edit_rows = editing.map_or(0, |(t, _)| (t.len() + 7) / width.max(1) + 3) as u16;
     let status: Vec<Line> = warning
         .map(|w| Line::from(w.to_string().red()))
         .into_iter()
@@ -551,8 +550,7 @@ fn draw_share_preview(f: &mut Frame, area: Rect, share: &ShareView, post: &str, 
         Constraint::Length(1),
     ])
     .areas(area);
-    if let Some((text, cursor)) = editing {
-        let chars: Vec<char> = text.chars().collect();
+    if let Some((chars, cursor)) = editing {
         let (before, at, after): (String, String, String) = (
             chars[..cursor].iter().collect(),
             chars.get(cursor).map_or(" ".to_string(), |c| c.to_string()),

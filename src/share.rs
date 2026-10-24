@@ -3,7 +3,8 @@
 //! that save, open and reveal. The TUI share view and `marsad share --print` both use it.
 
 use crate::badges::{self, Badges};
-use crate::card::{self, fmt_count};
+use crate::card;
+use crate::model::fmt_count;
 use crate::model::MAIN_AGENT;
 use crate::store;
 use anyhow::Context;
@@ -672,23 +673,18 @@ fn reveal_steps(platform: Platform, path: &Path) -> Vec<Step> {
 
 /// Runs one step for real.
 pub fn launch(step: &Step) -> Result<(), String> {
+    if !step.wait {
+        let args: Vec<&str> = step.args.iter().map(String::as_str).collect();
+        return crate::alerts::detached(step.program, &args).map_err(|e| format!("couldn't run {}: {e}", step.program));
+    }
     let mut cmd = Command::new(step.program);
     cmd.args(&step.args);
-    if step.wait {
-        return match run_captured(&mut cmd, b"", TOOL_WAIT, &AtomicBool::new(false)) {
-            Ok(out) if out.success => Ok(()),
-            Ok(out) => Err(first_line(&String::from_utf8_lossy(&out.stderr)).unwrap_or("failed").to_string()),
-            Err(RunError::NotFound) => Err(format!("{} is not installed", step.program)),
-            Err(RunError::Spawn(why)) => Err(why),
-            Err(_) => Err(format!("{} did not answer", step.program)),
-        };
-    }
-    match cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
-        Ok(mut child) => {
-            std::thread::spawn(move || child.wait());
-            Ok(())
-        }
-        Err(e) => Err(format!("couldn't run {}: {e}", step.program)),
+    match run_captured(&mut cmd, b"", TOOL_WAIT, &AtomicBool::new(false)) {
+        Ok(out) if out.success => Ok(()),
+        Ok(out) => Err(first_line(&String::from_utf8_lossy(&out.stderr)).unwrap_or("failed").to_string()),
+        Err(RunError::NotFound) => Err(format!("{} is not installed", step.program)),
+        Err(RunError::Spawn(why)) => Err(why),
+        Err(_) => Err(format!("{} did not answer", step.program)),
     }
 }
 

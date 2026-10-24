@@ -106,12 +106,10 @@ pub struct Usage {
     pub skill_idx: usize,
     pub drill: Option<Drill>,
     pub syncing: bool,
-    /// Set when a background sync finishes; the dashboard takes it to refresh the badges.
-    pub synced: bool,
     pub error: Option<String>,
     conn: Option<Connection>,
-    /// Delivers whether a background sync changed any rows.
-    rx: Option<Receiver<Result<bool, String>>>,
+    /// Delivers a background sync's report.
+    rx: Option<Receiver<Result<store::SyncReport, String>>>,
     last_sync: Option<Instant>,
 }
 
@@ -130,7 +128,6 @@ impl Usage {
             skill_idx: 0,
             drill: None,
             syncing: false,
-            synced: false,
             error: None,
             conn: None,
             rx: None,
@@ -138,24 +135,26 @@ impl Usage {
         }
     }
 
-    /// Called every frame: collects a finished sync and starts the next one when due.
-    pub fn tick(&mut self) {
+    /// Called every frame: collects a finished sync and starts the next one when due. Returns the badge
+    /// stats a sync recorded when it changed anything.
+    pub fn tick(&mut self) -> Option<crate::badges::Stats> {
         let finished = match self.rx.as_ref().map(|rx| rx.try_recv()) {
             Some(Ok(res)) => Some(res),
             // The sync thread died without reporting (e.g. a panic): surface it and allow a retry.
             Some(Err(TryRecvError::Disconnected)) => Some(Err("sync stopped unexpectedly".into())),
             Some(Err(TryRecvError::Empty)) | None => None,
         };
+        let mut badges = None;
         if let Some(res) = finished {
             self.rx = None;
             self.syncing = false;
             match res {
-                Ok(changed) => {
+                Ok(report) => {
                     self.error = None;
-                    self.synced = true;
-                    if changed {
+                    if report.updated + report.pruned > 0 {
                         self.reload();
                     }
+                    badges = report.badges;
                 }
                 Err(e) => self.error = Some(e),
             }
@@ -163,6 +162,7 @@ impl Usage {
         if self.rx.is_none() && self.last_sync.is_none_or(|t| t.elapsed() >= SYNC_EVERY) {
             self.start_sync();
         }
+        badges
     }
 
     pub fn start_sync(&mut self) {
@@ -171,7 +171,7 @@ impl Usage {
         }
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let res = store::open_and_sync().map(|r| r.updated + r.pruned > 0).map_err(|e| e.to_string());
+            let res = store::open_and_sync().map_err(|e| e.to_string());
             let _ = tx.send(res);
         });
         self.rx = Some(rx);

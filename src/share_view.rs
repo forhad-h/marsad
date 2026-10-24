@@ -5,7 +5,7 @@ use crate::clipboard::Copied;
 use crate::share::{self, Desktop, Draft, Launch, Note, Snapshot, Step};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::cell::Cell;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::sync::Arc;
@@ -43,12 +43,14 @@ impl Env {
     }
 }
 
-/// Syncs, then freezes the snapshot the post, the card and its file name share.
+/// Syncs, then freezes the snapshot the post, the card and its file name share. git is asked for the
+/// user's name meanwhile, since it may take up to two seconds.
 fn prepare(rank_total: i64) -> anyhow::Result<Snapshot> {
+    let name = std::thread::spawn(share::git_user_name);
     crate::store::open_and_sync()?;
     let conn = crate::store::open_readonly()?;
     let total = rank_total.max(crate::store::lifetime(&conn)?.total);
-    share::snapshot(&conn, &crate::store::day_n_ago(0), total, dirs::home_dir(), share::git_user_name())
+    share::snapshot(&conn, &crate::store::day_n_ago(0), total, dirs::home_dir(), name.join().ok().flatten())
 }
 
 /// What a key did to the view.
@@ -126,7 +128,7 @@ enum Phase {
 /// What the dashboard draws.
 pub enum Screen<'a> {
     Busy(&'static str),
-    Preview { post: String, editing: Option<(String, usize)>, note: Option<String>, warning: Option<&'a str> },
+    Preview { post: String, editing: Option<(&'a [char], usize)>, note: Option<String>, warning: Option<&'a str> },
     Done(&'a Done),
     Failed(&'a str),
 }
@@ -201,7 +203,7 @@ impl ShareView {
             Phase::Preview | Phase::Editing { .. } => Screen::Preview {
                 post: self.post(),
                 editing: match &self.phase {
-                    Phase::Editing { text, cursor } => Some((text.iter().collect(), *cursor)),
+                    Phase::Editing { text, cursor } => Some((text.as_slice(), *cursor)),
                     _ => None,
                 },
                 note: self.note.as_ref().map(Note::message),
@@ -298,7 +300,7 @@ impl ShareView {
         let path = self.card_path();
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let _ = tx.send(save(&s, &path));
+            let _ = tx.send(share::save_card(&s, &path).map_err(|e| format!("{e:#}")));
         });
         self.warning = None;
         self.phase = Phase::Saving(rx);
@@ -424,10 +426,6 @@ impl ShareView {
     }
 }
 
-fn save(s: &Snapshot, path: &Path) -> Result<(), String> {
-    share::save_card(s, path).map_err(|e| format!("{e:#}"))
-}
-
 /// Opens `text` in `$VISUAL`, `$EDITOR`, or `vi` (`notepad` on Windows), and returns what was saved.
 pub fn edit_in_editor(text: &str) -> Result<String, String> {
     let editor = ["VISUAL", "EDITOR"]
@@ -452,6 +450,7 @@ pub fn edit_in_editor(text: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
@@ -587,7 +586,7 @@ mod tests {
         for c in " q".chars() {
             assert_eq!(v.on_key(key(KeyCode::Char(c))), Outcome::Stay, "typing {c:?} while editing never closes");
         }
-        assert!(matches!(v.screen(), Screen::Preview { editing: Some((ref t, _)), .. } if t.ends_with(" q")));
+        assert!(matches!(v.screen(), Screen::Preview { editing: Some((t, _)), .. } if t.ends_with(&[' ', 'q'])));
         assert_eq!(v.on_key(key(KeyCode::Esc)), Outcome::Stay, "esc leaves the edit, not the share");
         assert_eq!(v.post(), before, "esc restores the previous line");
 

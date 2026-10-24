@@ -326,14 +326,18 @@ pub struct SyncReport {
     pub failed: usize,
     /// Rows removed by the retention setting.
     pub pruned: usize,
+    /// The badge stats recorded after a sync that changed anything.
+    pub badges: Option<crate::badges::Stats>,
 }
 
 /// Indexes new or changed transcripts under `~/.claude/projects`, then prunes detail rows
 /// older than the retention (unless it is forever). The permanent counter is never pruned.
 pub fn sync(conn: &mut Connection) -> anyhow::Result<SyncReport> {
-    let report = sync_dir(conn, &crate::claude_dir().join("projects"), retention())?;
-    // Raised after every sync, so later pruning or a lowering import never revokes a badge.
-    crate::badges::record(conn, lifetime(conn)?.total)?;
+    let mut report = sync_dir(conn, &crate::claude_dir().join("projects"), retention())?;
+    // Raised after every sync that changed data, so later pruning or a lowering import never revokes a badge.
+    if report.updated + report.pruned > 0 {
+        report.badges = Some(crate::badges::record(conn, lifetime(conn)?.total)?);
+    }
     Ok(report)
 }
 

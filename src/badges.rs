@@ -140,6 +140,9 @@ pub struct Rank {
 pub struct Level {
     pub key: &'static str,
     pub name: &'static str,
+    /// Short name, as on the card ("busiest day").
+    #[serde(skip)]
+    pub short: &'static str,
     pub value: i64,
     pub unit: &'static str,
     /// 0 none, 1 bronze, 2 silver, 3 gold.
@@ -186,6 +189,7 @@ pub fn badges(stats: &Stats) -> Badges {
             Level {
                 key: a.key,
                 name: a.name,
+                short: a.short,
                 value,
                 unit: a.unit,
                 level,
@@ -292,24 +296,12 @@ pub fn run(a: BadgesArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Thresholds read as 1M, 250M, 5B.
-fn fmt_threshold(n: i64, unit: &str) -> String {
-    if unit != "tokens" {
-        return format!("{n} {unit}");
+/// A badge value in its unit: tokens in short form (344M, 5B), counts as they are.
+pub fn fmt_value(n: i64, unit: &str) -> String {
+    match unit {
+        "tokens" => format!("{} tokens", crate::model::fmt_count(n.max(0) as u64)),
+        _ => format!("{n} {unit}"),
     }
-    let n = n as f64;
-    let s = match n {
-        _ if n >= 1e9 => format!("{}B", trim(n / 1e9)),
-        _ if n >= 1e6 => format!("{}M", trim(n / 1e6)),
-        _ if n >= 1e3 => format!("{}k", trim(n / 1e3)),
-        _ => trim(n),
-    };
-    format!("{s} tokens")
-}
-
-fn trim(v: f64) -> String {
-    let s = format!("{v:.1}");
-    s.strip_suffix(".0").map_or(s.clone(), str::to_string)
 }
 
 fn bar(p: f64) -> String {
@@ -343,20 +335,15 @@ fn render(b: &Badges, format: Format) -> String {
             out
         }
         Format::Table => {
-            let tokens = crate::model::fmt_tokens(r.tokens.max(0) as u64);
             let next = match (r.next, r.next_threshold) {
-                (Some(n), Some(t)) => format!("next {n} at {}", fmt_threshold(t, "tokens")),
+                (Some(n), Some(t)) => format!("next {n} at {}", fmt_value(t, "tokens")),
                 _ => "top rank".to_string(),
             };
-            let mut out = format!("Rank: {} ({tokens} tokens)  {}  {next}\n", r.name, bar(r.progress));
+            let mut out = format!("Rank: {} ({})  {}  {next}\n", r.name, fmt_value(r.tokens, "tokens"), bar(r.progress));
             for a in &b.achievements {
-                let value = if a.unit == "tokens" {
-                    format!("{} tokens", crate::model::fmt_tokens(a.value.max(0) as u64))
-                } else {
-                    format!("{} {}", a.value, a.unit)
-                };
+                let value = fmt_value(a.value, a.unit);
                 let next = match (a.next_level, a.next_threshold) {
-                    (Some(n), Some(t)) => format!("next {n} at {}", fmt_threshold(t, a.unit)),
+                    (Some(n), Some(t)) => format!("next {n} at {}", fmt_value(t, a.unit)),
                     _ => "complete".to_string(),
                 };
                 out += &format!(
@@ -531,7 +518,7 @@ mod tests {
         assert_eq!(csv.lines().count(), 1 + 1 + ACHIEVEMENTS.len());
         assert!(csv.lines().nth(1).unwrap().starts_with("rank,344000000,Expert,Master,1000000000,"));
         let table = render(&b, Format::Table);
-        assert!(table.starts_with("Rank: Expert (344.0M tokens)"), "{table}");
+        assert!(table.starts_with("Rank: Expert (344M tokens)"), "{table}");
         assert!(table.contains("next Master at 1B tokens"));
     }
 }

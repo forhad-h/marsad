@@ -232,6 +232,19 @@ pub fn fmt_tokens(n: u64) -> String {
     }
 }
 
+/// A token count in short form: `fmt_tokens`, with billions and trillions so big totals stay short, and no `.0`.
+pub fn fmt_count(n: u64) -> String {
+    let s = match n {
+        0..1_000_000_000 => fmt_tokens(n),
+        1_000_000_000..1_000_000_000_000 => format!("{:.1}B", n as f64 / 1e9),
+        _ => format!("{:.1}T", n as f64 / 1e12),
+    };
+    match s.find(".0") {
+        Some(i) if i + 3 == s.len() => format!("{}{}", &s[..i], &s[i + 2..]),
+        _ => s,
+    }
+}
+
 /// Local wall-clock time a rate-limit window resets: `16:30` today,
 /// `Tue 09:00` within the week, `Oct 21 09:00` beyond.
 pub fn fmt_reset(ts: f64) -> String {
@@ -615,6 +628,17 @@ pub fn sort_sessions(list: &mut [&Session], key: SortKey, reversed: bool, compac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_switch_to_billions_and_trillions() {
+        assert_eq!(fmt_count(0), "0");
+        assert_eq!(fmt_count(11_300_000), "11.3M");
+        assert_eq!(fmt_count(344_000_000), "344M");
+        assert_eq!(fmt_count(2_000), "2k");
+        assert_eq!(fmt_count(10_050_000), "10.1M");
+        assert_eq!(fmt_count(12_300_000_000), "12.3B");
+        assert_eq!(fmt_count(4_200_000_000_000), "4.2T");
+    }
 
     #[test]
     fn model_windows() {
