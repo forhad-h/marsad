@@ -1,8 +1,11 @@
+use crate::badges::Badges;
 use crate::events;
 use crate::jsonl::JsonlTail;
 use crate::model::{EventKind, RateWindow, Session, SortKey, Status, Subagent, TimelineEntry};
+use crate::share_view::{Action, ShareView};
 use crate::transcript::{self, TranscriptReader};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::execute;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -68,6 +71,8 @@ pub enum View {
     Usage,
     /// The shared AGENT-BOARD.md of the selected session's repo.
     Board,
+    /// The rank, the achievements and the progress to each next level.
+    Badges,
 }
 
 /// Which events the history shows; `f` cycles through them.
@@ -142,6 +147,11 @@ pub struct App {
     /// The launch command to copy by hand when the clipboard couldn't be reached; the next key clears it.
     pub copy_note: Option<CopyNote>,
     pub board: BoardState,
+    pub badges: BadgeState,
+    /// A rank-up or new achievement level for the footer.
+    pub announcement: Announcement,
+    /// The share flow, drawn over the list or the badge view; it gets every key first.
+    pub share: Option<ShareView>,
     alerts: crate::alerts::Detector,
     update_rx: std::sync::mpsc::Receiver<crate::update::Notice>,
     log: JsonlTail,
@@ -241,6 +251,82 @@ impl BoardState {
     }
 }
 
+/// The badge view's data, loaded after `B` and after each sync, never while drawing.
+#[derive(Default)]
+pub struct BadgeState {
+    pub badges: Option<Badges>,
+    /// The rank's badge art, kept for the tier it was built for.
+    pub art: Option<(usize, crate::badge_art::Badge)>,
+    pub error: Option<String>,
+    /// Load before the next frame.
+    due: bool,
+}
+
+/// How long a drawn announcement stays in the footer.
+const ANNOUNCE_FOR: Duration = Duration::from_secs(10);
+
+/// One footer note for levels that rose (KTD5): shown only on the list and badge views and never
+/// over the share view, it outlives key presses, stays 10 s or until Esc, and is recorded as
+/// announced once it has been drawn.
+#[derive(Default)]
+pub struct Announcement {
+    pending: Option<(String, Badges)>,
+    drawn_at: Option<Instant>,
+}
+
+impl Announcement {
+    /// A note for levels that rose. The same note offered again (a sync before it was drawn) is kept as is.
+    pub fn offer(&mut self, text: String, levels: Badges) {
+        if self.pending.as_ref().is_some_and(|(t, _)| *t == text) {
+            return;
+        }
+        self.pending = Some((text, levels));
+        self.drawn_at = None;
+    }
+
+    /// The note, if this screen may show it.
+    pub fn text(&self, view: View, sharing: bool) -> Option<&str> {
+        let here = matches!(view, View::List | View::Badges) && !sharing;
+        self.pending.as_ref().filter(|_| here).map(|(t, _)| t.as_str())
+    }
+
+    /// After a frame: the first time the note was on screen, returns the levels to record; once it
+    /// has been up for `ANNOUNCE_FOR`, it goes.
+    pub fn drawn(&mut self, now: Instant, view: View, sharing: bool) -> Option<Badges> {
+        self.text(view, sharing)?;
+        match self.drawn_at {
+            None => {
+                self.drawn_at = Some(now);
+                self.pending.as_ref().map(|(_, b)| b.clone())
+            }
+            Some(at) => {
+                if now.duration_since(at) >= ANNOUNCE_FOR {
+                    self.pending = None;
+                }
+                None
+            }
+        }
+    }
+
+    /// Esc on a note that is up dismisses it; returns whether it did.
+    pub fn dismiss(&mut self, view: View, sharing: bool) -> bool {
+        let up = self.drawn_at.is_some() && self.text(view, sharing).is_some();
+        if up {
+            self.pending = None;
+        }
+        up
+    }
+}
+
+/// What the run loop does after a key.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Flow {
+    Stay,
+    Quit,
+    /// Suspend the terminal and edit the post in `$EDITOR`.
+    EditPost(String),
+}
+
 /// Indexed (session, agent) key -> tokens.
 type DayTotals = HashMap<(String, String), i64>;
 
@@ -333,6 +419,9 @@ impl App {
             info: None,
             copy_note: None,
             board: BoardState::default(),
+            badges: BadgeState::default(),
+            announcement: Announcement::default(),
+            share: None,
             alerts: crate::alerts::Detector::default(),
             update_rx: crate::update::background(),
             log: JsonlTail::new(dir.join("events.jsonl")),
@@ -436,6 +525,51 @@ impl App {
         self.copy_note = Some(CopyNote { headline, command, path });
     }
 
+    /// Reads the shown badge values (never lower than the stored best) for the header's all-time
+    /// figure, and rebuilds the art when the tier changed.
+    fn load_badges(&mut self) -> Option<Badges> {
+        let total = self.counter.totals().1;
+        let loaded = crate::store::open_readonly().and_then(|conn| crate::badges::shown(&conn, total)).map(|s| crate::badges::badges(&s));
+        match loaded {
+            Ok(b) => {
+                let tier = b.rank.tier;
+                if self.badges.art.as_ref().is_none_or(|(t, _)| *t != tier) {
+                    self.badges.art = Some((tier, crate::badge_art::badge(tier)));
+                }
+                self.badges.badges = Some(b.clone());
+                self.badges.error = None;
+                Some(b)
+            }
+            Err(e) => {
+                self.badges.error = Some(format!("{e:#}"));
+                None
+            }
+        }
+    }
+
+    /// After a sync: fresh badge values, and a footer note for any level that rose.
+    fn after_sync(&mut self) {
+        if let Some(b) = self.load_badges()
+            && let Ok(Some(text)) = crate::badges::pending_announcement(&b)
+        {
+            self.announcement.offer(text, b);
+        }
+    }
+
+    /// After a frame: records an announcement the first time it was drawn.
+    fn after_draw(&mut self) {
+        if let Some(b) = self.announcement.drawn(Instant::now(), self.view, self.share.is_some())
+            && let Err(e) = crate::badges::mark_announced(&b)
+        {
+            self.error = Some(format!("couldn't record the announcement: {e:#}"));
+        }
+    }
+
+    /// Opens the share view: it syncs, freezes the stats and drafts the line.
+    fn start_share(&mut self) {
+        self.share = Some(ShareView::new(crate::share_view::Deps::real(self.counter.totals().1)));
+    }
+
     /// Changes the sort order while keeping the highlighted session selected.
     fn set_sort(&mut self, key: SortKey, reversed: bool) {
         self.selected = self.selected_session().map(|s| s.id.clone());
@@ -476,7 +610,19 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        self.usage.tick();
+        if self.usage.tick() {
+            self.after_sync();
+        }
+        if self.badges.due {
+            self.badges.due = false;
+            self.load_badges();
+        }
+        // The clipboard runs here, on the main thread, between frames: OSC 52 writes to the terminal.
+        if let Some(share) = &mut self.share
+            && let Some(text) = share.tick()
+        {
+            share.copied(crate::clipboard::copy(&text));
+        }
         if let Ok(notice) = self.update_rx.try_recv() {
             self.update = Some(notice);
         }
@@ -555,77 +701,127 @@ impl App {
     }
 }
 
+impl App {
+    /// Handles one key press. The share view takes every key first, so `q` there cancels the share
+    /// rather than quitting; a drawn announcement takes Esc next; then the footer notes clear.
+    pub fn on_key(&mut self, code: KeyCode) -> Flow {
+        if let Some(share) = &mut self.share {
+            match share.on_key(code) {
+                Action::Close => self.share = None,
+                Action::EditPost(text) => return Flow::EditPost(text),
+                Action::None => {}
+            }
+            return Flow::Stay;
+        }
+        if code == KeyCode::Esc && self.announcement.dismiss(self.view, false) {
+            return Flow::Stay;
+        }
+        (self.error, self.info, self.copy_note) = (None, None, None);
+        match (self.view, code) {
+            (_, KeyCode::Char('q')) => return Flow::Quit,
+            (View::Usage, code) => {
+                if !self.usage.on_key(code) {
+                    self.view = View::List;
+                }
+            }
+            (View::List, KeyCode::Char('u')) => {
+                self.view = View::Usage;
+                self.usage.reload();
+            }
+            (View::List, KeyCode::Esc) => return Flow::Quit,
+            (View::List, KeyCode::Down | KeyCode::Char('j')) => self.move_selection(1),
+            (View::List, KeyCode::Up | KeyCode::Char('k')) => self.move_selection(-1),
+            (View::List, KeyCode::Home | KeyCode::Char('g')) => self.move_selection(isize::MIN / 2),
+            (View::List, KeyCode::End | KeyCode::Char('G')) => self.move_selection(isize::MAX / 2),
+            (View::List, KeyCode::Char('a')) => self.show_ended = !self.show_ended,
+            (View::List, KeyCode::Char('m')) => {
+                self.alerts_on = !self.alerts_on;
+                if let Err(e) = crate::settings::set_alerts(self.alerts_on) {
+                    self.error = Some(format!("couldn't save alerts setting: {e}"));
+                }
+            }
+            (View::List | View::History | View::Agents, KeyCode::Char('b')) => self.open_board(),
+            (View::List, KeyCode::Char('B')) => {
+                self.view = View::Badges;
+                self.badges.due = true;
+            }
+            (View::Badges, KeyCode::Esc | KeyCode::Char('B') | KeyCode::Left | KeyCode::Char('h')) => self.view = View::List,
+            (View::List | View::Badges, KeyCode::Char('p')) => self.start_share(),
+            (View::List | View::Board, KeyCode::Char('c')) => self.copy_launch_command(),
+            (View::Board, KeyCode::Esc | KeyCode::Char('b') | KeyCode::Left | KeyCode::Char('h')) => self.view = View::List,
+            (View::Board, KeyCode::Down | KeyCode::Char('j')) => self.board.scroll(1),
+            (View::Board, KeyCode::Up | KeyCode::Char('k')) => self.board.scroll(-1),
+            (View::Board, KeyCode::PageDown | KeyCode::Char(' ')) => self.board.scroll(10),
+            (View::Board, KeyCode::PageUp) => self.board.scroll(-10),
+            (View::Board, KeyCode::Home | KeyCode::Char('g')) => self.board.scroll(isize::MIN / 2),
+            (View::Board, KeyCode::End | KeyCode::Char('G')) => self.board.scroll(isize::MAX / 2),
+            (View::List, KeyCode::Char('s')) => self.set_sort(self.sort.next(), false),
+            (View::List, KeyCode::Char('S')) => self.set_sort(self.sort, !self.sort_reversed),
+            (View::List, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) => self.open(View::History),
+            (View::History, KeyCode::Char('f')) => {
+                self.history_filter = self.history_filter.next();
+                self.history_scroll = 0;
+                self.detail_scroll = 0;
+            }
+            (View::History, KeyCode::Char('J')) => self.scroll_detail(3),
+            (View::History, KeyCode::Char('K')) => self.scroll_detail(-3),
+            (View::List | View::History, KeyCode::Tab) => self.open(View::Agents),
+            (View::Agents, KeyCode::Tab) => self.open(View::History),
+            (View::History | View::Agents, KeyCode::Esc | KeyCode::Enter | KeyCode::Left | KeyCode::Char('h')) => {
+                self.view = View::List
+            }
+            (View::History | View::Agents, KeyCode::Down | KeyCode::Char('j')) => self.scroll(1),
+            (View::History | View::Agents, KeyCode::Up | KeyCode::Char('k')) => self.scroll(-1),
+            (View::History | View::Agents, KeyCode::PageDown | KeyCode::Char(' ')) => self.scroll(10),
+            (View::History | View::Agents, KeyCode::PageUp) => self.scroll(-10),
+            (View::History | View::Agents, KeyCode::Home | KeyCode::Char('g')) => self.scroll(isize::MIN / 2),
+            (View::History | View::Agents, KeyCode::End | KeyCode::Char('G')) => self.scroll(isize::MAX / 2),
+            _ => {}
+        }
+        Flow::Stay
+    }
+}
+
 pub fn run() -> anyhow::Result<()> {
     let mut app = App::new();
     app.refresh();
     let mut terminal = ratatui::init();
+    // A pasted newline must not end the line being edited.
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     let result = (|| -> anyhow::Result<()> {
         loop {
             terminal.draw(|f| crate::ui::draw(f, &app))?;
-            if event::poll(Duration::from_millis(250))?
-                && let Event::Key(key) = event::read()?
-                    && key.kind == KeyEventKind::Press {
-                        (app.error, app.info, app.copy_note) = (None, None, None);
-                        match (app.view, key.code) {
-                            (_, KeyCode::Char('q')) => return Ok(()),
-                            (View::Usage, code) => {
-                                if !app.usage.on_key(code) {
-                                    app.view = View::List;
-                                }
-                            }
-                            (View::List, KeyCode::Char('u')) => {
-                                app.view = View::Usage;
-                                app.usage.reload();
-                            }
-                            (View::List, KeyCode::Esc) => return Ok(()),
-                            (View::List, KeyCode::Down | KeyCode::Char('j')) => app.move_selection(1),
-                            (View::List, KeyCode::Up | KeyCode::Char('k')) => app.move_selection(-1),
-                            (View::List, KeyCode::Home | KeyCode::Char('g')) => app.move_selection(isize::MIN / 2),
-                            (View::List, KeyCode::End | KeyCode::Char('G')) => app.move_selection(isize::MAX / 2),
-                            (View::List, KeyCode::Char('a')) => app.show_ended = !app.show_ended,
-                            (View::List, KeyCode::Char('m')) => {
-                                app.alerts_on = !app.alerts_on;
-                                if let Err(e) = crate::settings::set_alerts(app.alerts_on) {
-                                    app.error = Some(format!("couldn't save alerts setting: {e}"));
-                                }
-                            }
-                            (View::List | View::History | View::Agents, KeyCode::Char('b')) => app.open_board(),
-                            (View::List | View::Board, KeyCode::Char('c')) => app.copy_launch_command(),
-                            (View::Board, KeyCode::Esc | KeyCode::Char('b') | KeyCode::Left | KeyCode::Char('h')) => app.view = View::List,
-                            (View::Board, KeyCode::Down | KeyCode::Char('j')) => app.board.scroll(1),
-                            (View::Board, KeyCode::Up | KeyCode::Char('k')) => app.board.scroll(-1),
-                            (View::Board, KeyCode::PageDown | KeyCode::Char(' ')) => app.board.scroll(10),
-                            (View::Board, KeyCode::PageUp) => app.board.scroll(-10),
-                            (View::Board, KeyCode::Home | KeyCode::Char('g')) => app.board.scroll(isize::MIN / 2),
-                            (View::Board, KeyCode::End | KeyCode::Char('G')) => app.board.scroll(isize::MAX / 2),
-                            (View::List, KeyCode::Char('s')) => app.set_sort(app.sort.next(), false),
-                            (View::List, KeyCode::Char('S')) => app.set_sort(app.sort, !app.sort_reversed),
-                            (View::List, KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')) => app.open(View::History),
-                            (View::History, KeyCode::Char('f')) => {
-                                app.history_filter = app.history_filter.next();
-                                app.history_scroll = 0;
-                                app.detail_scroll = 0;
-                            }
-                            (View::History, KeyCode::Char('J')) => app.scroll_detail(3),
-                            (View::History, KeyCode::Char('K')) => app.scroll_detail(-3),
-                            (View::List | View::History, KeyCode::Tab) => app.open(View::Agents),
-                            (View::Agents, KeyCode::Tab) => app.open(View::History),
-                            (View::History | View::Agents, KeyCode::Esc | KeyCode::Enter | KeyCode::Left | KeyCode::Char('h')) => {
-                                app.view = View::List
-                            }
-                            (View::History | View::Agents, KeyCode::Down | KeyCode::Char('j')) => app.scroll(1),
-                            (View::History | View::Agents, KeyCode::Up | KeyCode::Char('k')) => app.scroll(-1),
-                            (View::History | View::Agents, KeyCode::PageDown | KeyCode::Char(' ')) => app.scroll(10),
-                            (View::History | View::Agents, KeyCode::PageUp) => app.scroll(-10),
-                            (View::History | View::Agents, KeyCode::Home | KeyCode::Char('g')) => app.scroll(isize::MIN / 2),
-                            (View::History | View::Agents, KeyCode::End | KeyCode::Char('G')) => app.scroll(isize::MAX / 2),
-                            _ => {}
+            app.after_draw();
+            if event::poll(Duration::from_millis(250))? {
+                match event::read()? {
+                    Event::Paste(text) => {
+                        if let Some(share) = &mut app.share {
+                            share.on_paste(&text);
                         }
                     }
+                    Event::Key(key) if key.kind == KeyEventKind::Press => match app.on_key(key.code) {
+                        Flow::Quit => return Ok(()),
+                        Flow::EditPost(text) => {
+                            let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+                            ratatui::restore();
+                            let edited = crate::share_view::edit_with(&crate::share_view::editor(), &text);
+                            terminal = ratatui::init();
+                            let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+                            terminal.clear()?;
+                            if let Some(share) = &mut app.share {
+                                share.edited(edited);
+                            }
+                        }
+                        Flow::Stay => {}
+                    },
+                    _ => {}
+                }
+            }
             app.tick = app.tick.wrapping_add(1);
             app.refresh();
         }
     })();
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
 }
@@ -724,6 +920,114 @@ mod tests {
         assert_eq!(state.refresh(""), Err("this session has no working directory yet"));
         assert_eq!(state.refresh(root.join("gone").to_str().unwrap()), Err("this session's directory no longer exists"));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    /// An app that touches nothing on disk: no event log, settings, database or update check.
+    fn blank() -> App {
+        App {
+            sessions: HashMap::new(),
+            selected: None,
+            show_ended: false,
+            sort: SortKey::default(),
+            sort_reversed: false,
+            view: View::List,
+            history_scroll: 0,
+            history_filter: HistoryFilter::default(),
+            detail_scroll: 0,
+            compact_window: None,
+            tick: 0,
+            hooks_installed: true,
+            usage: crate::usage::Usage::new(),
+            update: None,
+            alerts_on: false,
+            error: None,
+            info: None,
+            copy_note: None,
+            board: BoardState::default(),
+            badges: BadgeState::default(),
+            announcement: Announcement::default(),
+            share: None,
+            alerts: crate::alerts::Detector::default(),
+            update_rx: std::sync::mpsc::channel().1,
+            log: JsonlTail::new(PathBuf::new()),
+            readers: HashMap::new(),
+            sys: System::new(),
+            last_slow_refresh: Instant::now(),
+            counter: Counter::default(),
+        }
+    }
+
+    fn levels(rank: i64) -> Badges {
+        let mut stats = crate::badges::Stats::default();
+        stats.0.insert(crate::badges::RANK_KEY, rank);
+        crate::badges::badges(&stats)
+    }
+
+    #[test]
+    fn b_opens_the_badge_view_and_esc_returns() {
+        let mut app = blank();
+        assert_eq!(app.on_key(KeyCode::Char('B')), Flow::Stay);
+        assert!(app.view == View::Badges && app.badges.due, "the badges load before the next frame, not on the key");
+        assert_eq!(app.on_key(KeyCode::Esc), Flow::Stay);
+        assert!(app.view == View::List);
+        assert_eq!(app.on_key(KeyCode::Char('q')), Flow::Quit, "q in the list still quits");
+    }
+
+    #[test]
+    fn q_in_the_share_view_cancels_the_share_and_leaves_marsad_running() {
+        let mut app = blank();
+        let dir = std::env::temp_dir().join(format!("marsad-app-share-{}", std::process::id()));
+        app.share = Some(ShareView::new(crate::share_view::fake_deps(dir.join("c.png"))));
+        let start = Instant::now();
+        while app.share.as_ref().unwrap().stage != crate::share_view::Stage::Preview {
+            app.share.as_mut().unwrap().tick();
+            assert!(start.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.on_key(KeyCode::Char('e')), Flow::Stay);
+        assert_eq!(app.on_key(KeyCode::Char('q')), Flow::Stay, "q types into the line");
+        assert!(app.share.is_some());
+        assert_eq!(app.on_key(KeyCode::Esc), Flow::Stay, "Esc leaves the line editor");
+        assert_eq!(app.on_key(KeyCode::Char('q')), Flow::Stay, "q cancels the share");
+        assert!(app.share.is_none() && app.view == View::List);
+        assert!(!dir.exists(), "nothing written");
+    }
+
+    #[test]
+    fn an_announcement_waits_for_the_share_view_outlives_keys_and_is_recorded_once_drawn() {
+        let mut a = Announcement::default();
+        let now = Instant::now();
+        a.offer("rank up: Expert · new: gold streak, silver skills".into(), levels(300_000_000));
+        // Offered while sharing: held back, and not recorded.
+        assert_eq!(a.text(View::List, true), None);
+        assert_eq!(a.drawn(now, View::List, true), None);
+        assert_eq!(a.text(View::History, false), None, "only the list and badge views show it");
+        // After the share closes it shows, and is recorded the first time it is drawn, once.
+        assert_eq!(a.text(View::List, false), Some("rank up: Expert · new: gold streak, silver skills"));
+        assert_eq!(a.drawn(now, View::List, false).map(|b| b.rank.tier), Some(4));
+        assert_eq!(a.drawn(now + Duration::from_secs(1), View::Badges, false), None, "recorded only once");
+        // The same note offered again by a later sync doesn't restart it.
+        a.offer("rank up: Expert · new: gold streak, silver skills".into(), levels(300_000_000));
+        assert_eq!(a.drawn(now + Duration::from_secs(2), View::List, false), None);
+        assert!(a.text(View::List, false).is_some(), "still up after more frames and keys");
+        a.drawn(now + ANNOUNCE_FOR, View::List, false);
+        assert_eq!(a.text(View::List, false), None, "gone after 10 s");
+    }
+
+    #[test]
+    fn esc_dismisses_a_drawn_announcement_before_it_quits() {
+        let mut app = blank();
+        app.announcement.offer("new: bronze streak".into(), levels(0));
+        assert_eq!(app.on_key(KeyCode::Char('j')), Flow::Stay);
+        assert!(app.announcement.text(View::List, false).is_some(), "a key press doesn't clear it");
+        // Not drawn yet: Esc is the list's own Esc.
+        let mut undrawn = blank();
+        undrawn.announcement.offer("new: bronze streak".into(), levels(0));
+        assert_eq!(undrawn.on_key(KeyCode::Esc), Flow::Quit);
+        app.announcement.drawn(Instant::now(), View::List, false);
+        assert_eq!(app.on_key(KeyCode::Esc), Flow::Stay);
+        assert_eq!(app.announcement.text(View::List, false), None);
+        assert_eq!(app.on_key(KeyCode::Esc), Flow::Quit);
     }
 
     #[test]

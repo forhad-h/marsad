@@ -295,7 +295,6 @@ pub enum Note {
     /// The JSON reply has `is_error`.
     Error(String),
     Timeout,
-    #[allow(dead_code)] // the share view's cancel (U6)
     Cancelled,
     Empty,
     /// The reply named a project or folder.
@@ -562,7 +561,6 @@ pub fn save_card(s: &Snapshot, path: &Path) -> anyhow::Result<()> {
 // ---------- opening and revealing ----------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // used by the share view (U6)
 enum Platform {
     Macos,
     Windows,
@@ -578,13 +576,12 @@ pub struct Desktop {
     platform: Platform,
 }
 
-#[allow(dead_code)] // used by the share view (U6)
 impl Desktop {
     pub fn current() -> Self {
         Self::from_env(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
     }
 
-    fn from_env(set: impl Fn(&str) -> bool) -> Self {
+    pub(crate) fn from_env(set: impl Fn(&str) -> bool) -> Self {
         let platform = if cfg!(target_os = "macos") {
             Platform::Macos
         } else if cfg!(windows) {
@@ -669,7 +666,6 @@ fn reveal_steps(platform: Platform, path: &Path) -> Vec<Step> {
 }
 
 /// Runs one step for real.
-#[allow(dead_code)] // used by the share view (U6)
 pub fn launch(step: &Step) -> Result<(), String> {
     let mut cmd = Command::new(step.program);
     cmd.args(&step.args);
@@ -731,7 +727,6 @@ pub struct Confirmed {
 /// Confirms a share in order: write the PNG, copy the text, open LinkedIn, reveal the PNG. When
 /// the PNG can't be written nothing is copied or opened. `copy` is a step of its own so the
 /// dashboard can run the clipboard on its main thread (`clipboard::copy` for real).
-#[allow(dead_code)] // used by the share view (U6)
 pub fn confirm(
     s: &Snapshot,
     text: &str,

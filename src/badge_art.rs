@@ -1,8 +1,6 @@
 //! Badge art: a deterministic Islamic geometric roundel per tier, after three historical traditions.
 //! Novice and Apprentice are Mamluk / Seljuk carved roundels, one material read through light and shadow; Practitioner to Expert are Moorish zellij, cut tiles under woven white bands; Master and Grandmaster are Persian girih, ten-fold strapwork in turquoise, lapis and gold.
 //! Every pattern is Hankin's "polygons in contact" method on a rosette tiling, clipped to a disc.
-// used by the card (U4) and the badge view (U6)
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::f64::consts::PI;

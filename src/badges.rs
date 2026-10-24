@@ -262,12 +262,10 @@ fn mark_at(path: &Path, b: &Badges) -> anyhow::Result<()> {
     crate::settings::set_badges_announced_at(path, &merged(crate::settings::badges_announced_at(path), b))
 }
 
-#[allow(dead_code)] // the dashboard footer note (U6)
 pub fn pending_announcement(b: &Badges) -> anyhow::Result<Option<String>> {
     pending_at(&crate::settings::path(), b)
 }
 
-#[allow(dead_code)] // the dashboard footer note (U6)
 pub fn mark_announced(b: &Badges) -> anyhow::Result<()> {
     mark_at(&crate::settings::path(), b)
 }

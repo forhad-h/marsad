@@ -135,19 +135,22 @@ impl Usage {
         }
     }
 
-    /// Called every frame: collects a finished sync and starts the next one when due.
-    pub fn tick(&mut self) {
+    /// Called every frame: collects a finished sync and starts the next one when due. Returns
+    /// whether a sync finished cleanly this time.
+    pub fn tick(&mut self) -> bool {
         let finished = match self.rx.as_ref().map(|rx| rx.try_recv()) {
             Some(Ok(res)) => Some(res),
             // The sync thread died without reporting (e.g. a panic): surface it and allow a retry.
             Some(Err(TryRecvError::Disconnected)) => Some(Err("sync stopped unexpectedly".into())),
             Some(Err(TryRecvError::Empty)) | None => None,
         };
+        let mut synced = false;
         if let Some(res) = finished {
             self.rx = None;
             self.syncing = false;
             match res {
                 Ok(changed) => {
+                    synced = true;
                     self.error = None;
                     if changed {
                         self.reload();
@@ -159,6 +162,7 @@ impl Usage {
         if self.rx.is_none() && self.last_sync.is_none_or(|t| t.elapsed() >= SYNC_EVERY) {
             self.start_sync();
         }
+        synced
     }
 
     pub fn start_sync(&mut self) {

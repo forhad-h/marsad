@@ -1,13 +1,16 @@
 use crate::app::{App, HistoryFilter, View};
+use crate::share_view::{MAX_POST, Mark, ShareView, Stage};
 use crate::update::Notice;
 use crate::usage::{Pane, Usage};
 use crate::model::{ContextInfo, DAY_FMT, EventKind, Level, fmt_tokens, MAIN_AGENT, RateWindow, Session, SortKey, Status, TimelineEntry, TokenUsage, Via};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
+use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
 use ratatui::widgets::{
-    Block, BorderType, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table,
+    Block, BorderType, Cell, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline, Table,
     TableState, Wrap,
 };
 
@@ -170,7 +173,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     .areas(f.area());
     draw_header(f, header, app, &visible);
 
-    let keys: Vec<(&str, String)> = match (app.view, app.selected_session()) {
+    let mut keys: Vec<(&str, String)> = match (app.view, app.selected_session()) {
         (View::Usage, _) if app.usage.drill.is_some() => {
             draw_drill(f, body, &app.usage);
             vec![("↑↓", "scroll".into()), ("esc", "back".into()), ("q", "quit".into())]
@@ -210,6 +213,10 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("q", "quit".into()),
             ]
         }
+        (View::Badges, _) => {
+            draw_badges(f, body, app);
+            vec![("p", "share".into()), ("esc", "back".into()), ("q", "quit".into())]
+        }
         (View::Board, _) => {
             draw_board(f, body, app);
             vec![
@@ -228,6 +235,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("enter", "history".into()),
                 ("tab", "subagents".into()),
                 ("u", "usage".into()),
+                ("B", "badges".into()),
+                ("p", "share".into()),
                 ("b", "board".into()),
                 ("c", "coord cmd".into()),
                 ("a", ended.into()),
@@ -237,17 +246,23 @@ pub fn draw(f: &mut Frame, app: &App) {
             ]
         }
     };
+    if let Some(share) = &app.share {
+        draw_share(f, body, app, share);
+        keys = share_keys(share);
+    }
     let mut spans = vec![Span::raw(" ")];
     for (k, label) in keys {
         spans.push(k.to_string().bold());
         spans.push(format!(" {label}  ").dark_gray());
     }
-    let note = match (&app.error, &app.info, &app.update) {
-        (Some(e), _, _) => Some((format!("{e} "), Color::Red)),
-        (None, Some(i), _) => Some((i.clone(), Color::Green)),
-        (None, None, Some(Notice::Available(v))) => Some((format!("v{v} available · run `marsad update` "), Color::Yellow)),
-        (None, None, Some(Notice::Installed(v))) => Some((format!("updated to v{v} · restart marsad "), Color::Yellow)),
-        (None, None, None) => None,
+    let announcement = app.announcement.text(app.view, app.share.is_some());
+    let note = match (&app.error, &app.info, announcement, &app.update) {
+        (Some(e), _, _, _) => Some((format!("{e} "), Color::Red)),
+        (None, Some(i), _, _) => Some((i.clone(), Color::Green)),
+        (None, None, Some(a), _) => Some((format!("{a} "), Color::Green)),
+        (None, None, None, Some(Notice::Available(v))) => Some((format!("v{v} available · run `marsad update` "), Color::Yellow)),
+        (None, None, None, Some(Notice::Installed(v))) => Some((format!("updated to v{v} · restart marsad "), Color::Yellow)),
+        (None, None, None, None) => None,
     };
     if let Some(note) = &app.copy_note {
         draw_copy_note(f, copy_note, note);
@@ -1291,6 +1306,211 @@ fn draw_drill(f: &mut Frame, area: Rect, u: &Usage) {
         .collect();
     let table = runs_table(rows, block);
     f.render_stateful_widget(table, list, &mut TableState::default().with_selected(Some(d.scroll)));
+}
+
+/// Bronze, silver and gold, and grey for not yet.
+fn level_color(level: usize) -> Color {
+    match level {
+        1 => Color::Indexed(173),
+        2 => Color::Indexed(250),
+        3 => Color::Yellow,
+        _ => Color::DarkGray,
+    }
+}
+
+/// An achievement's value in its unit: `9 days`, `212.5M tokens`.
+fn badge_value(value: i64, unit: &str) -> String {
+    let n = value.max(0) as u64;
+    match unit {
+        "tokens" => format!("{} tokens", crate::card::fmt_count(n)),
+        "days" if n == 1 => "1 day".into(),
+        _ => format!("{n} {unit}"),
+    }
+}
+
+/// The rows of the badge view: the rank and its progress, then each achievement.
+fn badge_lines(b: &crate::badges::Badges) -> Vec<Line<'static>> {
+    let r = &b.rank;
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(r.name.to_string(), Style::new().fg(ACCENT).bold()),
+            dim(format!("   rank {} of {}", r.tier + 1, crate::badges::TIERS.len())),
+        ]),
+        Line::from(vec![
+            Span::styled(bar(r.progress, 20), Style::new().fg(ACCENT)),
+            Span::raw(format!(" {:>3.0}%  ", (r.progress * 100.0).floor())),
+            Span::raw(badge_value(r.tokens, "tokens")),
+            dim(match (r.next, r.next_threshold) {
+                (Some(next), Some(at)) => format!(" · {} to {next}", badge_value(at - r.tokens, "tokens")),
+                _ => " · top tier".into(),
+            }),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Achievements", Style::new().fg(ACCENT).bold())),
+    ];
+    for a in &b.achievements {
+        let level = a.level_name.unwrap_or("not yet");
+        let progress = match (a.next_level, a.next_threshold) {
+            (Some(next), Some(at)) => format!(" · {} to {next}", badge_value(at - a.value, a.unit)),
+            _ => " · complete".into(),
+        };
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {:<16}", a.name)),
+            Span::styled(format!("{level:<8}"), Style::new().fg(level_color(a.level)).bold()),
+            Span::raw(format!("{:<20}", badge_value(a.value, a.unit))),
+            Span::styled(bar(a.progress, 10), Style::new().fg(level_color(a.level + 1))),
+            dim(progress),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(dim("Earned from your local marsad data; a level never drops when old history is pruned.")));
+    lines.push(Line::from(vec![dim("Press "), "p".bold(), dim(" to share your rank and today's work to LinkedIn.")]));
+    lines
+}
+
+/// The badge view: the rank's badge drawn in Braille when there is room, beside the rows.
+fn draw_badges(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().dark_gray())
+        .title(Line::from(" Badges ").fg(ACCENT));
+    let inner = block.inner(area).inner(Margin::new(1, 0));
+    f.render_widget(block, area);
+    let state = &app.badges;
+    let Some(b) = &state.badges else {
+        let msg = match &state.error {
+            Some(e) => Line::from(format!("Couldn't read your badges: {e}").red()),
+            None => Line::from(dim("Loading your badges…")),
+        };
+        f.render_widget(Paragraph::new(msg), inner);
+        return;
+    };
+    let lines = badge_lines(b);
+    // The art needs 13 rows and 28 columns; it is dropped before any row would clip.
+    const ART: (u16, u16) = (28, 13);
+    let text_width = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let art = state.art.as_ref().filter(|_| inner.height >= ART.1.max(lines.len() as u16) && inner.width >= ART.0 + 3 + text_width.min(70));
+    let text = match art {
+        Some((_, badge)) => {
+            let [left, _, right] = Layout::horizontal([Constraint::Length(ART.0), Constraint::Length(3), Constraint::Fill(1)]).areas(inner);
+            let [art_area, _] = Layout::vertical([Constraint::Length(ART.1), Constraint::Fill(1)]).areas(left);
+            let p = badge.palette;
+            let color = Color::Rgb(p.line.0, p.line.1, p.line.2);
+            let segments = badge.segments();
+            let canvas = Canvas::default().marker(Marker::Braille).x_bounds([-1.0, 1.0]).y_bounds([-1.0, 1.0]).paint(|ctx| {
+                for &((x1, y1), (x2, y2)) in &segments {
+                    ctx.draw(&CanvasLine { x1, y1, x2, y2, color });
+                }
+            });
+            f.render_widget(canvas, art_area);
+            right
+        }
+        None => inner,
+    };
+    let [_, text] = Layout::vertical([Constraint::Length(u16::from(art.is_some())), Constraint::Fill(1)]).areas(text);
+    f.render_widget(Paragraph::new(lines), text);
+}
+
+/// The share view's keys for the footer.
+fn share_keys(v: &ShareView) -> Vec<(&'static str, String)> {
+    match v.stage {
+        Stage::Drafting => vec![("esc", "cancel".into())],
+        Stage::Preview => vec![
+            ("enter", "share".into()),
+            ("e", "edit line".into()),
+            ("E", "edit post".into()),
+            ("r", "regenerate".into()),
+            ("↑↓", "scroll".into()),
+            ("esc", "cancel".into()),
+        ],
+        Stage::Editing { .. } => vec![("enter", "keep".into()), ("esc", "discard".into()), ("←→", "move".into())],
+        Stage::Saving => vec![],
+        Stage::Done(_) | Stage::Failed(_) => vec![("any key", "close".into())],
+    }
+}
+
+/// A rectangle of at most `w`×`h` centred in `area`.
+fn centered(area: Rect, w: u16, h: u16) -> Rect {
+    let (w, h) = (w.min(area.width), h.min(area.height));
+    Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
+}
+
+/// The share view, drawn as a modal over the list or the badge view.
+fn draw_share(f: &mut Frame, area: Rect, app: &App, v: &ShareView) {
+    let popup = centered(area, 96, 26);
+    f.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT))
+        .title(Line::from(" Share to LinkedIn ").bold());
+    let inner = block.inner(popup).inner(Margin::new(1, 0));
+    f.render_widget(block, popup);
+    let spin = SPINNER[(app.tick / 2 % 4) as usize];
+    let wait = |text: &str| Paragraph::new(vec![Line::from(format!("{spin} {text}")), Line::from(""), Line::from(dim("Esc cancels; nothing is saved, copied or opened."))]);
+    match &v.stage {
+        Stage::Drafting if v.snapshot.is_none() => f.render_widget(wait("Syncing and gathering today's stats…"), inner),
+        Stage::Drafting => f.render_widget(
+            wait("Drafting your line with Claude Code…").wrap(Wrap { trim: false }),
+            inner,
+        ),
+        Stage::Saving => f.render_widget(Paragraph::new(format!("{spin} Saving the card…")), inner),
+        Stage::Failed(why) => {
+            f.render_widget(Paragraph::new(vec![Line::from(why.clone().red()), Line::from(""), Line::from(dim("Any key closes."))]).wrap(Wrap { trim: false }), inner)
+        }
+        Stage::Done(done) => {
+            let mut lines: Vec<Line> = crate::share_view::done_lines(done)
+                .into_iter()
+                .map(|(mark, text)| {
+                    let (glyph, color) = match mark {
+                        Mark::Done => ("✓", Color::Green),
+                        Mark::Skipped => ("–", Color::Yellow),
+                        Mark::Failed => ("✗", Color::Red),
+                    };
+                    Line::from(vec![Span::styled(format!("{glyph} "), Style::new().fg(color).bold()), Span::raw(text)])
+                })
+                .collect();
+            if !matches!(done.copied, crate::clipboard::Copied::Native(_)) {
+                lines.push(Line::from(""));
+                lines.extend(v.post().lines().map(|l| Line::from(l.to_string())));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(dim("Any key closes.")));
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        }
+        Stage::Preview | Stage::Editing { .. } => {
+            let [post_area, _, status_area, count_area] =
+                Layout::vertical([Constraint::Fill(1), Constraint::Length(1), Constraint::Length(2), Constraint::Length(1)]).areas(inner);
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            match &v.stage {
+                Stage::Editing { text, cursor } => {
+                    // The line with a block cursor, then the rest of the post greyed out.
+                    let chars: Vec<char> = text.chars().collect();
+                    let before: String = chars[..*cursor].iter().collect();
+                    let at: String = chars.get(*cursor).map_or(" ".into(), |c| c.to_string());
+                    let after: String = chars.get(*cursor + 1..).map_or(String::new(), |r| r.iter().collect());
+                    lines.push(Line::from(vec![Span::raw(before), Span::styled(at, Style::new().reversed()), Span::raw(after)]));
+                    if let Some(s) = &v.snapshot {
+                        lines.extend(crate::share::post(s, "").lines().skip(1).map(|l| Line::from(dim(l.to_string()))));
+                    }
+                }
+                _ => lines.extend(v.post().lines().map(|l| Line::from(l.to_string()))),
+            }
+            let width = post_area.width as usize;
+            let rows: Vec<Line<'static>> = lines.into_iter().flat_map(|l| if l.width() == 0 { vec![l] } else { wrap_line(l, width) }).collect();
+            v.max_scroll.set((rows.len() as u16).saturating_sub(post_area.height));
+            f.render_widget(Paragraph::new(rows).scroll((v.scroll.min(v.max_scroll.get()), 0)), post_area);
+            let status = match (&v.status, &v.note) {
+                (Some(s), _) => Line::from(s.clone().red()),
+                (None, Some(note)) => Line::from(note.message().yellow()),
+                (None, None) => Line::from(dim("Drafted by Claude Code from a summary of today's work. Review it before you share.")),
+            };
+            f.render_widget(Paragraph::new(status).wrap(Wrap { trim: false }), status_area);
+            let n = v.post().chars().count();
+            let count = format!("{n} / {MAX_POST} characters");
+            let count = if n > MAX_POST { Span::styled(format!("{count} · too long for LinkedIn"), Style::new().fg(Color::Red)) } else { dim(count) };
+            f.render_widget(Paragraph::new(Line::from(count)), count_area);
+        }
+    }
 }
 
 #[cfg(test)]
