@@ -1,6 +1,7 @@
-//! Badge art: a deterministic Islamic ornament per tier, in three historical idioms — Mamluk/Seljuk
-//! carved roundel (tiers 0-1), Moorish zellij tilework (tiers 2-4), Persian girih strapwork (tiers 5-6) —
-//! as strokes/fills in a unit space and as an SVG fragment.
+//! Badge art: a deterministic Islamic geometric medallion per tier, in three historical idioms —
+//! Mamluk/Seljuk carving (tiers 0-1), Moorish zellij (2-4) and Persian tilework (5-6). Every badge
+//! has the same structure, a bevelled rim, a border band and an all-over tessellated field, and the
+//! tiers grow from plain carved stone to jewelled gold.
 // used by the card (U4) and the badge view (U6)
 #![allow(dead_code)]
 
@@ -64,71 +65,245 @@ fn intersect(p: Point, u: Point, q: Point, v: Point) -> Option<Point> {
     Some((p.0 + s * u.0, p.1 + s * u.1))
 }
 
-/// What a stroke is part of; `svg` renders strapwork (`Strap`, `Rosette`) as a wide band under a narrow
-/// line, and rim and grout (`Ring`, `Tile`) as one thin line. The badge view colours by it.
+/// What a stroke is part of; the badge view colours by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    Ring,
+    /// The rim and the edges of the band and the field.
+    Rim,
+    /// Ornament in the border band.
+    Band,
+    /// The outline of a tile in the field.
     Tile,
-    Strap,
-    Rosette,
 }
 
-/// A polyline in the unit space.
+/// A polyline in the unit space, with its colour and its width in unit-space terms.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
     pub points: Vec<Point>,
     pub closed: bool,
     pub role: Role,
+    pub color: Rgb,
+    pub width: f64,
 }
 
-/// A filled polygon in the unit space.
+/// A filled convex polygon in the unit space, painted in order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fill {
     pub points: Vec<Point>,
     pub color: Rgb,
 }
 
-/// A tier's representative colours, used for the badge ground and strapwork and reused by the card for
-/// its own chrome (the ground tint, the frame band and rule, the badge's halo and shadow).
+/// A tier's representative colours, reused by the card for its own chrome (the ground tint, the
+/// frame band and its stars, the badge's halo and shadow).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
-    /// The disc behind the pattern; the darkest, recessed tone.
+    /// The darkest tone; the card's frame band.
     pub ground: Rgb,
-    /// The main motif's field; the badge's dominant tone.
+    /// The dominant tone; the card's accent and lattice tint.
     pub field: Rgb,
-    /// The central rosette's fill.
+    /// The rim's mid tone.
     pub rosette: Rgb,
-    /// The wide stroke under strapwork, and the rim/grout lines.
+    /// The shadow tone.
     pub band: Rgb,
-    /// The narrow stroke on top of strapwork.
+    /// The rim's light tone.
     pub line: Rgb,
 }
 
-// Mamluk / Seljuk carved roundel (tiers 0-1): deep-relief interlace in one material, read through a
-// single hue's light and shadow, not colour.
-const MAMLUK_IVORY: Palette = Palette { ground: (0x5b, 0x4d, 0x36), field: (0xcf, 0xbf, 0x95), rosette: (0xe6, 0xda, 0xb8), band: (0x35, 0x2b, 0x1c), line: (0xf8, 0xf1, 0xdf) };
-const MAMLUK_CEDAR: Palette = Palette { ground: (0x3a, 0x1e, 0x11), field: (0x9c, 0x56, 0x30), rosette: (0xc9, 0x8a, 0x58), band: (0x22, 0x10, 0x08), line: (0xf1, 0xd9, 0xb6) };
+/// A rim material's light, mid and dark tones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Metal {
+    pub light: Rgb,
+    pub mid: Rgb,
+    pub dark: Rgb,
+}
 
-// Moorish zellij (tiers 2-4): an 8-fold khatam rosette in a tiled field of small cut-tile pieces, with
-// broad interlaced bands over the top.
-const ZELLIJ_TURQUOISE: Palette = Palette { ground: (0x0c, 0x38, 0x3a), field: (0x1c, 0x8f, 0x8a), rosette: (0xf3, 0xec, 0xd8), band: (0x06, 0x1c, 0x1e), line: (0xf3, 0xec, 0xd8) };
-const ZELLIJ_COBALT: Palette = Palette { ground: (0x0a, 0x17, 0x3f), field: (0x20, 0x45, 0x97), rosette: (0xe7, 0xcc, 0x86), band: (0x05, 0x0b, 0x24), line: (0xe7, 0xcc, 0x86) };
-const ZELLIJ_RICH: Palette = Palette { ground: (0x07, 0x0d, 0x22), field: (0x19, 0x2c, 0x78), rosette: (0xd3, 0x8a, 0x27), band: (0x04, 0x04, 0x09), line: (0xf3, 0xe7, 0xc2) };
+const SANDSTONE: Metal = Metal { light: (0xee, 0xe2, 0xc4), mid: (0xcc, 0xb5, 0x8a), dark: (0x7e, 0x67, 0x45) };
+const CEDAR: Metal = Metal { light: (0xdc, 0xa3, 0x6e), mid: (0xa3, 0x63, 0x36), dark: (0x52, 0x2a, 0x13) };
+const BRONZE: Metal = Metal { light: (0xf2, 0xc4, 0x90), mid: (0xb8, 0x76, 0x42), dark: (0x66, 0x39, 0x18) };
+const SILVER: Metal = Metal { light: (0xfa, 0xfb, 0xfc), mid: (0xbf, 0xc6, 0xce), dark: (0x63, 0x6c, 0x77) };
+const GOLD: Metal = Metal { light: (0xfe, 0xec, 0xab), mid: (0xd8, 0xaa, 0x46), dark: (0x7f, 0x58, 0x12) };
+const PEARL: Metal = Metal { light: (0xff, 0xff, 0xff), mid: (0xec, 0xe7, 0xdc), dark: (0x95, 0x8e, 0x82) };
 
-const ZELLIJ_TILES_2: [Rgb; 2] = [(0x1c, 0x8f, 0x8a), (0xe9, 0xe2, 0xcf)];
-const ZELLIJ_TILES_3: [Rgb; 4] = [(0x20, 0x45, 0x97), (0x1c, 0x8f, 0x8a), (0xe7, 0xcc, 0x86), (0x16, 0x16, 0x1c)];
-const ZELLIJ_TILES_4: [Rgb; 6] = [(0x19, 0x2c, 0x78), (0x1c, 0x8f, 0x8a), (0x3e, 0x7d, 0x3a), (0xd3, 0x8a, 0x27), (0x14, 0x14, 0x18), (0xef, 0xe8, 0xd6)];
+const COBALT: Rgb = (0x1f, 0x3f, 0x93);
+const TURQUOISE: Rgb = (0x1b, 0x95, 0x8d);
+const GREEN: Rgb = (0x2c, 0x7a, 0x4d);
+const OCHRE: Rgb = (0xd0, 0x8b, 0x2c);
+const JET: Rgb = (0x1c, 0x1d, 0x23);
+const CREAM: Rgb = (0xf3, 0xed, 0xde);
+const LAPIS: Rgb = (0x23, 0x46, 0xa4);
+const DEEP_LAPIS: Rgb = (0x15, 0x28, 0x68);
 
-// Persian girih (tiers 5-6): 10-fold decagon rosettes with long interlaced strapwork, turquoise and
-// lapis with gold, richest at the top.
-const GIRIH_TURQUOISE: Palette = Palette { ground: (0x08, 0x12, 0x2c), field: (0x24, 0x4d, 0xb8), rosette: (0x2a, 0x9d, 0x93), band: (0x04, 0x08, 0x18), line: (0xdd, 0xb6, 0x4e) };
-const GIRIH_GOLD: Palette = Palette { ground: (0x06, 0x0a, 0x20), field: (0x2a, 0x35, 0x8c), rosette: (0xe3, 0xb8, 0x3c), band: (0x03, 0x04, 0x10), line: (0xf6, 0xda, 0x7e) };
+/// The tessellation that fills the field, with its scale.
+#[derive(Debug, Clone, Copy)]
+enum Pattern {
+    /// Squares turned on point, this far apart: the plainest carved diaper.
+    Diamonds(f64),
+    /// Hexagons of this circumradius.
+    Honeycomb(f64),
+    /// Octagons and squares (4.8.8), octagon centres this far apart: the zellij staple.
+    Octagons(f64),
+    /// A decagon ringed twice by pentagons and thin rhombi, out to this radius: a Persian dissection.
+    Decagons(f64),
+}
 
-/// Ring radii, outermost first; a badge uses the first few of them as a rim.
-const RINGS: [f64; 3] = [0.97, 0.91, 0.855];
-/// Segments in a ring's polyline.
-const RING_SEGMENTS: usize = 96;
+/// The ornament in the border band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Border {
+    Plain,
+    Fillet,
+    Beads,
+    Rope,
+    BeadsAndFillet,
+    Jewels,
+    Crown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Finish {
+    /// Raised strapwork round recessed panels, read by light and shadow.
+    Carved,
+    /// Flush glazed tiles in a strapwork ground.
+    Glazed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Centre {
+    Plain,
+    Raised,
+    Gilded,
+    Jewelled,
+}
+
+/// Everything that sets one tier's badge apart.
+struct Spec {
+    metal: Metal,
+    border: Border,
+    pattern: Pattern,
+    finish: Finish,
+    /// The strapwork: the field showing between the tiles.
+    strap: Rgb,
+    /// Tile colours by kind (two alternating, one secondary).
+    tiles: [Rgb; 3],
+    /// A smaller tile set into each whole tile, by kind.
+    inlay: Option<[Rgb; 3]>,
+    centre: Centre,
+    /// The centrepiece's inlay.
+    jewel: Rgb,
+    /// Half the strapwork's width.
+    gap: f64,
+    gloss: f64,
+    palette: Palette,
+}
+
+fn spec(tier: usize) -> Spec {
+    match tier.min(TIERS - 1) {
+        0 => Spec {
+            metal: SANDSTONE,
+            border: Border::Plain,
+            pattern: Pattern::Diamonds(0.38),
+            finish: Finish::Carved,
+            strap: SANDSTONE.light,
+            tiles: [SANDSTONE.mid; 3],
+            inlay: Some([SANDSTONE.light; 3]),
+            centre: Centre::Raised,
+            jewel: SANDSTONE.mid,
+            gap: 0.016,
+            gloss: 0.1,
+            palette: Palette { ground: (0x5a, 0x48, 0x2f), field: (0x8f, 0x74, 0x4c), rosette: SANDSTONE.mid, band: (0x3b, 0x2f, 0x1e), line: SANDSTONE.light },
+        },
+        1 => Spec {
+            metal: CEDAR,
+            border: Border::Fillet,
+            pattern: Pattern::Honeycomb(0.15),
+            finish: Finish::Carved,
+            strap: CEDAR.light,
+            tiles: [CEDAR.mid; 3],
+            inlay: Some([CEDAR.light; 3]),
+            centre: Centre::Raised,
+            jewel: CEDAR.mid,
+            gap: 0.014,
+            gloss: 0.12,
+            palette: Palette { ground: (0x3f, 0x22, 0x12), field: (0x9a, 0x58, 0x2c), rosette: CEDAR.mid, band: (0x26, 0x13, 0x09), line: CEDAR.light },
+        },
+        2 => Spec {
+            metal: BRONZE,
+            border: Border::Beads,
+            pattern: Pattern::Octagons(0.4),
+            finish: Finish::Glazed,
+            strap: CREAM,
+            tiles: [TURQUOISE, TURQUOISE, COBALT],
+            inlay: None,
+            centre: Centre::Gilded,
+            jewel: COBALT,
+            gap: 0.013,
+            gloss: 0.22,
+            palette: Palette { ground: (0x0e, 0x3c, 0x3a), field: (0x17, 0x86, 0x7f), rosette: BRONZE.mid, band: (0x07, 0x22, 0x21), line: BRONZE.light },
+        },
+        3 => Spec {
+            metal: SILVER,
+            border: Border::Rope,
+            pattern: Pattern::Octagons(0.34),
+            finish: Finish::Glazed,
+            strap: CREAM,
+            tiles: [COBALT, TURQUOISE, OCHRE],
+            inlay: None,
+            centre: Centre::Gilded,
+            jewel: TURQUOISE,
+            gap: 0.012,
+            gloss: 0.25,
+            palette: Palette { ground: (0x13, 0x24, 0x57), field: (0x25, 0x4a, 0xa8), rosette: SILVER.mid, band: (0x0a, 0x13, 0x30), line: SILVER.light },
+        },
+        4 => Spec {
+            metal: GOLD,
+            border: Border::BeadsAndFillet,
+            pattern: Pattern::Octagons(0.32),
+            finish: Finish::Glazed,
+            strap: JET,
+            tiles: [GREEN, COBALT, CREAM],
+            inlay: Some([TURQUOISE, OCHRE, OCHRE]),
+            centre: Centre::Gilded,
+            jewel: GREEN,
+            gap: 0.011,
+            gloss: 0.28,
+            palette: Palette { ground: (0x12, 0x2e, 0x22), field: (0x2a, 0x6e, 0x48), rosette: GOLD.mid, band: (0x08, 0x18, 0x11), line: GOLD.light },
+        },
+        5 => Spec {
+            metal: GOLD,
+            border: Border::Jewels,
+            pattern: Pattern::Decagons(0.86),
+            finish: Finish::Glazed,
+            strap: GOLD.mid,
+            tiles: [LAPIS, TURQUOISE, CREAM],
+            inlay: Some([TURQUOISE, CREAM, LAPIS]),
+            centre: Centre::Gilded,
+            jewel: LAPIS,
+            gap: 0.011,
+            gloss: 0.3,
+            palette: Palette { ground: (0x10, 0x1e, 0x4c), field: (0x24, 0x47, 0xa8), rosette: GOLD.mid, band: (0x08, 0x0f, 0x2a), line: GOLD.light },
+        },
+        _ => Spec {
+            metal: GOLD,
+            border: Border::Crown,
+            pattern: Pattern::Decagons(0.86),
+            finish: Finish::Glazed,
+            strap: GOLD.mid,
+            tiles: [DEEP_LAPIS, TURQUOISE, CREAM],
+            inlay: Some([TURQUOISE, DEEP_LAPIS, LAPIS]),
+            centre: Centre::Jewelled,
+            jewel: DEEP_LAPIS,
+            gap: 0.01,
+            gloss: 0.32,
+            palette: Palette { ground: (0x0d, 0x16, 0x38), field: (0x9a, 0x70, 0x1c), rosette: GOLD.mid, band: (0x05, 0x0a, 0x1e), line: GOLD.light },
+        },
+    }
+}
+
+/// The field's radius, inside the border band.
+const FIELD: f64 = 0.8;
+/// The border band's outer radius, where the rim begins.
+const BAND: f64 = 0.92;
+/// Sides of the polygon that stands for a circle: divisible by every pattern's symmetry (4, 6, 10).
+const CIRCLE: usize = 120;
 
 /// A tier's badge in the unit space.
 #[derive(Debug, Clone, PartialEq)]
@@ -136,6 +311,10 @@ pub struct Badge {
     pub fills: Vec<Fill>,
     pub strokes: Vec<Stroke>,
     pub palette: Palette,
+    /// The rim's material, for its bevel.
+    pub metal: Metal,
+    /// The sheen's opacity: matte stone low, glaze and gold higher.
+    pub gloss: f64,
 }
 
 impl Badge {
@@ -154,144 +333,367 @@ impl Badge {
 
 /// Builds a tier's badge; a tier past the top is Grandmaster.
 pub fn badge(tier: usize) -> Badge {
-    match tier.min(TIERS - 1) {
-        0 => carved(MAMLUK_IVORY, 1),
-        1 => carved(MAMLUK_CEDAR, 2),
-        2 => zellij(ZELLIJ_TURQUOISE, &ZELLIJ_TILES_2, 1),
-        3 => zellij(ZELLIJ_COBALT, &ZELLIJ_TILES_3, 2),
-        4 => zellij(ZELLIJ_RICH, &ZELLIJ_TILES_4, 3),
-        5 => girih(GIRIH_TURQUOISE, 1),
-        _ => girih(GIRIH_GOLD, 2),
-    }
-}
-
-/// The rim, outermost first, as `richness` concentric ring strokes.
-fn rings(richness: usize) -> Vec<Stroke> {
-    RINGS[..richness.min(RINGS.len())].iter().map(|&radius| Stroke { points: ring_points(radius), closed: true, role: Role::Ring }).collect()
-}
-
-fn ring_points(radius: f64) -> Vec<Point> {
-    (0..RING_SEGMENTS).map(|i| polar(radius, 2.0 * PI * i as f64 / RING_SEGMENTS as f64 + PI / 2.0)).collect()
-}
-
-/// A plain n-gon, flat-sided and unpointed, its first vertex at angle `rotation`.
-fn regular_polygon(n: usize, radius: f64, rotation: f64) -> Vec<Point> {
-    (0..n).map(|i| polar(radius, rotation + 2.0 * PI * i as f64 / n as f64)).collect()
-}
-
-/// A scalloped guilloche ring at mean radius `r0`, its edge gently waving `waves` times: a finely
-/// beaded border rather than a pointed star, the standard trim of a certificate or a coin's rim.
-fn rope(r0: f64, amp: f64, waves: usize, phase: f64) -> Vec<Point> {
-    const SEGS_PER_WAVE: usize = 8;
-    let segs = waves * SEGS_PER_WAVE;
-    (0..segs)
-        .map(|i| {
-            let t = 2.0 * PI * i as f64 / segs as f64;
-            polar(r0 + amp * (waves as f64 * t + phase).cos(), t)
-        })
-        .collect()
-}
-
-/// A Mamluk/Seljuk carved roundel: a flat octagonal boss in the material's raised tone, with a carved
-/// inset line just inside it standing for the groove, and — past Novice — a raised centre medallion.
-fn carved(palette: Palette, richness: usize) -> Badge {
-    let up = PI / 2.0;
+    let sp = spec(tier);
     let mut fills = Vec::new();
-    let mut strokes = rings(richness);
-
-    let outline = regular_polygon(8, 0.8, up + PI / 8.0);
-    fills.push(Fill { points: outline.clone(), color: palette.field });
-    strokes.push(Stroke { points: outline.clone(), closed: true, role: Role::Strap });
-    let inset: Vec<Point> = outline.iter().map(|&(x, y)| (x * 0.9, y * 0.9)).collect();
-    strokes.push(Stroke { points: inset, closed: true, role: Role::Ring });
-
-    if richness > 1 {
-        let boss = regular_polygon(8, 0.36, up + PI / 8.0);
-        fills.push(Fill { points: boss.clone(), color: palette.rosette });
-        strokes.push(Stroke { points: boss, closed: true, role: Role::Rosette });
+    let mut strokes = Vec::new();
+    border(&sp, &mut fills, &mut strokes);
+    field(&sp, &mut fills, &mut strokes);
+    for radius in [1.0, BAND, FIELD] {
+        strokes.push(Stroke { points: circle((0.0, 0.0), radius, CIRCLE), closed: true, role: Role::Rim, color: sp.metal.dark, width: 0.008 });
     }
-    Badge { fills, strokes, palette }
+    // Clipping a highlight to a sliver of a tile at the field's edge can leave nothing.
+    fills.retain(|f| f.points.len() >= 3 && area(&f.points) > 1e-12);
+    Badge { fills, strokes, palette: sp.palette, metal: sp.metal, gloss: sp.gloss }
 }
 
-/// A closed annular wedge from `a0` to `a1`, outer arc then inner arc, approximated in `segs` steps.
-fn wedge(r0: f64, r1: f64, a0: f64, a1: f64, segs: usize) -> Vec<Point> {
-    let mut out = Vec::with_capacity(2 * segs + 2);
-    for i in 0..=segs {
-        out.push(polar(r1, a0 + (a1 - a0) * i as f64 / segs as f64));
-    }
-    for i in 0..=segs {
-        out.push(polar(r0, a1 - (a1 - a0) * i as f64 / segs as f64));
+/// A tile of a tessellation: its outline, its colour kind, and whether it sits at the centre.
+struct Tile {
+    points: Vec<Point>,
+    kind: usize,
+    centre: bool,
+}
+
+/// The tiles of a pattern that can reach the field, centred so one tile sits on the origin.
+fn tiles(pattern: Pattern) -> Vec<Tile> {
+    let reach = FIELD + 0.3;
+    let mut out = Vec::new();
+    let mut put = |c: Point, points: Vec<Point>, kind: usize, centre: bool| {
+        if c.0.hypot(c.1) <= reach {
+            out.push(Tile { points: shift(&points, c), kind, centre });
+        }
+    };
+    match pattern {
+        Pattern::Diamonds(p) => {
+            let n = (reach / p).ceil() as i32 + 1;
+            for j in -n..=n {
+                for i in -n..=n {
+                    let (x, y) = (i as f64 * p, j as f64 * p);
+                    put((x, y), regular_polygon(4, p / 2.0, 0.0), 0, i == 0 && j == 0);
+                    put((x + p / 2.0, y + p / 2.0), regular_polygon(4, p / 2.0, 0.0), 0, false);
+                }
+            }
+        }
+        Pattern::Honeycomb(s) => {
+            let n = (2.0 * reach / (3f64.sqrt() * s)).ceil() as i32 + 1;
+            for r in -n..=n {
+                for q in -n..=n {
+                    let c = (3f64.sqrt() * s * (q as f64 + r as f64 / 2.0), 1.5 * s * r as f64);
+                    put(c, regular_polygon(6, s, PI / 2.0), 0, q == 0 && r == 0);
+                }
+            }
+        }
+        Pattern::Octagons(p) => {
+            let side = p / (1.0 + 2f64.sqrt());
+            let n = (reach / p).ceil() as i32 + 1;
+            for j in -n..=n {
+                for i in -n..=n {
+                    let (x, y) = (i as f64 * p, j as f64 * p);
+                    put((x, y), regular_polygon(8, side / (2.0 * (PI / 8.0).sin()), PI / 8.0), (i + j).rem_euclid(2) as usize, i == 0 && j == 0);
+                    put((x + p / 2.0, y + p / 2.0), regular_polygon(4, side / 2f64.sqrt(), 0.0), 2, false);
+                }
+            }
+        }
+        Pattern::Decagons(outer) => {
+            // Each ring round a decagon of side s is ten pentagons of side s with a 36°/144° rhombus
+            // in every notch between them; together they make a decagon of side 2s.
+            let rings = 2;
+            let mut side = outer * 2.0 * (PI / 10.0).sin() / f64::from(1 << rings);
+            let mut v = regular_polygon(10, side / (2.0 * (PI / 10.0).sin()), PI / 2.0);
+            out.push(Tile { points: v.clone(), kind: 0, centre: true });
+            for _ in 0..rings {
+                let (apothem, radius) = (side / (2.0 * (PI / 5.0).tan()), side / (2.0 * (PI / 5.0).sin()));
+                let pentagons: Vec<Vec<Point>> = (0..10)
+                    .map(|i| {
+                        let (p, q) = (v[i], v[(i + 1) % 10]);
+                        let len = (q.0 - p.0).hypot(q.1 - p.1);
+                        let out_n = ((q.1 - p.1) / len, -(q.0 - p.0) / len);
+                        let c = ((p.0 + q.0) / 2.0 + out_n.0 * apothem, (p.1 + q.1) / 2.0 + out_n.1 * apothem);
+                        shift(&regular_polygon(5, radius, out_n.1.atan2(out_n.0)), c)
+                    })
+                    .collect();
+                let mut next = Vec::with_capacity(10);
+                for i in 0..10 {
+                    let (apex, apex_next, corner) = (pentagons[i][0], pentagons[(i + 1) % 10][0], v[(i + 1) % 10]);
+                    let notch = if dist2(pentagons[i][1], corner) < dist2(pentagons[i][4], corner) { pentagons[i][1] } else { pentagons[i][4] };
+                    let tip = (apex.0 + apex_next.0 - notch.0, apex.1 + apex_next.1 - notch.1);
+                    out.push(Tile { points: ccw(vec![notch, apex, tip, apex_next]), kind: 2, centre: false });
+                    next.push(tip);
+                }
+                for (i, p) in pentagons.into_iter().enumerate() {
+                    out.push(Tile { points: p, kind: i % 2, centre: false });
+                }
+                v = next;
+                side *= 2.0;
+            }
+        }
     }
     out
 }
 
-/// A Moorish zellij medallion: a flat octagonal centrepiece, concentric rings of small cut-tile wedges
-/// (finer and more colourful outward with `richness`), and one or two scalloped guilloche borders on top.
-fn zellij(palette: Palette, tiles: &'static [Rgb], richness: usize) -> Badge {
-    let up = PI / 2.0;
-    let mut fills = Vec::new();
-    let mut strokes = rings(richness);
-
-    let centre = regular_polygon(8, 0.3, up + PI / 8.0);
-    fills.push(Fill { points: centre.clone(), color: palette.rosette });
-    strokes.push(Stroke { points: centre, closed: true, role: Role::Rosette });
-
-    let bands: &[(f64, f64, usize)] = match richness {
-        1 => &[(0.32, 0.58, 8)],
-        2 => &[(0.32, 0.54, 8), (0.56, 0.76, 12)],
-        _ => &[(0.32, 0.50, 8), (0.52, 0.70, 12), (0.72, 0.84, 18)],
+/// The field: the strapwork ground, then each tile inset by the strap's half-width, clipped to the
+/// field and finished, with its outline.
+fn field(sp: &Spec, fills: &mut Vec<Fill>, strokes: &mut Vec<Stroke>) {
+    let m = sp.metal;
+    let outline = match sp.finish {
+        Finish::Carved => m.dark,
+        Finish::Glazed => mix(sp.strap, (0, 0, 0), 0.55),
     };
-    for (bi, &(r0, r1, n)) in bands.iter().enumerate() {
-        for i in 0..n {
-            let (a0, a1) = (up + 2.0 * PI * i as f64 / n as f64, up + 2.0 * PI * (i + 1) as f64 / n as f64);
-            let points = wedge(r0, r1, a0, a1, 6);
-            fills.push(Fill { points: points.clone(), color: tiles[(i + bi) % tiles.len()] });
-            strokes.push(Stroke { points, closed: true, role: Role::Tile });
+    fills.push(Fill { points: circle((0.0, 0.0), FIELD, CIRCLE), color: sp.strap });
+    let bound = circle((0.0, 0.0), FIELD - sp.gap, CIRCLE);
+    let edge = |points: Vec<Point>, strokes: &mut Vec<Stroke>| strokes.push(Stroke { points, closed: true, role: Role::Tile, color: outline, width: 0.0045 });
+    for t in tiles(sp.pattern) {
+        let Some(inner) = inset(&t.points, sp.gap) else { continue };
+        let piece = clip(&inner, &bound);
+        if area(&piece) < 2e-4 {
+            continue;
         }
+        if t.centre && sp.centre != Centre::Plain {
+            centrepiece(sp, &piece, &bound, fills);
+            if sp.centre != Centre::Raised {
+                edge(scale(&piece, 0.62), strokes);
+            }
+        } else {
+            match sp.finish {
+                Finish::Carved => recessed(fills, &piece, sp.tiles[t.kind], mix(sp.tiles[t.kind], m.dark, 0.85)),
+                Finish::Glazed => glazed(fills, &piece, sp.tiles[t.kind]),
+            }
+            // The inlay is scaled from the whole tile, so where the frame cuts the tile it cuts the inlay too.
+            let small = clip(&scale(&inner, 0.55), &piece);
+            if let (Some(inlay), true) = (sp.inlay, area(&small) > 2e-4) {
+                match sp.finish {
+                    Finish::Carved => raised(fills, &small, &piece, inlay[t.kind], m.dark),
+                    Finish::Glazed => {
+                        glazed(fills, &small, inlay[t.kind]);
+                        edge(small, strokes);
+                    }
+                }
+            }
+        }
+        edge(piece, strokes);
     }
-
-    strokes.push(Stroke { points: rope(0.88, 0.022, 16, 0.0), closed: true, role: Role::Strap });
-    if richness > 1 {
-        strokes.push(Stroke { points: rope(0.88, 0.018, 22, PI / 11.0), closed: true, role: Role::Strap });
-    }
-    Badge { fills, strokes, palette }
 }
 
-/// A Persian girih medallion: a flat decagon centrepiece in a tessellation of bowtie and hexagon tiles
-/// — girih's own tile set, not a radiating star — under a scalloped guilloche border, richest at the top.
-fn girih(palette: Palette, richness: usize) -> Badge {
-    let up = PI / 2.0;
-    let mut fills = Vec::new();
-    let mut strokes = rings(richness + 1);
-
-    let centre = regular_polygon(10, 0.26, up);
-    fills.push(Fill { points: centre.clone(), color: palette.rosette });
-    strokes.push(Stroke { points: centre, closed: true, role: Role::Rosette });
-
-    // Bowtie tiles ringing the centrepiece, girih's own filler piece between neighbouring decagons.
-    let spread = PI / 16.0;
-    for i in 0..10 {
-        let a = up + 2.0 * PI * i as f64 / 10.0 + PI / 10.0;
-        let bowtie = vec![polar(0.28, a), polar(0.48, a - spread), polar(0.6, a), polar(0.48, a + spread)];
-        fills.push(Fill { points: bowtie.clone(), color: palette.field });
-        strokes.push(Stroke { points: bowtie, closed: true, role: Role::Tile });
+/// The tile at the centre, made a focal point: raised and recessed in carving, a metal boss with an
+/// inlay in tilework, and a set gem at the top.
+fn centrepiece(sp: &Spec, piece: &[Point], bound: &[Point], fills: &mut Vec<Fill>) {
+    let m = sp.metal;
+    if sp.centre == Centre::Raised {
+        raised(fills, piece, bound, m.light, m.dark);
+        recessed(fills, &scale(piece, 0.5), m.mid, mix(m.mid, m.dark, 0.7));
+        return;
     }
+    fills.push(Fill { points: piece.to_vec(), color: m.dark });
+    fills.push(Fill { points: clip(&shift(&scale(piece, 0.93), (-0.006, 0.006)), piece), color: m.mid });
+    let inlay = scale(piece, 0.62);
+    glazed(fills, &inlay, sp.jewel);
+    if sp.centre == Centre::Jewelled {
+        gem(fills, (0.0, 0.0), 0.05, sp.tiles[1], m);
+    }
+}
 
-    if richness > 1 {
-        // Grandmaster's outer ring: small flat hexagon tiles, girih's third piece, completing the tessellation.
-        for i in 0..10 {
-            let a = up + 2.0 * PI * i as f64 / 10.0;
-            let hexagon: Vec<Point> = regular_polygon(6, 0.085, a).iter().map(|&(x, y)| (x + 0.72 * a.cos(), y + 0.72 * a.sin())).collect();
-            fills.push(Fill { points: hexagon.clone(), color: palette.rosette });
-            strokes.push(Stroke { points: hexagon, closed: true, role: Role::Tile });
+/// A panel sunk below the strapwork: lit from the top left, its top-left wall falls in shadow.
+fn recessed(fills: &mut Vec<Fill>, piece: &[Point], floor: Rgb, wall: Rgb) {
+    fills.push(Fill { points: piece.to_vec(), color: wall });
+    fills.push(Fill { points: clip(&shift(&scale(piece, 0.9), (0.016, -0.016)), piece), color: floor });
+}
+
+/// A boss standing proud of its surround: its shadow falls to the lower right, kept within `within`.
+fn raised(fills: &mut Vec<Fill>, piece: &[Point], within: &[Point], face: Rgb, shadow: Rgb) {
+    fills.push(Fill { points: clip(&shift(piece, (0.01, -0.01)), within), color: shadow });
+    fills.push(Fill { points: piece.to_vec(), color: face });
+}
+
+/// A flush glazed tile with a soft highlight towards the light.
+fn glazed(fills: &mut Vec<Fill>, piece: &[Point], color: Rgb) {
+    fills.push(Fill { points: piece.to_vec(), color });
+    fills.push(Fill { points: clip(&shift(&scale(piece, 0.8), (-0.008, 0.008)), piece), color: mix(color, (0xff, 0xff, 0xff), 0.14) });
+}
+
+/// A round bead or pearl: a shadow to the lower right, the bead, and a highlight to the upper left.
+fn bead(fills: &mut Vec<Fill>, c: Point, r: f64, m: Metal) {
+    fills.push(Fill { points: circle((c.0 + 0.22 * r, c.1 - 0.22 * r), r, 16), color: m.dark });
+    fills.push(Fill { points: circle(c, r, 16), color: m.mid });
+    fills.push(Fill { points: circle((c.0 - 0.32 * r, c.1 + 0.32 * r), 0.36 * r, 12), color: m.light });
+}
+
+/// A cabochon gem in a metal bezel, with a highlight.
+fn gem(fills: &mut Vec<Fill>, c: Point, r: f64, color: Rgb, m: Metal) {
+    fills.push(Fill { points: circle(c, 1.32 * r, 24), color: m.dark });
+    fills.push(Fill { points: circle(c, 1.2 * r, 24), color: m.mid });
+    let stone = circle(c, r, 24);
+    fills.push(Fill { points: stone.clone(), color: mix(color, (0, 0, 0), 0.35) });
+    fills.push(Fill { points: clip(&shift(&scale(&stone, 0.86), (-0.12 * r, 0.12 * r)), &stone), color });
+    fills.push(Fill { points: circle((c.0 - 0.36 * r, c.1 + 0.36 * r), 0.26 * r, 12), color: mix(color, (0xff, 0xff, 0xff), 0.8) });
+}
+
+/// The border band between the field and the rim, and its ornament.
+fn border(sp: &Spec, fills: &mut Vec<Fill>, strokes: &mut Vec<Stroke>) {
+    let m = sp.metal;
+    let mid = (FIELD + BAND) / 2.0;
+    fills.push(Fill { points: circle((0.0, 0.0), BAND, CIRCLE), color: m.mid });
+    let fillet = |r: f64, strokes: &mut Vec<Stroke>| {
+        let ring = circle((0.0, 0.0), r, CIRCLE);
+        strokes.push(Stroke { points: shift(&ring, (0.005, -0.005)), closed: true, role: Role::Band, color: m.dark, width: 0.018 });
+        strokes.push(Stroke { points: shift(&ring, (-0.003, 0.003)), closed: true, role: Role::Band, color: m.light, width: 0.009 });
+    };
+    let around = |n: usize, turn: f64| (0..n).map(move |i| PI / 2.0 + turn + 2.0 * PI * i as f64 / n as f64);
+    match sp.border {
+        Border::Plain => {}
+        Border::Fillet => fillet(mid, strokes),
+        Border::Beads => {
+            for a in around(48, 0.0) {
+                bead(fills, polar(mid, a), 0.024, m);
+            }
+        }
+        Border::Rope => {
+            // A twisted cord: slanted ovals overlapping round the band.
+            for a in around(56, 0.0) {
+                let (n, t) = ((a.cos(), a.sin()), (-a.sin(), a.cos()));
+                let slant = 0.75_f64;
+                let u = (n.0 * slant.sin() + t.0 * slant.cos(), n.1 * slant.sin() + t.1 * slant.cos());
+                let w = (-u.1, u.0);
+                let c = polar(mid, a);
+                let oval = ccw((0..14).map(|k| {
+                    let f = 2.0 * PI * k as f64 / 14.0;
+                    (c.0 + u.0 * 0.056 * f.cos() + w.0 * 0.02 * f.sin(), c.1 + u.1 * 0.056 * f.cos() + w.1 * 0.02 * f.sin())
+                }).collect());
+                fills.push(Fill { points: shift(&oval, (0.005, -0.005)), color: m.dark });
+                fills.push(Fill { points: oval.clone(), color: mix(m.mid, m.light, 0.35) });
+                fills.push(Fill { points: shift(&scale(&oval, 0.45), (-0.006, 0.006)), color: m.light });
+            }
+        }
+        Border::BeadsAndFillet => {
+            fillet(BAND - 0.022, strokes);
+            for a in around(36, 0.0) {
+                bead(fills, polar(mid - 0.012, a), 0.02, m);
+            }
+        }
+        Border::Jewels | Border::Crown => {
+            for (i, a) in around(24, 0.0).enumerate() {
+                if sp.border == Border::Crown {
+                    gem(fills, polar(mid, a), 0.026, if i % 2 == 0 { TURQUOISE } else { LAPIS }, m);
+                } else {
+                    let (n, t) = ((a.cos(), a.sin()), (-a.sin(), a.cos()));
+                    let c = polar(mid, a);
+                    let lozenge = ccw(vec![(c.0 + t.0 * 0.05, c.1 + t.1 * 0.05), (c.0 + n.0 * 0.038, c.1 + n.1 * 0.038), (c.0 - t.0 * 0.05, c.1 - t.1 * 0.05), (c.0 - n.0 * 0.038, c.1 - n.1 * 0.038)]);
+                    fills.push(Fill { points: shift(&lozenge, (0.005, -0.005)), color: m.dark });
+                    fills.push(Fill { points: lozenge.clone(), color: m.mid });
+                    glazed(fills, &scale(&lozenge, 0.5), sp.tiles[0]);
+                }
+            }
+            for a in around(24, PI / 24.0) {
+                bead(fills, polar(mid, a), 0.016, m);
+            }
+            if sp.border == Border::Crown {
+                for a in around(60, 0.0) {
+                    bead(fills, polar((BAND + 1.0) / 2.0, a), 0.0115, PEARL);
+                }
+            }
         }
     }
+}
 
-    strokes.push(Stroke { points: rope(0.87, 0.022, 18, 0.0), closed: true, role: Role::Strap });
-    if richness > 1 {
-        strokes.push(Stroke { points: rope(0.79, 0.016, 26, PI / 13.0), closed: true, role: Role::Strap });
+/// A plain n-gon, counter-clockwise, its first vertex at angle `rotation`.
+fn regular_polygon(n: usize, radius: f64, rotation: f64) -> Vec<Point> {
+    (0..n).map(|i| polar(radius, rotation + 2.0 * PI * i as f64 / n as f64)).collect()
+}
+
+fn circle(c: Point, r: f64, n: usize) -> Vec<Point> {
+    shift(&regular_polygon(n, r, 0.0), c)
+}
+
+fn shift(poly: &[Point], d: Point) -> Vec<Point> {
+    poly.iter().map(|p| (p.0 + d.0, p.1 + d.1)).collect()
+}
+
+/// The polygon scaled by `k` about its centroid.
+fn scale(poly: &[Point], k: f64) -> Vec<Point> {
+    let c = centroid(poly);
+    poly.iter().map(|p| (c.0 + (p.0 - c.0) * k, c.1 + (p.1 - c.1) * k)).collect()
+}
+
+/// Twice nothing: the signed area, positive when counter-clockwise.
+fn area(poly: &[Point]) -> f64 {
+    let n = poly.len();
+    (0..n).map(|i| poly[i].0 * poly[(i + 1) % n].1 - poly[(i + 1) % n].0 * poly[i].1).sum::<f64>() / 2.0
+}
+
+fn centroid(poly: &[Point]) -> Point {
+    let (a, n) = (area(poly), poly.len());
+    if a.abs() < 1e-12 {
+        let k = n.max(1) as f64;
+        return poly.iter().fold((0.0, 0.0), |s, p| (s.0 + p.0 / k, s.1 + p.1 / k));
     }
-    Badge { fills, strokes, palette }
+    let (mut x, mut y) = (0.0, 0.0);
+    for i in 0..n {
+        let (p, q) = (poly[i], poly[(i + 1) % n]);
+        let w = p.0 * q.1 - q.0 * p.1;
+        x += (p.0 + q.0) * w;
+        y += (p.1 + q.1) * w;
+    }
+    (x / (6.0 * a), y / (6.0 * a))
+}
+
+fn ccw(mut poly: Vec<Point>) -> Vec<Point> {
+    if area(&poly) < 0.0 {
+        poly.reverse();
+    }
+    poly
+}
+
+fn dist2(a: Point, b: Point) -> f64 {
+    (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)
+}
+
+/// A convex counter-clockwise polygon with every edge moved inward by `d`, or None if it vanishes.
+fn inset(poly: &[Point], d: f64) -> Option<Vec<Point>> {
+    let n = poly.len();
+    let line = |i: usize| {
+        let (p, q) = (poly[i], poly[(i + 1) % n]);
+        let (dx, dy) = (q.0 - p.0, q.1 - p.1);
+        let len = dx.hypot(dy);
+        ((p.0 - dy / len * d, p.1 + dx / len * d), (dx, dy))
+    };
+    let out: Vec<Point> = (0..n)
+        .map(|i| {
+            let ((p, u), (q, v)) = (line((i + n - 1) % n), line(i));
+            intersect(p, u, q, v)
+        })
+        .collect::<Option<_>>()?;
+    (area(&out) > 0.0 && area(&out) < area(poly)).then_some(out)
+}
+
+/// The part of `subject` inside the convex counter-clockwise polygon `bound` (Sutherland–Hodgman).
+fn clip(subject: &[Point], bound: &[Point]) -> Vec<Point> {
+    let mut out = subject.to_vec();
+    for i in 0..bound.len() {
+        if out.is_empty() {
+            break;
+        }
+        let (a, b) = (bound[i], bound[(i + 1) % bound.len()]);
+        let inside = |p: Point| (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0) >= 0.0;
+        let cut = |p: Point, q: Point| intersect(p, (q.0 - p.0, q.1 - p.1), a, (b.0 - a.0, b.1 - a.1)).unwrap_or(q);
+        let input = std::mem::take(&mut out);
+        for j in 0..input.len() {
+            let (p, q) = (input[j], input[(j + 1) % input.len()]);
+            match (inside(p), inside(q)) {
+                (true, true) => out.push(q),
+                (true, false) => out.push(cut(p, q)),
+                (false, true) => {
+                    out.push(cut(p, q));
+                    out.push(q);
+                }
+                (false, false) => {}
+            }
+        }
+    }
+    out
+}
+
+/// `a` moved towards `b` by `t`.
+fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
+    let m = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round() as u8;
+    (m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
 }
 
 fn polar(r: f64, a: f64) -> Point {
@@ -320,30 +722,37 @@ fn path(points: &[Point], closed: bool, cx: f64, cy: f64, r: f64) -> String {
     d
 }
 
-/// A tier's badge as an SVG `<g>`, centred on (cx, cy) with radius r: a ground disc, fills, a thin
-/// line for the rim and tile grout, then strapwork (a wide band stroke under a narrow line stroke).
+/// A tier's badge as an SVG `<g>`, centred on (cx, cy) with radius r: the bevelled rim, the fills and
+/// strokes in order, then a vignette over the field and a sheen over the whole.
 pub fn svg(tier: usize, cx: f64, cy: f64, r: f64) -> String {
     let b = badge(tier);
-    let p = b.palette;
+    let m = b.metal;
+    let id = format!("badge{}", tier.min(TIERS - 1));
     let mut out = String::from("<g>");
-    let _ = write!(out, "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{}\"/>", num(cx), num(cy), num(r), hex(p.ground));
+    let _ = write!(out, "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"url(#{id}-rim)\"/>", num(cx), num(cy), num(r));
+    let _ = write!(
+        out,
+        "<defs><linearGradient id=\"{id}-rim\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"{l}\"/><stop offset=\"0.5\" stop-color=\"{m}\"/><stop offset=\"1\" stop-color=\"{d}\"/></linearGradient>\
+         <linearGradient id=\"{id}-bevel\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"{d}\"/><stop offset=\"0.5\" stop-color=\"{m}\"/><stop offset=\"1\" stop-color=\"{l}\"/></linearGradient>\
+         <radialGradient id=\"{id}-vignette\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\"><stop offset=\"0.6\" stop-color=\"#000\" stop-opacity=\"0\"/><stop offset=\"1\" stop-color=\"#000\" stop-opacity=\"0.3\"/></radialGradient>\
+         <linearGradient id=\"{id}-sheen\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#fff\" stop-opacity=\"{g}\"/><stop offset=\"0.55\" stop-color=\"#fff\" stop-opacity=\"0\"/></linearGradient></defs>",
+        l = hex(m.light),
+        m = hex(m.mid),
+        d = hex(m.dark),
+        g = num(b.gloss),
+    );
+    let _ = write!(out, "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"url(#{id}-bevel)\"/>", num(cx), num(cy), num(0.96 * r));
     for f in &b.fills {
         let _ = write!(out, "<path d=\"{}\" fill=\"{}\"/>", path(&f.points, true, cx, cy, r), hex(f.color));
     }
-    let _ = write!(out, "<g fill=\"none\" stroke-linejoin=\"round\" stroke-linecap=\"round\">");
-    let _ = write!(out, "<g stroke=\"{}\" stroke-width=\"{}\">", hex(p.band), num(0.012 * r));
-    for s in b.strokes.iter().filter(|s| matches!(s.role, Role::Ring | Role::Tile)) {
-        let _ = write!(out, "<path d=\"{}\"/>", path(&s.points, s.closed, cx, cy, r));
+    out.push_str("<g fill=\"none\" stroke-linejoin=\"round\" stroke-linecap=\"round\">");
+    for s in &b.strokes {
+        let _ = write!(out, "<path d=\"{}\" stroke=\"{}\" stroke-width=\"{}\"/>", path(&s.points, s.closed, cx, cy, r), hex(s.color), num(s.width * r));
     }
     out.push_str("</g>");
-    for (color, width) in [(p.band, 0.065), (p.line, 0.022)] {
-        let _ = write!(out, "<g stroke=\"{}\" stroke-width=\"{}\">", hex(color), num(width * r));
-        for s in b.strokes.iter().filter(|s| matches!(s.role, Role::Strap | Role::Rosette)) {
-            let _ = write!(out, "<path d=\"{}\"/>", path(&s.points, s.closed, cx, cy, r));
-        }
-        out.push_str("</g>");
-    }
-    out.push_str("</g></g>");
+    let _ = write!(out, "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"url(#{id}-vignette)\"/>", num(cx), num(cy), num(FIELD * r));
+    let _ = write!(out, "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"url(#{id}-sheen)\"/>", num(cx), num(cy), num(r));
+    out.push_str("</g>");
     out
 }
 
@@ -359,14 +768,6 @@ mod tests {
 
     fn rotate(p: Point, a: f64) -> Point {
         (p.0 * a.cos() - p.1 * a.sin(), p.0 * a.sin() + p.1 * a.cos())
-    }
-
-    fn distinct_colors(tier: usize) -> usize {
-        let b = badge(tier);
-        let mut colors: Vec<Rgb> = b.fills.iter().map(|f| f.color).collect();
-        colors.sort();
-        colors.dedup();
-        colors.len()
     }
 
     #[test]
@@ -454,79 +855,96 @@ mod tests {
     }
 
     #[test]
-    fn carved_tiers_read_as_one_material() {
-        // Novice has only the raised strap tone; Apprentice adds a single boss tone.
-        assert_eq!(distinct_colors(0), 1, "Novice should be one material tone");
-        assert_eq!(distinct_colors(1), 2, "Apprentice adds only the boss tone");
-    }
-
-    #[test]
-    fn zellij_tiers_grow_more_colourful_with_tier() {
-        let counts: Vec<usize> = (2..=4).map(distinct_colors).collect();
-        assert!(counts[0] < counts[1] && counts[1] < counts[2], "zellij colour counts {counts:?}");
-    }
-
-    #[test]
-    fn girih_tiers_have_a_flat_tenfold_centrepiece_and_ten_bowtie_tiles() {
-        for tier in [5, 6] {
-            let b = badge(tier);
-            let rosette = b.strokes.iter().find(|s| s.role == Role::Rosette).expect("a rosette");
-            assert_eq!(rosette.points.len(), 10, "a flat decagon has 10 points, not a star's 20");
-            let tiles = b.strokes.iter().filter(|s| s.role == Role::Tile).count();
-            assert!(tiles >= 10, "tier {tier} has only {tiles} tiles");
-        }
-        // Grandmaster adds a ring of ten hexagon tiles and a second guilloche border.
-        assert_eq!(badge(6).strokes.iter().filter(|s| s.role == Role::Tile).count(), 20);
-        assert_eq!(badge(6).strokes.iter().filter(|s| s.role == Role::Strap).count(), 2);
-    }
-
-    #[test]
-    fn no_badge_shape_has_a_sharp_outward_point() {
-        // Every closed fill should be a convex-ish polygon or wedge, not a star with deep inward valleys:
-        // each vertex stays within a modest distance of the shape's own centroid.
+    fn every_fill_is_convex_so_no_shape_is_a_star() {
         for tier in 0..TIERS {
             for f in &badge(tier).fills {
-                let n = f.points.len() as f64;
-                let (cx, cy) = f.points.iter().fold((0.0, 0.0), |(sx, sy), p| (sx + p.0 / n, sy + p.1 / n));
-                let radii: Vec<f64> = f.points.iter().map(|&(x, y)| dist((x - cx, y - cy))).collect();
-                let (min, max) = (radii.iter().copied().fold(f64::INFINITY, f64::min), radii.iter().copied().fold(0.0, f64::max));
-                assert!(max < min * 3.0 || min < 1e-6, "tier {tier} fill has a spiky point: {radii:?}");
+                let n = f.points.len();
+                assert!(n >= 3, "tier {tier} has a degenerate fill");
+                for i in 0..n {
+                    let (a, b, c) = (f.points[i], f.points[(i + 1) % n], f.points[(i + 2) % n]);
+                    let turn = (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0);
+                    assert!(turn >= -1e-9, "tier {tier} has a concave fill at {b:?}");
+                }
             }
         }
     }
 
     #[test]
-    fn richer_tiers_within_a_style_have_more_geometry() {
-        let total = |t: usize| badge(t).fills.len() + badge(t).strokes.len();
-        assert!(total(0) < total(1), "carved: {} vs {}", total(0), total(1));
-        assert!(total(2) < total(3) && total(3) < total(4), "zellij: {} {} {}", total(2), total(3), total(4));
-        assert!(total(5) < total(6), "girih: {} vs {}", total(5), total(6));
+    fn carved_tiers_are_one_warm_material_and_tiled_tiers_carry_blue_glaze() {
+        for tier in [0, 1] {
+            for f in &badge(tier).fills {
+                let (r, g, b) = f.color;
+                assert!(r >= g && g >= b, "tier {tier} fill {:?} is not the carved material", f.color);
+            }
+        }
+        for tier in 2..TIERS {
+            assert!(badge(tier).fills.iter().any(|f| f.color.2 as i32 > f.color.0 as i32 + 40), "tier {tier} has no blue glaze");
+        }
+    }
+
+    #[test]
+    fn each_rank_adds_detail() {
+        let detail: Vec<usize> = (0..TIERS).map(|t| badge(t).fills.len() + badge(t).strokes.len()).collect();
+        for w in detail.windows(2) {
+            assert!(w[0] < w[1], "detail by tier {detail:?}");
+        }
+    }
+
+    #[test]
+    fn tile_patterns_keep_their_rotational_symmetry() {
+        for (tier, fold) in [4, 6, 4, 4, 4, 10, 10].into_iter().enumerate() {
+            let centres: Vec<Point> = badge(tier).strokes.iter().filter(|s| s.role == Role::Tile).map(|s| centroid(&s.points)).collect();
+            assert!(centres.len() > fold, "tier {tier} has too few tiles");
+            for &c in &centres {
+                let turned = rotate(c, 2.0 * PI / fold as f64);
+                assert!(centres.iter().any(|&d| dist2(d, turned) < 1e-10), "tier {tier}: tile at {c:?} has no partner a 1/{fold} turn away");
+            }
+        }
+    }
+
+    #[test]
+    fn decagon_rings_close_into_a_bigger_decagon() {
+        // The rhombus tips of each ring are the corners of a regular decagon twice the side.
+        let tiles = tiles(Pattern::Decagons(0.86));
+        let tips: Vec<f64> = tiles.iter().filter(|t| t.kind == 2).map(|t| t.points.iter().map(|&p| dist(p)).fold(0.0, f64::max)).collect();
+        assert_eq!(tips.len(), 20);
+        assert!((tips[10] - 0.86).abs() < 1e-9, "outer ring reaches {}", tips[10]);
+        assert!((tips[0] - 0.43).abs() < 1e-9, "inner ring reaches {}", tips[0]);
+    }
+
+    #[test]
+    fn inset_and_clip_keep_shapes_inside() {
+        let square = regular_polygon(4, 1.0, PI / 4.0);
+        let small = inset(&square, 0.1).unwrap();
+        assert!((area(&small) - (2f64.sqrt() - 0.2).powi(2)).abs() < 1e-9);
+        assert!(inset(&square, 5.0).is_none(), "an inset past the middle vanishes");
+        let half = clip(&square, &[(0.0, -5.0), (5.0, -5.0), (5.0, 5.0), (0.0, 5.0)]);
+        assert!((area(&half) - area(&square) / 2.0).abs() < 1e-9);
     }
 
     #[test]
     #[ignore = "writes a preview SVG of all tiers to $BADGE_PREVIEW"]
     fn preview_all_tiers() {
         let path = std::env::var("BADGE_PREVIEW").expect("set BADGE_PREVIEW");
-        let mut out = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1680\" height=\"260\" viewBox=\"0 0 1680 260\"><rect width=\"1680\" height=\"260\" fill=\"#f4f1ea\"/>");
-        for tier in 0..TIERS {
-            out.push_str(&svg(tier, 120.0 + 240.0 * tier as f64, 130.0, 110.0));
-        }
-        out.push_str("</svg>");
-        std::fs::write(path, out).unwrap();
+        std::fs::write(path, preview()).unwrap();
     }
 
     #[test]
     #[ignore = "writes a preview PNG of all tiers to $BADGE_PREVIEW_PNG"]
     fn preview_all_tiers_png() {
         let path = std::env::var("BADGE_PREVIEW_PNG").expect("set BADGE_PREVIEW_PNG");
-        let mut svg_doc = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1680\" height=\"260\" viewBox=\"0 0 1680 260\"><rect width=\"1680\" height=\"260\" fill=\"#f4f1ea\"/>");
-        for tier in 0..TIERS {
-            svg_doc.push_str(&svg(tier, 120.0 + 240.0 * tier as f64, 130.0, 110.0));
-        }
-        svg_doc.push_str("</svg>");
-        let tree = resvg::usvg::Tree::from_str(&svg_doc, &resvg::usvg::Options::default()).unwrap();
+        let tree = resvg::usvg::Tree::from_str(&preview(), &resvg::usvg::Options::default()).unwrap();
         let mut pixmap = resvg::tiny_skia::Pixmap::new(1680, 260).unwrap();
         resvg::render(&tree, resvg::tiny_skia::Transform::default(), &mut pixmap.as_mut());
         pixmap.save_png(path).unwrap();
+    }
+
+    fn preview() -> String {
+        let mut out = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1680\" height=\"260\" viewBox=\"0 0 1680 260\"><rect width=\"1680\" height=\"260\" fill=\"#f4f1ea\"/>");
+        for tier in 0..TIERS {
+            out.push_str(&svg(tier, 120.0 + 240.0 * tier as f64, 130.0, 110.0));
+        }
+        out.push_str("</svg>");
+        out
     }
 }
