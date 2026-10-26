@@ -41,7 +41,9 @@ made, open questions, and the next steps, with file paths, so a fresh session ca
 ## Several sessions in one repo
 
 ```sh
-marsad coordination --format json   # {command, protocol_path}: starts a session with the coordination rules
+marsad rules                                         # lists the rules files sessions can start with
+marsad rules coordination --format json              # {command, protocol_path, rules}: starts a session with the coordination rules
+marsad rules coordination output-hygiene             # both, merged into one file (claude reads only one prompt file)
 ```
 
 Sessions started with that command coordinate on `AGENT-BOARD.md` at the root of the repo's main checkout: beside the absolute `git rev-parse --git-common-dir` when that is a `.git` dir, inside it otherwise (a bare clone or a submodule). Read it to see which sessions are active and which files they have claimed; the dashboard's `b` key shows it too.

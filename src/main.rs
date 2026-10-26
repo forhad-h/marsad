@@ -6,7 +6,6 @@ mod board;
 mod card;
 mod clipboard;
 mod context;
-mod coordination;
 mod events;
 mod hook;
 mod install;
@@ -15,6 +14,7 @@ mod live;
 mod model;
 mod portable;
 mod report;
+mod rules;
 mod settings;
 mod share;
 mod share_view;
@@ -83,8 +83,10 @@ enum Cmd {
     },
     /// How full this session's context is, and the automatic handoff warning (--warn).
     Context(context::ContextArgs),
-    /// Print the `claude` command that starts a session with the multi-session coordination rules.
-    Coordination(coordination::CoordinationArgs),
+    /// List the rules a Claude Code session can start with, or print the command that loads a chosen set.
+    Rules(rules::RulesArgs),
+    /// Print the `claude` command that starts a session with the coordination rules (`marsad rules coordination`).
+    Coordination(rules::CoordinationArgs),
     /// Update marsad to the latest release (or turn automatic updates on/off with --auto).
     Update(update::UpdateArgs),
 }
@@ -134,7 +136,8 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Cmd::Status(args)) => live::status(args),
         Some(Cmd::Context(args)) => context::run(args),
-        Some(Cmd::Coordination(args)) => coordination::run(args),
+        Some(Cmd::Rules(args)) => rules::run(args),
+        Some(Cmd::Coordination(args)) => rules::run_coordination(args),
         Some(Cmd::Export { file }) => portable::export(file),
         Some(Cmd::Import { file, restore }) => portable::import(&file, restore),
         Some(Cmd::Update(args)) => update::run(args),

@@ -42,14 +42,14 @@ The user stands behind these four claims publicly:
 ## Operating Context
 
 - **The terminal is where the product is used.** The ratatui dashboard runs in the user's terminal next to their Claude Code sessions, often in tmux and sometimes over SSH. Key-driven, no mouse. Status must be readable at a glance.
-- **The CLI is for scripts and agents.** Commands such as `marsad total`, `report`, `context`, `badges`, `share --print`, `coordination`, `export` and `import` are used by scripts and by Claude itself through the bundled `marsad-usage` skill (`assets/SKILL.md`).
+- **The CLI is for scripts and agents.** Commands such as `marsad total`, `report`, `context`, `badges`, `share --print`, `rules`, `export` and `import` are used by scripts and by Claude itself through the bundled `marsad-usage` skill (`assets/SKILL.md`).
 - **The share card is seen in a LinkedIn feed.** It is a 1200×627 PNG with Islamic geometric badge art by tier, the user's name, the rank, token stats and earned achievement medals. Recruiters and business owners see it there.
 - **GitHub is the front door today.** The README on GitHub, plus GitHub Releases for installers. A static landing page is planned.
 
 ## Capabilities and Constraints
 
-- **Install:** `marsad install` / `uninstall` manage hooks, the status line, the skill and the coordination rules in `~/.claude/settings.json`. Running sessions pick them up after a restart.
-- **Dashboard keys:** sessions list, history, subagents, usage view, agent board (`b`), copy the coordination command (`c`), alerts, sort. Badges (`B`) and share (`p`) are being built on `feat/badges-and-share`.
+- **Install:** `marsad install` / `uninstall` manage hooks, the status line, the skill and the rules files in `~/.claude/settings.json`. Running sessions pick them up after a restart.
+- **Dashboard keys:** sessions list, history, subagents, usage view, agent board (`b`), copy a launch command with the chosen rules (`c`), alerts, sort. Badges (`B`) and share (`p`) are being built on `feat/badges-and-share`.
 - **Platforms:** macOS, Linux and Windows. Installers ship through GitHub Releases.
 - **Ranks:** seven tiers, Novice to Grandmaster, from all-time tokens (cache reads included). Achievements are bronze, silver and gold for streak, distinct skills, subagents and busiest day.
 - **Terms:** canonical domain terms live in `CONCEPTS.md`, for example session status, day counter, coordination protocol, agent board, claim.

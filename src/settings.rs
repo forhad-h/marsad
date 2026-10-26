@@ -42,6 +42,29 @@ pub fn set_alerts(on: bool) -> anyhow::Result<()> {
     set_at(&path(), "alerts", json!(on))
 }
 
+fn rules_at(path: &Path) -> crate::rules::Selection {
+    let keys: Vec<String> = load_at(path)
+        .get("rules")
+        .and_then(Value::as_array)
+        .map(|keys| keys.iter().filter_map(Value::as_str).map(String::from).collect())
+        .unwrap_or_default();
+    // Keys this version doesn't know are dropped rather than failing the whole choice.
+    let known: Vec<&String> = keys.iter().filter(|k| crate::rules::Selection::parse(&[k.as_str()]).is_ok()).collect();
+    match crate::rules::Selection::parse(&known) {
+        Ok(sel) if !sel.is_empty() => sel,
+        _ => crate::rules::Selection::COORDINATION,
+    }
+}
+
+/// The rules `c` last copied a command for (coordination until one is chosen).
+pub fn rules() -> crate::rules::Selection {
+    rules_at(&path())
+}
+
+pub fn set_rules(sel: crate::rules::Selection) -> anyhow::Result<()> {
+    set_at(&path(), "rules", json!(sel.keys()))
+}
+
 /// Preferences an export carries; anything else in the file stays on this machine.
 const PORTABLE: &[&str] = &["retention_days", "alerts", "context_warning_pct"];
 
@@ -159,6 +182,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         (dir.join("settings.json"), dir.join("history.json"))
+    }
+
+    #[test]
+    fn rules_default_to_coordination_and_drop_unknown_keys() {
+        use crate::rules::Selection;
+        let (file, _) = temp("rules");
+        assert_eq!(rules_at(&file), Selection::COORDINATION, "never chosen");
+        let both = Selection::parse(&["coordination", "output-hygiene"]).unwrap();
+        set_at(&file, "rules", json!(both.keys())).unwrap();
+        assert_eq!(rules_at(&file), both);
+        set_at(&file, "rules", json!(["output-hygiene", "retired"])).unwrap();
+        assert_eq!(rules_at(&file).keys(), ["output-hygiene"]);
+        set_at(&file, "rules", json!([])).unwrap();
+        assert_eq!(rules_at(&file), Selection::COORDINATION, "an empty choice falls back");
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 
     #[test]

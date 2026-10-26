@@ -140,12 +140,16 @@ pub struct App {
     pub update: Option<crate::update::Notice>,
     /// Sounds and notifications for sessions that need the user or finish; `m` toggles.
     pub alerts_on: bool,
-    /// A failure to show in the footer, such as settings that couldn't be saved; the next key clears it.
+    /// A failure to show in the footer, such as settings that couldn't be saved; the next key or `ERROR_FOR` clears it.
     pub error: Option<String>,
-    /// A success to show in the footer; the next key clears it.
+    /// A success to show in the footer; the next key or `INFO_FOR` clears it.
     pub info: Option<String>,
+    /// The footer note on screen and when it first showed, so it can expire.
+    note_shown: Option<(String, Instant)>,
     /// The launch command to copy by hand when the clipboard couldn't be reached; the next key clears it.
     pub copy_note: Option<CopyNote>,
+    /// The `c` picker for which rules the copied command loads, drawn over the current view while open.
+    pub rules_picker: Option<RulesPicker>,
     pub board: BoardState,
     /// The rank and achievements for the badge view, refreshed after each sync.
     pub badges: Option<Badges>,
@@ -166,6 +170,42 @@ pub struct CopyNote {
     pub headline: &'static str,
     pub command: String,
     pub path: String,
+    /// The `marsad rules …` command that prints the same launch command.
+    pub cli: String,
+}
+
+/// The rules ticked in the `c` picker and the highlighted row.
+pub struct RulesPicker {
+    pub selection: crate::rules::Selection,
+    pub cursor: usize,
+}
+
+/// How long a success note stays in the footer.
+const INFO_FOR: Duration = Duration::from_secs(4);
+/// How long a failure note stays in the footer; longer, so it isn't missed.
+const ERROR_FOR: Duration = Duration::from_secs(8);
+
+/// Clears the error, or failing that the info, once it has been on screen for its time.
+/// `shown` remembers which text is on screen and since when; a new text restarts the clock.
+fn expire_notes(error: &mut Option<String>, info: &mut Option<String>, shown: &mut Option<(String, Instant)>, now: Instant) {
+    let (note, ttl) = match (error.is_some(), info.is_some()) {
+        (true, _) => (error, ERROR_FOR),
+        (false, true) => (info, INFO_FOR),
+        (false, false) => {
+            *shown = None;
+            return;
+        }
+    };
+    let text = note.as_deref().unwrap_or_default();
+    match shown {
+        Some((on_screen, since)) if on_screen == text => {
+            if now.duration_since(*since) >= ttl {
+                *note = None;
+                *shown = None;
+            }
+        }
+        _ => *shown = Some((text.to_string(), now)),
+    }
 }
 
 /// The board view's state: which board, its last good parse, and when the file was read.
@@ -368,7 +408,7 @@ impl App {
     fn new() -> Self {
         let dir = crate::data_dir();
         // `marsad update` only swaps the binary, so refresh the rules this build ships.
-        let _ = crate::coordination::ensure_protocol();
+        let _ = crate::rules::refresh();
         let mut sessions = HashMap::new();
         // Replay the rotated log first so long-running sessions keep their history.
         for ev in JsonlTail::new(dir.join("events.1.jsonl")).read_new() {
@@ -394,7 +434,9 @@ impl App {
             alerts_on: crate::settings::alerts(),
             error: None,
             info: None,
+            note_shown: None,
             copy_note: None,
+            rules_picker: None,
             board: BoardState::default(),
             badges: None,
             share: None,
@@ -480,26 +522,54 @@ impl App {
         }
     }
 
-    /// Copies the command that starts a session with the coordination rules, refreshing the rules first.
-    fn copy_launch_command(&mut self) {
-        let path = match crate::coordination::ensure_protocol() {
+    /// Opens the `c` picker with the rules chosen last time ticked.
+    fn open_rules_picker(&mut self) {
+        self.rules_picker = Some(RulesPicker { selection: crate::settings::rules(), cursor: 0 });
+    }
+
+    fn on_picker_key(&mut self, code: KeyCode) {
+        let Some(picker) = self.rules_picker.as_mut() else { return };
+        let last = crate::rules::RULES.len() - 1;
+        match code {
+            KeyCode::Esc | KeyCode::Char('q' | 'c') => self.rules_picker = None,
+            KeyCode::Down | KeyCode::Char('j') => picker.cursor = (picker.cursor + 1).min(last),
+            KeyCode::Up | KeyCode::Char('k') => picker.cursor = picker.cursor.saturating_sub(1),
+            KeyCode::Char(' ' | 'x') => picker.selection.toggle(picker.cursor),
+            KeyCode::Char(d @ '1'..='9') => picker.selection.toggle(d as usize - '1' as usize),
+            KeyCode::Enter if picker.selection.is_empty() => self.error = Some("tick at least one with space ".into()),
+            KeyCode::Enter => {
+                let sel = picker.selection;
+                self.rules_picker = None;
+                self.copy_launch_command(sel);
+                if let Err(e) = crate::settings::set_rules(sel) {
+                    self.error = Some(format!("couldn't save the chosen rules: {e:#}"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Copies the command that starts a session with the rules in `sel`, refreshing their file first.
+    fn copy_launch_command(&mut self, sel: crate::rules::Selection) {
+        let path = match crate::rules::ensure(sel) {
             Ok(path) => path,
             Err(e) => {
-                self.error = Some(format!("couldn't write the coordination rules: {e:#}"));
+                self.error = Some(format!("couldn't write the rules file: {e:#}"));
                 return;
             }
         };
-        let command = crate::coordination::launch_command(&path);
+        let command = crate::rules::launch_command(&path);
         let headline = match crate::clipboard::copy(&command) {
             crate::clipboard::Copied::Native(_) => {
-                self.info = Some("copied the coordination command · it applies to new conversations ".into());
+                self.info = Some(format!("copied: claude with {} · it applies to new conversations ", sel.titles()));
                 return;
             }
             crate::clipboard::Copied::Terminal => "Sent to your terminal's clipboard, if it allows that. To copy it by hand:",
             crate::clipboard::Copied::Failed => "Couldn't reach a clipboard. Copy this command by hand:",
         };
-        let path = crate::coordination::quote_arg(&path.to_string_lossy());
-        self.copy_note = Some(CopyNote { headline, command, path });
+        let path = crate::rules::quote_arg(&path.to_string_lossy());
+        let cli = format!("marsad rules {}", sel.keys().join(" "));
+        self.copy_note = Some(CopyNote { headline, command, path, cli });
     }
 
     /// The rank and achievements now, with the header's all-time figure as the rank total.
@@ -563,6 +633,7 @@ impl App {
     /// After each frame: records a badge note the first time it was drawn, and lets it expire.
     fn after_draw(&mut self) {
         let now = Instant::now();
+        expire_notes(&mut self.error, &mut self.info, &mut self.note_shown, now);
         let shown = self.announcing();
         let Some(a) = self.announcement.as_mut() else { return };
         if a.on_drawn(shown, now)
@@ -717,12 +788,17 @@ impl App {
             }
             return Action::None;
         }
+        if self.rules_picker.is_some() {
+            (self.error, self.info, self.note_shown) = (None, None, None);
+            self.on_picker_key(key.code);
+            return Action::None;
+        }
         // Esc dismisses a badge note before it does anything else.
         if key.code == KeyCode::Esc && self.announcing() {
             self.announcement = None;
             return Action::None;
         }
-        (self.error, self.info, self.copy_note) = (None, None, None);
+        (self.error, self.info, self.note_shown, self.copy_note) = (None, None, None, None);
         match (self.view, key.code) {
             (_, KeyCode::Char('q')) => return Action::Quit,
             (View::Usage, code) => {
@@ -750,7 +826,7 @@ impl App {
             (View::List | View::Badges, KeyCode::Char('p')) => self.open_share(),
             (View::Badges, KeyCode::Esc | KeyCode::Char('B') | KeyCode::Left | KeyCode::Char('h')) => self.view = View::List,
             (View::List | View::History | View::Agents, KeyCode::Char('b')) => self.open_board(),
-            (View::List | View::Board, KeyCode::Char('c')) => self.copy_launch_command(),
+            (View::List | View::Board, KeyCode::Char('c')) => self.open_rules_picker(),
             (View::Board, KeyCode::Esc | KeyCode::Char('b') | KeyCode::Left | KeyCode::Char('h')) => self.view = View::List,
             (View::Board, KeyCode::Down | KeyCode::Char('j')) => self.board.scroll(1),
             (View::Board, KeyCode::Up | KeyCode::Char('k')) => self.board.scroll(-1),
@@ -942,6 +1018,38 @@ mod tests {
         for view in [View::History, View::Agents, View::Usage, View::Board] {
             assert!(!Announcement::shows_in(view));
         }
+    }
+
+    #[test]
+    fn footer_notes_expire_after_their_time_on_screen() {
+        let (mut error, mut info, mut shown) = (None, Some("copied".to_string()), None);
+        let start = Instant::now();
+        expire_notes(&mut error, &mut info, &mut shown, start);
+        expire_notes(&mut error, &mut info, &mut shown, start + INFO_FOR / 2);
+        assert!(info.is_some(), "still within its time");
+        expire_notes(&mut error, &mut info, &mut shown, start + INFO_FOR);
+        assert!(info.is_none() && shown.is_none());
+
+        // An error hides the info under it and keeps its own, longer clock.
+        let later = start + INFO_FOR * 2;
+        (error, info) = (Some("failed".into()), Some("copied".into()));
+        expire_notes(&mut error, &mut info, &mut shown, later);
+        expire_notes(&mut error, &mut info, &mut shown, later + INFO_FOR);
+        assert!(error.is_some(), "errors stay longer");
+        expire_notes(&mut error, &mut info, &mut shown, later + ERROR_FOR);
+        assert!(error.is_none());
+        expire_notes(&mut error, &mut info, &mut shown, later + ERROR_FOR);
+        assert!(info.is_some(), "the info's clock starts when it shows");
+        expire_notes(&mut error, &mut info, &mut shown, later + ERROR_FOR + INFO_FOR);
+        assert!(info.is_none());
+
+        // A new text restarts the clock.
+        let t = later + ERROR_FOR * 3;
+        info = Some("one".into());
+        expire_notes(&mut error, &mut info, &mut shown, t);
+        info = Some("two".into());
+        expire_notes(&mut error, &mut info, &mut shown, t + INFO_FOR);
+        assert_eq!(info.as_deref(), Some("two"));
     }
 
     #[test]
