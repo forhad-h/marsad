@@ -164,9 +164,9 @@ pub fn install(with_statusline: bool) -> anyhow::Result<()> {
     std::fs::write(skill_dir().join("SKILL.md"), SKILL_MD.replace("{{MARSAD_EXE}}", &exe.display().to_string()))?;
     println!("Installed marsad hooks for {} events in {}", EVENTS.len(), path.display());
     println!("Installed the marsad-usage skill in {}", skill_dir().display());
-    match crate::coordination::ensure_protocol() {
-        Ok(path) => println!("Wrote the coordination rules to {} (`marsad coordination` prints the launch command)", path.display()),
-        Err(e) => eprintln!("warning: couldn't write the coordination rules: {e:#}"),
+    match crate::rules::refresh() {
+        Ok(()) => println!("Wrote the rules files to {} (`marsad rules` lists them)", crate::data_dir().display()),
+        Err(e) => eprintln!("warning: couldn't write the rules files: {e:#}"),
     }
     println!("Sessions already running pick them up after a restart (or /hooks reload). Run `marsad` to open the dashboard.");
     Ok(())
@@ -182,8 +182,8 @@ pub fn uninstall() -> anyhow::Result<()> {
         std::fs::remove_dir_all(skill_dir())?;
         println!("Removed the marsad-usage skill");
     }
-    if crate::coordination::remove_protocol()? {
-        println!("Removed the coordination rules");
+    if crate::rules::remove_all()? > 0 {
+        println!("Removed the rules files");
     }
     Ok(())
 }

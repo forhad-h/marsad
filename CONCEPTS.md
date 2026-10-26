@@ -57,6 +57,10 @@ The rules marsad ships for Claude Code sessions that work in the same repo at on
 
 Claude Code records a conversation's system prompt on its first request and replays it on resume, so the protocol reaches new conversations only; refreshing the rules after an upgrade does not change conversations already started.
 
+### Rules file
+A markdown file of instructions marsad ships for a session's system prompt, such as the coordination protocol or the output-hygiene rules. A session can start with any set of them; a set of several is merged into one file, because `claude` reads only one `--append-system-prompt-file`.
+*Avoid:* protocol (for anything but the coordination rules)
+
 ### Agent board
 The one shared markdown file per repo through which coordinating sessions see each other, kept beside the repo's main checkout so every worktree of the repo shares it (inside the git directory when there is no checkout of its own). Sessions own and edit it under the coordination protocol; marsad only reads and shows it.
 *Avoid:* coordination file

@@ -223,7 +223,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             vec![
                 ("↑↓", "scroll".into()),
                 ("g/G", "top/bottom".into()),
-                ("c", "copy launch command".into()),
+                ("c", "launch command".into()),
                 ("esc", "back".into()),
                 ("q", "quit".into()),
             ]
@@ -239,7 +239,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("B", "badges".into()),
                 ("p", "share".into()),
                 ("b", "board".into()),
-                ("c", "coord cmd".into()),
+                ("c", "launch cmd".into()),
                 ("a", ended.into()),
                 ("m", format!("alerts: {}", if app.alerts_on { "on" } else { "off" })),
                 ("s/S", format!("sort: {}", app.sort.label())),
@@ -247,12 +247,17 @@ pub fn draw(f: &mut Frame, app: &App) {
             ]
         }
     };
-    let keys = match &app.share {
-        Some(share) => {
+    let picker_digits = format!("space/1-{}", crate::rules::RULES.len());
+    let keys = match (&app.share, &app.rules_picker) {
+        (Some(share), _) => {
             draw_share(f, body, share, app.tick);
             share.keys().into_iter().map(|(k, label)| (k, label.to_string())).collect()
         }
-        None => keys,
+        (None, Some(picker)) => {
+            draw_rules_picker(f, body, picker);
+            vec![("↑↓", "move".into()), (picker_digits.as_str(), "tick".into()), ("enter", "copy".into()), ("esc", "cancel".into())]
+        }
+        (None, None) => keys,
     };
     let mut spans = vec![Span::raw(" ")];
     for (k, label) in keys {
@@ -341,7 +346,7 @@ fn draw_empty(f: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 "Press ".dark_gray(),
                 "c".bold(),
-                " to copy a command that starts sessions coordinating on a shared board.".dark_gray(),
+                " to copy a command that starts Claude Code with coordination or other rules.".dark_gray(),
             ]),
         ]
     } else {
@@ -369,8 +374,34 @@ fn draw_copy_note(f: &mut Frame, area: Rect, note: &crate::app::CopyNote) {
         lines.push(Line::from("claude --append-system-prompt-file".bold()));
         lines.push(Line::from(note.path.clone().bold()));
     }
-    lines.push(Line::from(dim("or run `marsad coordination` in another terminal")));
+    lines.push(Line::from(dim(format!("or run `{}` in another terminal", note.cli))));
     f.render_widget(Paragraph::new(lines), area);
+}
+
+/// The `c` picker, a small modal listing each rules file with a tick box.
+fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker) {
+    use crate::rules::RULES;
+    let mut lines = vec![Line::from(dim("Copy the command that starts Claude Code with:")), Line::from("")];
+    for (i, rule) in RULES.iter().enumerate() {
+        let tick = if picker.selection.contains(i) { "[x]" } else { "[ ]" };
+        let row = Line::from(vec![
+            Span::raw(if i == picker.cursor { "› " } else { "  " }),
+            Span::styled(format!("{} {tick} ", i + 1), Style::new().fg(ACCENT)),
+            rule.title.bold(),
+        ]);
+        lines.push(if i == picker.cursor { row.patch_style(Style::new().add_modifier(Modifier::REVERSED)) } else { row });
+        lines.push(Line::from(dim(format!("        {}", rule.summary))));
+    }
+    lines.extend([Line::from(""), Line::from(dim("Applies to new conversations; your choice is remembered."))]);
+    let w = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 4;
+    let (w, h) = (w.min(area.width), (lines.len() as u16 + 2).min(area.height));
+    let [_, rect, _] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(w), Constraint::Fill(1)]).areas(area);
+    let [_, rect, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(h), Constraint::Fill(1)]).areas(rect);
+    f.render_widget(Clear, rect);
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(ACCENT)).title(" Launch command ".bold());
+    let inner = block.inner(rect).inner(Margin { horizontal: 1, vertical: 0 });
+    f.render_widget(block, rect);
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn rgb(c: crate::badge_art::Rgb) -> Color {
@@ -592,12 +623,12 @@ fn draw_board(f: &mut Frame, area: Rect, app: &App) {
         let msg = match &state.read_error {
             Some(e) => vec![Line::from(format!("Couldn't read the board: {e}").red())],
             None => {
-                let command = crate::coordination::launch_command(&crate::coordination::protocol_path());
+                let command = crate::rules::launch_command(&crate::rules::path(crate::rules::Selection::COORDINATION));
                 vec![
                     Line::from(format!("No board for {repo} yet.").bold()),
                     Line::from(""),
                     Line::from(dim("Sessions started with the coordination rules create it when they begin work.")),
-                    Line::from(vec![dim("Press "), "c".bold(), dim(" to copy the command that starts one:")]),
+                    Line::from(vec![dim("Press "), "c".bold(), dim(" and tick Coordination to copy the command that starts one:")]),
                     Line::from(command.fg(ACCENT)),
                 ]
             }

@@ -3,6 +3,12 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- `c` opens a picker: start Claude Code with coordination, output-hygiene rules, or both
+- `marsad rules` lists the rules files and prints the command for any set of them
+- Success notes in the footer clear themselves after a few seconds
+
 ## 0.4.0 - 2026-10-24
 
 - Questions show QUESTION instead of PERMISSION, and PERMISSION is now APPROVE

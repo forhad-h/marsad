@@ -39,16 +39,16 @@ source with `cargo install --git https://github.com/forhad-h/marsad`.
 ## Usage
 
 ```sh
-marsad install     # registers hooks + status line in ~/.claude/settings.json (backup saved alongside), writes the coordination rules
+marsad install     # registers hooks + status line in ~/.claude/settings.json (backup saved alongside), writes the rules files
 marsad install --no-statusline   # hooks only; context size is then estimated from transcripts
 marsad             # open the dashboard
-marsad uninstall   # removes only marsad's hooks, skill and coordination rules
+marsad uninstall   # removes only marsad's hooks, skill and rules files
 marsad update      # install the latest version (shows current → latest and what's new)
 ```
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `B` badges · `p` share to LinkedIn · `b` agent board · `c` copy the coordination command · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `B` badges · `p` share to LinkedIn · `b` agent board · `c` copy a launch command with coordination and/or output-hygiene rules · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
 In session history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session history also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
 
@@ -141,15 +141,19 @@ so a subagent's used tokens (summed across all its turns) can be far above its c
 
 When several Claude Code sessions work in one repo, marsad's coordination rules keep them from editing the same files. Sessions that load the rules share one `AGENT-BOARD.md` at the root of the repo's main checkout (one board for all its worktrees, kept out of git through `.git/info/exclude`; a bare clone or a submodule keeps it inside its git directory). On it they register, claim files before editing them, record binding decisions, message each other, and log conflicts they can't settle as `needs-human`.
 
-`c` copies the command that starts a session with the rules:
+`c` opens a picker of the rules marsad ships: **Coordination** (above) and **Output hygiene** (keeps the request, who asked and how the work was done out of code, commits, PRs and docs). Tick one or both with `space` or its number, then press `enter` to copy the command. Your choice is remembered, so next time `c` then `enter` is enough.
 
 ```sh
-claude --append-system-prompt-file ~/.claude/marsad/coordination.md
+claude --append-system-prompt-file ~/.claude/marsad/coordination.md                  # coordination
+claude --append-system-prompt-file ~/.claude/marsad/output-hygiene.md                # output hygiene
+claude --append-system-prompt-file ~/.claude/marsad/coordination+output-hygiene.md   # both
 ```
 
-The rules are added to the session's system prompt, so they survive `/clear` and compaction. They apply to new conversations only: a resumed conversation keeps the system prompt it started with. They add about 2k tokens to each request of those sessions.
+Claude Code reads only the last `--append-system-prompt-file` it is given, so a set of rules is merged into one file per combination rather than passed as several flags.
 
-Over SSH, `c` sends the command through your terminal (OSC 52, which kitty, WezTerm, Alacritty and iTerm2 with clipboard access allow; tmux needs `set-clipboard on`) and also shows it so you can copy it by hand. `marsad coordination` prints it too (`--format json` for scripts).
+The rules are added to the session's system prompt, so they survive `/clear` and compaction. They apply to new conversations only: a resumed conversation keeps the system prompt it started with. The coordination rules add about 2k tokens to each request of those sessions.
+
+Over SSH, `c` sends the command through your terminal (OSC 52, which kitty, WezTerm, Alacritty and iTerm2 with clipboard access allow; tmux needs `set-clipboard on`) and also shows it so you can copy it by hand. `marsad rules` lists the rules and `marsad rules coordination output-hygiene` prints the command (`--format json` for scripts); `marsad coordination` is short for `marsad rules coordination`.
 
 `b` on a session opens its repo's board, read-only and live: agents with their last-seen times, claims, decisions, messages, conflicts and handoff notes. Agents and their claims not seen for more than 2 hours are marked `[stale]`, and `needs-human` conflicts are tagged in yellow. marsad never edits the board; the sessions own it. The rules live in marsad's data dir and are rewritten by each version, so copy the file elsewhere if you want to change them.
 
