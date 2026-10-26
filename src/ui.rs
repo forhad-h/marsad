@@ -247,6 +247,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             ]
         }
     };
+    let picker_digits = format!("space/1-{}", crate::rules::RULES.len());
     let keys = match (&app.share, &app.rules_picker) {
         (Some(share), _) => {
             draw_share(f, body, share, app.tick);
@@ -254,7 +255,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         (None, Some(picker)) => {
             draw_rules_picker(f, body, picker);
-            vec![("↑↓", "move".into()), ("space/1-9", "tick".into()), ("enter", "copy".into()), ("esc", "cancel".into())]
+            vec![("↑↓", "move".into()), (picker_digits.as_str(), "tick".into()), ("enter", "copy".into()), ("esc", "cancel".into())]
         }
         (None, None) => keys,
     };

@@ -69,6 +69,12 @@ impl Selection {
         self.rules().map(|r| r.title.to_lowercase()).collect::<Vec<_>>().join(" + ")
     }
 
+    /// Parses rule keys, dropping any this version doesn't know (a saved choice from a newer one).
+    pub fn parse_known<S: AsRef<str>>(keys: &[S]) -> Self {
+        let known: Vec<&str> = keys.iter().map(|k| k.as_ref()).filter(|k| *k == "all" || RULES.iter().any(|r| r.key == *k)).collect();
+        Selection::parse(&known).unwrap_or_default()
+    }
+
     /// Parses rule keys; `all` stands for every rule.
     pub fn parse<S: AsRef<str>>(keys: &[S]) -> anyhow::Result<Self> {
         let mut sel = Selection::default();
@@ -270,7 +276,7 @@ fn render(format: crate::report::Format, sel: Selection, command: &str, path: &P
         }
         Format::Csv => {
             let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-            format!("command,protocol_path\n{},{}", quote(command), quote(&path))
+            format!("command,protocol_path,rules\n{},{},{}", quote(command), quote(&path), quote(&sel.keys().join(" ")))
         }
     }
 }
@@ -308,7 +314,7 @@ mod tests {
         assert_eq!(json["rules"], serde_json::json!(["coordination"]));
         assert_eq!(
             render(Format::Csv, sel, &cmd, path),
-            "command,protocol_path\n\"claude --append-system-prompt-file /d/coordination.md\",\"/d/coordination.md\""
+            "command,protocol_path,rules\n\"claude --append-system-prompt-file /d/coordination.md\",\"/d/coordination.md\",\"coordination\""
         );
     }
 
@@ -321,6 +327,12 @@ mod tests {
         assert_eq!(BOTH.titles(), "coordination + output hygiene");
         let err = Selection::parse(&["nope"]).unwrap_err().to_string();
         assert!(err.contains("coordination, output-hygiene"), "{err}");
+        assert_eq!(Selection::parse_known(&["retired", "output-hygiene"]).keys(), ["output-hygiene"]);
+    }
+
+    #[test]
+    fn the_coordination_constant_names_the_coordination_rules() {
+        assert_eq!(Selection::COORDINATION.keys(), ["coordination"], "RULES[0] must stay coordination");
     }
 
     #[test]

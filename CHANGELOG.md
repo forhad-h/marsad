@@ -7,7 +7,7 @@ GitHub release. Keep each bullet to one short line.
 
 - `c` opens a picker: start Claude Code with coordination, output-hygiene rules, or both
 - `marsad rules` lists the rules files and prints the command for any set of them
-- Footer notes clear themselves after a few seconds
+- Success notes in the footer clear themselves after a few seconds
 
 ## 0.4.0 - 2026-10-24
 

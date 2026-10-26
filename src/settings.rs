@@ -49,10 +49,9 @@ fn rules_at(path: &Path) -> crate::rules::Selection {
         .map(|keys| keys.iter().filter_map(Value::as_str).map(String::from).collect())
         .unwrap_or_default();
     // Keys this version doesn't know are dropped rather than failing the whole choice.
-    let known: Vec<&String> = keys.iter().filter(|k| crate::rules::Selection::parse(&[k.as_str()]).is_ok()).collect();
-    match crate::rules::Selection::parse(&known) {
-        Ok(sel) if !sel.is_empty() => sel,
-        _ => crate::rules::Selection::COORDINATION,
+    match crate::rules::Selection::parse_known(&keys) {
+        sel if sel.is_empty() => crate::rules::Selection::COORDINATION,
+        sel => sel,
     }
 }
 
@@ -66,7 +65,7 @@ pub fn set_rules(sel: crate::rules::Selection) -> anyhow::Result<()> {
 }
 
 /// Preferences an export carries; anything else in the file stays on this machine.
-const PORTABLE: &[&str] = &["retention_days", "alerts", "context_warning_pct"];
+const PORTABLE: &[&str] = &["retention_days", "alerts", "context_warning_pct", "rules"];
 
 /// Where versions before 0.4 kept the retention.
 fn legacy_retention_path() -> PathBuf {

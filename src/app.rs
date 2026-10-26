@@ -140,7 +140,7 @@ pub struct App {
     pub update: Option<crate::update::Notice>,
     /// Sounds and notifications for sessions that need the user or finish; `m` toggles.
     pub alerts_on: bool,
-    /// A failure to show in the footer, such as settings that couldn't be saved; the next key or `ERROR_FOR` clears it.
+    /// A failure to show in the footer, such as settings that couldn't be saved; the next key clears it.
     pub error: Option<String>,
     /// A success to show in the footer; the next key or `INFO_FOR` clears it.
     pub info: Option<String>,
@@ -180,27 +180,20 @@ pub struct RulesPicker {
     pub cursor: usize,
 }
 
-/// How long a success note stays in the footer.
+/// How long a success note stays in the footer. Errors stay until a key, so one isn't missed.
 const INFO_FOR: Duration = Duration::from_secs(4);
-/// How long a failure note stays in the footer; longer, so it isn't missed.
-const ERROR_FOR: Duration = Duration::from_secs(8);
 
-/// Clears the error, or failing that the info, once it has been on screen for its time.
+/// Clears the info once it has been on screen for `INFO_FOR`; while an error covers it, it waits.
 /// `shown` remembers which text is on screen and since when; a new text restarts the clock.
-fn expire_notes(error: &mut Option<String>, info: &mut Option<String>, shown: &mut Option<(String, Instant)>, now: Instant) {
-    let (note, ttl) = match (error.is_some(), info.is_some()) {
-        (true, _) => (error, ERROR_FOR),
-        (false, true) => (info, INFO_FOR),
-        (false, false) => {
-            *shown = None;
-            return;
-        }
+fn expire_info(error: &Option<String>, info: &mut Option<String>, shown: &mut Option<(String, Instant)>, now: Instant) {
+    let Some(text) = info.as_deref().filter(|_| error.is_none()) else {
+        *shown = None;
+        return;
     };
-    let text = note.as_deref().unwrap_or_default();
     match shown {
         Some((on_screen, since)) if on_screen == text => {
-            if now.duration_since(*since) >= ttl {
-                *note = None;
+            if now.duration_since(*since) >= INFO_FOR {
+                *info = None;
                 *shown = None;
             }
         }
@@ -540,8 +533,9 @@ impl App {
             KeyCode::Enter => {
                 let sel = picker.selection;
                 self.rules_picker = None;
-                self.copy_launch_command(sel);
-                if let Err(e) = crate::settings::set_rules(sel) {
+                if self.copy_launch_command(sel)
+                    && let Err(e) = crate::settings::set_rules(sel)
+                {
                     self.error = Some(format!("couldn't save the chosen rules: {e:#}"));
                 }
             }
@@ -550,19 +544,20 @@ impl App {
     }
 
     /// Copies the command that starts a session with the rules in `sel`, refreshing their file first.
-    fn copy_launch_command(&mut self, sel: crate::rules::Selection) {
+    /// False when the file couldn't be written, so nothing was copied.
+    fn copy_launch_command(&mut self, sel: crate::rules::Selection) -> bool {
         let path = match crate::rules::ensure(sel) {
             Ok(path) => path,
             Err(e) => {
                 self.error = Some(format!("couldn't write the rules file: {e:#}"));
-                return;
+                return false;
             }
         };
         let command = crate::rules::launch_command(&path);
         let headline = match crate::clipboard::copy(&command) {
             crate::clipboard::Copied::Native(_) => {
                 self.info = Some(format!("copied: claude with {} · it applies to new conversations ", sel.titles()));
-                return;
+                return true;
             }
             crate::clipboard::Copied::Terminal => "Sent to your terminal's clipboard, if it allows that. To copy it by hand:",
             crate::clipboard::Copied::Failed => "Couldn't reach a clipboard. Copy this command by hand:",
@@ -570,6 +565,7 @@ impl App {
         let path = crate::rules::quote_arg(&path.to_string_lossy());
         let cli = format!("marsad rules {}", sel.keys().join(" "));
         self.copy_note = Some(CopyNote { headline, command, path, cli });
+        true
     }
 
     /// The rank and achievements now, with the header's all-time figure as the rank total.
@@ -633,7 +629,7 @@ impl App {
     /// After each frame: records a badge note the first time it was drawn, and lets it expire.
     fn after_draw(&mut self) {
         let now = Instant::now();
-        expire_notes(&mut self.error, &mut self.info, &mut self.note_shown, now);
+        expire_info(&self.error, &mut self.info, &mut self.note_shown, now);
         let shown = self.announcing();
         let Some(a) = self.announcement.as_mut() else { return };
         if a.on_drawn(shown, now)
@@ -1021,34 +1017,30 @@ mod tests {
     }
 
     #[test]
-    fn footer_notes_expire_after_their_time_on_screen() {
-        let (mut error, mut info, mut shown) = (None, Some("copied".to_string()), None);
+    fn info_notes_expire_after_their_time_on_screen() {
+        let (mut info, mut shown) = (Some("copied".to_string()), None);
         let start = Instant::now();
-        expire_notes(&mut error, &mut info, &mut shown, start);
-        expire_notes(&mut error, &mut info, &mut shown, start + INFO_FOR / 2);
+        expire_info(&None, &mut info, &mut shown, start);
+        expire_info(&None, &mut info, &mut shown, start + INFO_FOR / 2);
         assert!(info.is_some(), "still within its time");
-        expire_notes(&mut error, &mut info, &mut shown, start + INFO_FOR);
+        expire_info(&None, &mut info, &mut shown, start + INFO_FOR);
         assert!(info.is_none() && shown.is_none());
 
-        // An error hides the info under it and keeps its own, longer clock.
-        let later = start + INFO_FOR * 2;
-        (error, info) = (Some("failed".into()), Some("copied".into()));
-        expire_notes(&mut error, &mut info, &mut shown, later);
-        expire_notes(&mut error, &mut info, &mut shown, later + INFO_FOR);
-        assert!(error.is_some(), "errors stay longer");
-        expire_notes(&mut error, &mut info, &mut shown, later + ERROR_FOR);
-        assert!(error.is_none());
-        expire_notes(&mut error, &mut info, &mut shown, later + ERROR_FOR);
-        assert!(info.is_some(), "the info's clock starts when it shows");
-        expire_notes(&mut error, &mut info, &mut shown, later + ERROR_FOR + INFO_FOR);
+        // An error covers the info and never expires; the info's clock starts once it shows.
+        let error = Some("failed".to_string());
+        info = Some("copied".into());
+        expire_info(&error, &mut info, &mut shown, start);
+        expire_info(&error, &mut info, &mut shown, start + INFO_FOR * 3);
+        assert!(info.is_some() && shown.is_none());
+        expire_info(&None, &mut info, &mut shown, start + INFO_FOR * 3);
+        expire_info(&None, &mut info, &mut shown, start + INFO_FOR * 4);
         assert!(info.is_none());
 
         // A new text restarts the clock.
-        let t = later + ERROR_FOR * 3;
         info = Some("one".into());
-        expire_notes(&mut error, &mut info, &mut shown, t);
+        expire_info(&None, &mut info, &mut shown, start);
         info = Some("two".into());
-        expire_notes(&mut error, &mut info, &mut shown, t + INFO_FOR);
+        expire_info(&None, &mut info, &mut shown, start + INFO_FOR);
         assert_eq!(info.as_deref(), Some("two"));
     }
 
