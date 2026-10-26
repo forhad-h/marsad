@@ -3,7 +3,7 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.5.0 - 2026-10-26
 
 - `c` opens a picker: start Claude Code with coordination, output-hygiene rules, or both
 - `marsad rules` lists the rules files and prints the command for any set of them
