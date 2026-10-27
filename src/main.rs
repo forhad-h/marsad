@@ -20,6 +20,7 @@ mod share;
 mod share_view;
 mod statusline;
 mod store;
+mod term;
 mod transcript;
 mod ui;
 mod update;
