@@ -166,19 +166,22 @@ matches the header's all-time figure.
 | Rank | All-time tokens | Badge |
 |---|---|---|
 | Novice | 0 | carved sandstone |
-| Apprentice | 1M | carved cedar |
-| Practitioner | 10M | bronze, Moorish tilework |
-| Specialist | 50M | silver, Moorish tilework |
-| Expert | 250M | gold, Moorish tilework |
-| Master | 1B | gold, Persian tilework |
-| Grandmaster | 5B | jewelled gold, Persian tilework |
+| Apprentice | 100M | carved cedar |
+| Practitioner | 1B | bronze, Moorish tilework |
+| Specialist | 5B | silver, Moorish tilework |
+| Expert | 25B | gold, Moorish tilework |
+| Master | 100B | gold, Persian tilework |
+| Grandmaster | 400B | jewelled gold, Persian tilework |
+
+The ladder is paced for years, not weeks: at about 8B tokens a month, a heavy daily user reaches
+Master in about a year and Grandmaster in about four.
 
 | Achievement | Bronze | Silver | Gold |
 |---|---|---|---|
-| Longest streak (days in a row with usage) | 3 | 7 | 30 |
-| Distinct skills | 3 | 10 | 25 |
-| Subagents run | 10 | 100 | 1,000 |
-| Busiest day (tokens) | 10M | 50M | 200M |
+| Longest streak (days in a row with usage) | 7 | 30 | 365 |
+| Distinct skills | 10 | 40 | 100 |
+| Subagents run | 500 | 5,000 | 25,000 |
+| Busiest day (tokens) | 1B | 5B | 20B |
 
 marsad keeps the best value each one ever reached, so retention pruning or an import never takes a
 badge away. When a rank or level rises, the footer says so once (Esc dismisses it). `marsad badges`
