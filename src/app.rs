@@ -855,10 +855,17 @@ impl App {
     }
 }
 
+/// ratatui's terminal setup (raw mode, alternate screen, panic hook), drawing through
+/// `term::Aligned` so complex-script text can't shift a row's columns.
+fn init_terminal() -> std::io::Result<ratatui::Terminal<crate::term::Aligned<ratatui::backend::CrosstermBackend<std::io::Stdout>>>> {
+    drop(ratatui::init());
+    ratatui::Terminal::new(crate::term::Aligned::new(ratatui::backend::CrosstermBackend::new(std::io::stdout())))
+}
+
 pub fn run() -> anyhow::Result<()> {
     let mut app = App::new();
     app.refresh();
-    let mut terminal = ratatui::init();
+    let mut terminal = init_terminal()?;
     // Bracketed paste, so a pasted newline while editing the share line doesn't confirm it.
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     let result = (|| -> anyhow::Result<()> {
@@ -879,7 +886,7 @@ pub fn run() -> anyhow::Result<()> {
                             let _ = execute!(std::io::stdout(), DisableBracketedPaste);
                             ratatui::restore();
                             let edited = crate::share_view::edit_in_editor(&text);
-                            terminal = ratatui::init();
+                            terminal = init_terminal()?;
                             let _ = execute!(std::io::stdout(), EnableBracketedPaste);
                             if let Some(share) = app.share.as_mut() {
                                 share.edited_post(edited);

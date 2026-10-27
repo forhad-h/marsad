@@ -3,6 +3,20 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## 0.6.0 - 2026-10-27
+
+- Ranks are rebased for a multi-year climb: Apprentice at 100M up to Grandmaster at 400B tokens
+- Achievement levels rise to match: streak 7/30/365 days, skills 10/40/100, subagents 500/5k/25k, busiest day 1B/5B/20B
+- Your rank and some levels may go down once; rank-ups from the new level are announced as before
+
+## 0.5.1 - 2026-10-27
+
+- Table columns stay aligned when a row shows Bengali or other complex-script text
+- Complex-script text in the last columns no longer draws past the screen edge
+- The LinkedIn share line describes the kinds of work done instead of only counting sessions
+- The share line stays generic: no session titles are sent, and lines with security or environment details fall back to the template
+- A drafted share line is no longer rejected for saying "Claude Code"
+
 ## 0.5.0 - 2026-10-26
 
 - `c` opens a picker: start Claude Code with coordination, output-hygiene rules, or both

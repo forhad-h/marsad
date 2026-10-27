@@ -60,8 +60,8 @@ marsad share --print --out card.png  # drafts the post's first line with an isol
 reads included), `next`, `next_threshold` and `progress` (0-1 to the next rank); `achievements` lists
 `streak`, `skills`, `subagents` and `busiest_day`, each with `value`, `unit`, `level` (0 none, 1
 bronze, 2 silver, 3 gold), `level_name`, `next_level`, `next_threshold` and `progress`. Values never
-go down (see `badge_best`). Thresholds: ranks at 1M, 10M, 50M, 250M, 1B and 5B tokens; streak
-3/7/30 days, skills 3/10/25, subagents 10/100/1000, busiest day 10M/50M/200M tokens.
+go down (see `badge_best`). Thresholds: ranks at 100M, 1B, 5B, 25B, 100B and 400B tokens; streak
+7/30/365 days, skills 10/40/100, subagents 500/5000/25000, busiest day 1B/5B/20B tokens.
 `share` without `--print` exits with a hint: sharing to LinkedIn is the dashboard's `p` key, where
 the user reviews the post first.
 
