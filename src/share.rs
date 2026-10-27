@@ -139,14 +139,17 @@ const CONTAINERS: [&str; 18] = [
 const SYSTEM: [&str; 15] =
     ["srv", "opt", "var", "tmp", "private", "mnt", "media", "volumes", "usr", "local", "data", "home", "users", "root", "folders"];
 
+/// The tool's own name: never a name, even as a project's whole name, since every line says "Claude Code".
+const TOOL: [&str; 3] = ["claude", "code", "anthropic"];
+
 /// Tool and everyday software words. A folder or project named after one still counts as a name, but
 /// as a word of a longer name (`.claude`, `skill-web`, `css-core`) it names nothing, and a drafted line
 /// that says "Claude Code" or "web testing" must not be thrown away for it.
-const GENERIC: [&str; 62] = [
+const GENERIC: [&str; 59] = [
     "claude", "code", "anthropic", "worktree", "worktrees", "agent", "agents", "skill", "skills", "session",
     "sessions", "plugin", "plugins", "app", "apps", "web", "api", "apis", "core", "test", "tests", "testing",
     "load", "query", "queries", "optimization", "performance", "engineering", "docs", "doc", "frontend",
-    "backend", "server", "client", "service", "services", "database", "data", "auth", "login", "admin", "mobile",
+    "backend", "server", "client", "service", "services", "database", "data", "mobile",
     "site", "website", "platform", "tool", "tools", "cli", "lib", "library", "sdk", "ui", "ux", "dashboard",
     "migration", "deploy", "release", "review", "fix", "feature", "main", "new",
 ];
@@ -200,7 +203,7 @@ fn names(work: &Work, home: Option<&Path>) -> Vec<String> {
         let whole = std::iter::once((name.clone(), true));
         for (n, is_whole) in whole.chain(tokens(&name).into_iter().map(|t| (t, false))) {
             let n = n.to_lowercase();
-            let generic = GENERIC.contains(&n.as_str()) && !(is_whole && project(&n));
+            let generic = TOOL.contains(&n.as_str()) || (GENERIC.contains(&n.as_str()) && !(is_whole && project(&n)));
             if n.chars().count() >= 3 && !generic && !out.contains(&n) {
                 out.push(n);
             }
@@ -225,14 +228,24 @@ fn find_word(text: &[char], name: &[char], from: usize) -> Option<(usize, usize)
     })
 }
 
-/// Words a public post about possibly confidential work must not carry: security findings and the
-/// systems they were found in. A drafted line with one falls back to the template.
-const SENSITIVE: [&str; 30] = [
-    "vulnerability", "vulnerabilities", "vulnerable", "exploit", "exploits", "exploited", "cve", "breach", "breaches",
-    "leak", "leaks", "leaked", "incident", "incidents", "outage", "outages", "password", "passwords", "credential",
-    "credentials", "secret", "secrets", "malware", "injection", "xss", "csrf", "idor", "production", "staging",
-    "prod",
+/// Word beginnings a public post about possibly confidential work must not carry: security findings,
+/// auth, and the systems they were found in. A drafted line with a word that starts with one falls
+/// back to the template. Over-matching (a memory "leak") only costs a template line.
+const SENSITIVE_STEMS: [&str; 24] = [
+    "vulnerab", "exploit", "cve", "breach", "leak", "incident", "outage", "passw", "credential", "secret",
+    "malware", "ransom", "phish", "xss", "csrf", "idor", "sqli", "ssrf", "rce", "bypass", "authenticat",
+    "authoriz", "login", "staging",
 ];
+
+/// Whole words with the same rule, too short or too common to match as beginnings (`prod` vs `product`).
+const SENSITIVE_WORDS: [&str; 4] = ["prod", "production", "auth", "pentest"];
+
+/// The first word of `text` that is a security or environment detail, lower-cased.
+fn sensitive(text: &str) -> Option<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .find(|w| SENSITIVE_WORDS.contains(&w.as_str()) || SENSITIVE_STEMS.iter().any(|s| w.starts_with(s)))
+}
 
 /// The first name in `text` as a whole word.
 fn mentioned<'a>(text: &str, names: &'a [String]) -> Option<&'a str> {
@@ -364,13 +377,20 @@ impl Draft {
 /// with the name words that mean it.
 const ACTIVITIES: [(&str, &[&str]); 8] = [
     ("plan", &["plan", "planner", "brainstorm", "ideate", "strategy", "spec"]),
-    ("build", &["work", "lfg", "implement", "prototype", "new", "ui", "frontend"]),
+    ("build", &["work", "lfg", "implement", "prototype", "ui", "frontend"]),
     ("debug", &["debug", "rca", "cause", "trace", "investigate"]),
     ("refactor", &["simplify", "refactor", "cleanup"]),
     ("test", &["test", "tests", "e2e", "playwright", "healer", "qa"]),
     ("review", &["review", "reviewer", "reviewers", "audit"]),
-    ("security-test", &["security", "redteam", "pentest", "blueteam", "attacker"]),
+    ("security-review", &["security", "redteam", "pentest", "blueteam", "attacker"]),
     ("ship", &["ship", "commit", "pr", "release", "deploy", "merge"]),
+];
+
+/// What a specialist reviewer's name may say it checks; any other word keeps it out of the line, so a
+/// subagent named after a client or a finding is never published.
+const REVIEW_FOCUS: [&str; 14] = [
+    "security", "logic", "standards", "test", "performance", "accessibility", "architecture", "design", "plan",
+    "doc", "code", "style", "api", "database",
 ];
 
 /// `a, b and c`.
@@ -426,12 +446,18 @@ pub fn template_line(s: &Snapshot) -> String {
         .filter_map(|(name, _)| {
             let words = name_words(&strip(name, &names));
             let (last, focus) = words.split_last()?;
-            (last == "reviewer" && !focus.is_empty()).then(|| focus.join("-"))
+            let known = !focus.is_empty() && focus.iter().all(|w| REVIEW_FOCUS.contains(&w.as_str()));
+            (last == "reviewer" && known).then(|| focus.join("-"))
         })
-        .take(4)
-        .collect();
+        .fold(Vec::new(), |mut seen, focus| {
+            if !seen.contains(&focus) {
+                seen.push(focus);
+            }
+            seen
+        });
+    let reviewers = &reviewers[..reviewers.len().min(4)];
     if !reviewers.is_empty() {
-        line += &format!(", including {} reviewer{}", and_list(&reviewers), if reviewers.len() == 1 { "" } else { "s" });
+        line += &format!(", including {} reviewer{}", and_list(reviewers), if reviewers.len() == 1 { "" } else { "s" });
     }
     line + "."
 }
@@ -446,14 +472,11 @@ pub fn draft(s: &Snapshot, cancel: &AtomicBool) -> Draft {
 fn draft_with(s: &Snapshot, program: &str, wait: Duration, cancel: &AtomicBool) -> Draft {
     let names = names(&s.work, s.home.as_deref());
     match ask(program, &summary(s, &names), wait, cancel) {
-        Ok(line) => {
-            let sensitive: Vec<String> = SENSITIVE.iter().map(|w| w.to_string()).collect();
-            match (mentioned(&line, &names), mentioned(&line, &sensitive)) {
-                (Some(name), _) => Draft::template(s, Note::Rejected(name.to_string())),
-                (None, Some(word)) => Draft::template(s, Note::Sensitive(word.to_string())),
-                (None, None) => Draft { line, note: None },
-            }
-        }
+        Ok(line) => match (mentioned(&line, &names), sensitive(&line)) {
+            (Some(name), _) => Draft::template(s, Note::Rejected(name.to_string())),
+            (None, Some(word)) => Draft::template(s, Note::Sensitive(word)),
+            (None, None) => Draft { line, note: None },
+        },
         Err(note) => Draft::template(s, note),
     }
 }
@@ -967,6 +990,10 @@ mod tests {
         let mut n = names(&work("web", "/Users/x/Projects/web"), Some(Path::new("/Users/x")));
         n.sort();
         assert_eq!(n, ["web"], "a project named after a generic word is still a name");
+        let n = names(&work("claude", "/Users/x/Projects/claude"), Some(Path::new("/Users/x")));
+        assert!(n.is_empty(), "the tool's own name never blocks \"Claude Code\": {n:?}");
+        let n = names(&work("acme-auth", "/Users/x/Projects/acme-auth"), Some(Path::new("/Users/x")));
+        assert!(n.contains(&"auth".to_string()), "{n:?}");
         let n = names(&work("ae-seeded-Rf", "/private/var/folders/cr/T/ae-seeded-Rf"), Some(Path::new("/Users/x")));
         assert!(!n.contains(&"folders".to_string()), "{n:?}");
         assert!(!n.contains(&"x".to_string()) && !n.contains(&"users".to_string()));
@@ -1010,15 +1037,17 @@ mod tests {
         let dir = scratch("sensitive");
         let s = acme();
         for (reply, word) in [
-            ("I found and fixed an IDOR vulnerability with review agents.", "vulnerability"),
+            ("I found and fixed an IDOR vulnerability with review agents.", "idor"),
             ("I shipped reviewed changes to Production.", "production"),
-            ("I hardened a login against XSS.", "xss"),
+            ("I patched an authentication bypass and rotated API tokens.", "authentication"),
+            ("I fixed two CVEs and stopped secrets leaking.", "cves"),
+            ("I hardened the auth flow.", "auth"),
         ] {
             let d = draft_with(&s, &fake(&dir, &answer(reply)), Duration::from_secs(10), &never());
             assert_eq!(d.note, Some(Note::Sensitive(word.into())), "{reply}");
             assert_eq!(d.line, template_line(&s));
         }
-        let ok = "I planned, built and security reviewed changes with parallel review agents.";
+        let ok = "I planned, built and security reviewed product changes with parallel review agents.";
         assert_eq!(draft_with(&s, &fake(&dir, &answer(ok)), Duration::from_secs(10), &never()).note, None);
         std::fs::remove_dir_all(dir).ok();
     }
@@ -1126,13 +1155,17 @@ mod tests {
         busy.work.agents = vec![
             ("general-purpose".into(), 30),
             ("assunnah-engineering:security-reviewer".into(), 2),
+            ("security-reviewer".into(), 1),
             ("logic-reviewer".into(), 2),
             ("acme-reviewer".into(), 1),
+            ("globex-billing-reviewer".into(), 1),
+            ("vulnerability-reviewer".into(), 1),
         ];
         assert_eq!(
             template_line(&busy),
-            "Today I used Claude Code to build, test, review, security-test and ship software across 1 session, \
-             with 5 skills and 35 subagents, including security and logic reviewers."
+            "Today I used Claude Code to build, test, review, security-review and ship software across 1 session, \
+             with 5 skills and 38 subagents, including security and logic reviewers.",
+            "duplicates, client-named and finding-named reviewers stay out"
         );
         let plain = Snapshot { work: Work { sessions: s.work.sessions.clone(), ..Work::default() }, ..s.clone() };
         assert_eq!(template_line(&plain), "Today I built software with Claude Code across 1 session.");
