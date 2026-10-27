@@ -901,7 +901,7 @@ mod tests {
              INSERT INTO skill_runs VALUES ('s1', 'main', 'main', 1, 'acme-deploy', 'tool', NULL, '{DAY}', 1, 0, 0, 0, 0, 20);
              INSERT INTO skill_runs VALUES ('s1', 'main', 'main', 2, 'ce-plan', 'tool', NULL, '{DAY}', 1, 0, 0, 0, 0, 10);"
         ));
-        snapshot(&conn, DAY, 30_000_000_000, Some("/Users/x".into()), Some("Ada".into())).unwrap()
+        snapshot(&conn, DAY, 150_000_000_000, Some("/Users/x".into()), Some("Ada".into())).unwrap()
     }
 
     /// A fake `claude` that records its args and stdin next to itself, then runs `body`.
@@ -930,7 +930,7 @@ mod tests {
     #[test]
     fn snapshot_freezes_periods_rank_and_todays_work() {
         let s = acme();
-        assert_eq!((s.today, s.week, s.month, s.all_time), (12_002_000, 12_002_000, 12_002_000, 30_000_000_000));
+        assert_eq!((s.today, s.week, s.month, s.all_time), (12_002_000, 12_002_000, 12_002_000, 150_000_000_000));
         assert_eq!(s.daily_average, 12_002_000 / 30);
         assert_eq!(s.badges.rank.name, "Expert", "the rank comes from the all-time figure");
         assert_eq!(s.work.sessions.len(), 1);
@@ -1178,7 +1178,7 @@ mod tests {
         let s = acme();
         assert_eq!(
             post(&s, " I shipped it. "),
-            "I shipped it.\n\nToday 12M tokens · last 7 days 12M · last 30 days 12M (400.1k/day)\nAll-time 30B tokens · Rank: Expert"
+            "I shipped it.\n\nToday 12M tokens · last 7 days 12M · last 30 days 12M (400.1k/day)\nAll-time 150B tokens · Rank: Expert"
         );
     }
 
@@ -1255,6 +1255,6 @@ mod tests {
     #[test]
     fn the_card_data_matches_the_snapshot() {
         let c = card_data(&acme());
-        assert_eq!((c.tier, c.rank.as_str(), c.all_time, c.date.as_str()), (4, "Expert", 30_000_000_000, DAY));
+        assert_eq!((c.tier, c.rank.as_str(), c.all_time, c.date.as_str()), (4, "Expert", 150_000_000_000, DAY));
     }
 }

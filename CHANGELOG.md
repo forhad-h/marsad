@@ -3,6 +3,14 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## 0.7.0 - 2026-10-27
+
+- In the badge view, `s` saves it as an image in Downloads and shows it in your file manager
+- `L` saves the image and opens LinkedIn's post box, ready for you to attach it
+- `marsad badges --png` saves the image from the command line
+- Ranks spread over about four years: Apprentice 1B, Practitioner 10B, Specialist 40B, Expert 100B, Master 200B, Grandmaster 400B
+- Achievements to match: streak 14/60/180 days, skills 25/75/150, subagents 1k/10k/50k, busiest day 2B/5B/10B
+
 ## 0.6.0 - 2026-10-27
 
 - Ranks are rebased for a multi-year climb: Apprentice at 100M up to Grandmaster at 400B tokens

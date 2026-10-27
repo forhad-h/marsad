@@ -18,6 +18,7 @@ mod rules;
 mod settings;
 mod share;
 mod share_view;
+mod shot;
 mod statusline;
 mod store;
 mod term;
