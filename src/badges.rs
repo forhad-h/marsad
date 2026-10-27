@@ -19,8 +19,8 @@ pub struct Tier {
 }
 
 /// Ranks from all-time tokens, cache reads included (the dashboard header's figure). Paced for a
-/// heavy daily user (about 8B tokens a month): Practitioner in the first months, then a rank about
-/// every year, Specialist to Grandmaster, so the top takes about four years.
+/// heavy daily user (about 8B tokens a month): Practitioner within weeks, Specialist in about five
+/// months, Expert in about a year, Master in about two and Grandmaster in about four.
 pub const TIERS: [Tier; 7] = [
     Tier { name: "Novice", min: 0 },
     Tier { name: "Apprentice", min: 1_000_000_000 },
@@ -291,8 +291,9 @@ pub fn mark_announced(b: &Badges) -> anyhow::Result<()> {
 
 #[derive(Args)]
 pub struct BadgesArgs {
-    #[arg(long, value_enum, default_value = "table")]
-    format: Format,
+    /// table (default), json or csv.
+    #[arg(long, value_enum)]
+    format: Option<Format>,
     /// Don't index new transcript data first.
     #[arg(long)]
     no_sync: bool,
@@ -303,6 +304,9 @@ pub struct BadgesArgs {
 
 /// `marsad badges`: the rank, each achievement's level and progress, and the stats behind them.
 pub fn run(a: BadgesArgs) -> anyhow::Result<()> {
+    if a.png.is_some() && a.format.is_some() {
+        anyhow::bail!("--png saves an image; leave out --format");
+    }
     if !a.no_sync {
         // The sync raises the stored best values.
         store::open_and_sync()?;
@@ -316,7 +320,7 @@ pub fn run(a: BadgesArgs) -> anyhow::Result<()> {
         println!("{}", path.display());
         return Ok(());
     }
-    print!("{}", render(&b, a.format));
+    print!("{}", render(&b, a.format.unwrap_or(Format::Table)));
     Ok(())
 }
 
@@ -436,7 +440,7 @@ mod tests {
         assert_eq!(rank(400_000_000_000).name, "Grandmaster");
         let top = rank(900_000_000_000);
         assert_eq!((top.name, top.next, top.next_threshold, top.progress), ("Grandmaster", None, None, 1.0));
-        // A heavy user's first six weeks (about 10B) is rank 3 of 7, years from the top.
+        // A heavy user's first two months (about 16B) is rank 3 of 7, years from the top.
         let practitioner = rank(16_000_000_000);
         assert_eq!((practitioner.tier, practitioner.name, practitioner.next), (2, "Practitioner", Some("Specialist")));
         assert!((practitioner.progress - 6.0 / 30.0).abs() < 1e-9);

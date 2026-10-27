@@ -174,8 +174,8 @@ matches the header's all-time figure.
 | Grandmaster | 400B | jewelled gold, Persian tilework |
 
 The ladder is paced for years, not weeks: at about 8B tokens a month, a heavy daily user reaches
-Practitioner in the first weeks, then about one rank a year, and Grandmaster in about four years.
-Gold achievements take a similar effort.
+Practitioner within weeks, Specialist in about five months, Expert in about a year, Master in about
+two and Grandmaster in about four. Gold achievements are long-term goals too.
 
 | Achievement | Bronze | Silver | Gold |
 |---|---|---|---|

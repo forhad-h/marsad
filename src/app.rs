@@ -158,6 +158,8 @@ pub struct App {
     pub announcement: Option<Announcement>,
     alerts: crate::alerts::Detector,
     update_rx: std::sync::mpsc::Receiver<crate::update::Notice>,
+    /// A badge image being saved on its own thread: the footer note, or the error.
+    image_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     log: JsonlTail,
     readers: HashMap<PathBuf, TranscriptReader>,
     sys: System,
@@ -436,6 +438,7 @@ impl App {
             announcement: None,
             alerts: crate::alerts::Detector::default(),
             update_rx: crate::update::background(),
+            image_rx: None,
             log: JsonlTail::new(dir.join("events.jsonl")),
             readers: HashMap::new(),
             sys: System::new(),
@@ -604,31 +607,20 @@ impl App {
     }
 
     /// Saves the badge view as a PNG and shows it in the file manager; with `linkedin`, also opens
-    /// LinkedIn's composer with a one-line caption, so the image only needs attaching.
+    /// LinkedIn's composer with a one-line caption, so the image only needs attaching. The render and
+    /// the desktop tools run on their own thread, like the share's, so the dashboard never stalls.
     fn save_badge_image(&mut self, linkedin: bool) {
         let Some(b) = self.badges.clone() else { return };
-        let path = crate::shot::default_path();
-        if let Err(e) = crate::shot::write_at(&b, &path) {
-            self.error = Some(format!("couldn't save the badge image: {e:#}"));
+        if self.image_rx.is_some() {
             return;
         }
-        let desktop = crate::share::Desktop::current();
-        let _ = crate::share::reveal(&desktop, &path, &crate::share::launch);
-        let mut note = format!("saved {}", path.display());
-        if linkedin {
-            let caption = format!(
-                "My AI-assisted engineering rank with Claude Code: {} ({}).",
-                b.rank.name,
-                crate::badges::fmt_value(b.rank.tokens, "tokens")
-            );
-            let (_, opened) = crate::share::open_linkedin(&desktop, &caption, &crate::share::launch);
-            note += &match opened {
-                crate::share::Launch::Spawned => " · LinkedIn opened: attach the image to the post".to_string(),
-                crate::share::Launch::Skipped(why) => format!(" · LinkedIn not opened ({why})"),
-                crate::share::Launch::Failed(why) => format!(" · LinkedIn not opened: {why}"),
-            };
-        }
-        self.info = Some(note);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.image_rx = Some(rx);
+        self.info = Some("saving the badge image…".into());
+        std::thread::spawn(move || {
+            let path = crate::shot::default_path();
+            let _ = tx.send(save_badge_image(&b, &path, linkedin, &crate::share::Desktop::current(), &crate::share::launch));
+        });
     }
 
     fn open_share(&mut self) {
@@ -725,6 +717,13 @@ impl App {
         }
         if let Ok(notice) = self.update_rx.try_recv() {
             self.update = Some(notice);
+        }
+        if let Some(done) = self.image_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.image_rx = None;
+            match done {
+                Ok(note) => self.info = Some(note),
+                Err(e) => self.error = Some(e),
+            }
         }
         for ev in self.log.read_new() {
             events::apply(&mut self.sessions, &ev);
@@ -935,12 +934,65 @@ pub fn run() -> anyhow::Result<()> {
     result
 }
 
+/// Writes the badge image to `path`, shows it in the file manager and, with `linkedin`, opens the
+/// composer; the footer note says what each step did.
+fn save_badge_image(
+    b: &Badges,
+    path: &std::path::Path,
+    linkedin: bool,
+    desktop: &crate::share::Desktop,
+    run: &dyn Fn(&crate::share::Step) -> Result<(), String>,
+) -> Result<String, String> {
+    use crate::share::Launch;
+    crate::shot::write_at(b, path).map_err(|e| format!("couldn't save the badge image: {e:#}"))?;
+    let mut note = match crate::share::reveal(desktop, path, run) {
+        Launch::Spawned => format!("saved {}", path.display()),
+        Launch::Skipped(why) => format!("saved {} (not shown: {why})", path.display()),
+        Launch::Failed(why) => format!("saved {} (couldn't show it: {why})", path.display()),
+    };
+    if linkedin {
+        let caption = format!(
+            "My AI-assisted engineering rank with Claude Code: {} ({}).",
+            b.rank.name,
+            crate::badges::fmt_value(b.rank.tokens, "tokens")
+        );
+        note += &match crate::share::open_linkedin(desktop, &caption, run).1 {
+            Launch::Spawned => " · LinkedIn opened: attach the image to the post".to_string(),
+            Launch::Skipped(why) => format!(" · LinkedIn not opened ({why})"),
+            Launch::Failed(why) => format!(" · LinkedIn not opened: {why}"),
+        };
+    }
+    Ok(note)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn key(s: &str, a: &str) -> (String, String) {
         (s.to_string(), a.to_string())
+    }
+
+    #[test]
+    fn saving_the_badge_image_writes_reveals_and_opens_linkedin() {
+        let dir = std::env::temp_dir().join(format!("marsad-app-shot-{}", std::process::id()));
+        let path = dir.join("badge.png");
+        let b = badges();
+        let ran = std::cell::RefCell::new(Vec::new());
+        let run = |s: &crate::share::Step| -> Result<(), String> {
+            ran.borrow_mut().push(s.args.last().cloned().unwrap_or_default());
+            Ok(())
+        };
+        let desktop = crate::share::Desktop::for_tests();
+        let note = save_badge_image(&b, &path, true, &desktop, &run).unwrap();
+        assert!(std::fs::read(&path).unwrap().starts_with(b"\x89PNG"));
+        assert!(note.starts_with("saved ") && note.ends_with("attach the image to the post"), "{note}");
+        let ran = ran.into_inner();
+        assert!(ran.iter().any(|a| a.contains("linkedin.com")), "{ran:?}");
+        let failing = |_: &crate::share::Step| -> Result<(), String> { Err("no file manager".into()) };
+        let note = save_badge_image(&b, &path, false, &desktop, &failing).unwrap();
+        assert!(note.contains("couldn't show it: no file manager"), "{note}");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

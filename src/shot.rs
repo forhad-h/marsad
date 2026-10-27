@@ -43,7 +43,7 @@ fn color(c: Color) -> Option<String> {
     let hex = match c {
         Color::Reset => return None,
         Color::Rgb(r, g, b) => return Some(format!("#{r:02x}{g:02x}{b:02x}")),
-        Color::Black => "#1b1e26",
+        Color::Black => "#3e4451",
         Color::Red => "#e06c75",
         Color::Green => "#98c379",
         Color::Yellow => "#e5c07b",
@@ -65,7 +65,23 @@ fn color(c: Color) -> Option<String> {
 }
 
 fn escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// A cell's colours as drawn: (foreground, background), swapped when reversed.
+fn colors(cell: &ratatui::buffer::Cell) -> (String, Option<String>) {
+    let (fg, bg) = (color(cell.fg), color(cell.bg));
+    if cell.modifier.contains(Modifier::REVERSED) {
+        (bg.unwrap_or_else(|| BACKGROUND.to_string()), Some(fg.unwrap_or_else(|| FOREGROUND.to_string())))
+    } else {
+        (fg.unwrap_or_else(|| FOREGROUND.to_string()), bg)
+    }
+}
+
+/// The text attributes a run shares: colour, bold, dim and italic.
+fn text_style(cell: &ratatui::buffer::Cell) -> (String, bool, bool, bool) {
+    let m = cell.modifier;
+    (colors(cell).0, m.contains(Modifier::BOLD), m.contains(Modifier::DIM), m.contains(Modifier::ITALIC))
 }
 
 /// The dots of a braille cell, as (column 0-1, row 0-3).
@@ -76,7 +92,8 @@ fn braille_dots(c: char) -> Option<Vec<(u8, u8)>> {
     Some(DOTS.iter().filter(|(bit, _)| bits & bit != 0).map(|(_, at)| *at).collect())
 }
 
-/// The buffer as SVG: one text run per stretch of same-styled cells, and a circle per braille dot.
+/// The buffer as SVG: every cell's background, one text run per stretch of same-styled cells, and a
+/// circle per braille dot.
 fn svg(buf: &Buffer) -> String {
     let (w, h) = (buf.area.width, buf.area.height);
     let (width, height) = (PAD * 2.0 + CELL_W * w as f64, PAD * 2.0 + CELL_H * h as f64);
@@ -88,14 +105,20 @@ fn svg(buf: &Buffer) -> String {
     );
     for y in 0..h {
         let top = PAD + CELL_H * y as f64;
+        for x in 0..w {
+            if let Some(bg) = colors(&buf[(x, y)]).1 {
+                let _ = write!(s, "<rect x=\"{:.2}\" y=\"{top:.2}\" width=\"{CELL_W:.2}\" height=\"{CELL_H}\" fill=\"{bg}\"/>", PAD + CELL_W * x as f64);
+            }
+        }
+    }
+    for y in 0..h {
+        let top = PAD + CELL_H * y as f64;
         let baseline = top + CELL_H * 0.75;
         let mut x = 0;
         while x < w {
             let cell = &buf[(x, y)];
-            if let Some(bg) = color(cell.bg) {
-                let _ = write!(s, "<rect x=\"{:.2}\" y=\"{top:.2}\" width=\"{CELL_W:.2}\" height=\"{CELL_H}\" fill=\"{bg}\"/>", PAD + CELL_W * x as f64);
-            }
-            let fg = color(cell.fg).unwrap_or_else(|| FOREGROUND.to_string());
+            let style = text_style(cell);
+            let (fg, bold, dim, italic) = style.clone();
             let ch = cell.symbol().chars().next().unwrap_or(' ');
             if let Some(dots) = braille_dots(ch) {
                 for (dx, dy) in dots {
@@ -107,13 +130,11 @@ fn svg(buf: &Buffer) -> String {
                 continue;
             }
             // A run of cells with this cell's style.
-            let bold = cell.modifier.contains(Modifier::BOLD);
             let start = x;
             let mut text = String::new();
             while x < w {
                 let c = &buf[(x, y)];
-                let same = c.fg == cell.fg && c.modifier.contains(Modifier::BOLD) == bold;
-                if !same || c.symbol().chars().next().and_then(braille_dots).is_some() {
+                if text_style(c) != style || c.symbol().chars().next().and_then(braille_dots).is_some() {
                     break;
                 }
                 text.push_str(if c.symbol().is_empty() { " " } else { c.symbol() });
@@ -124,9 +145,11 @@ fn svg(buf: &Buffer) -> String {
             }
             let _ = write!(
                 s,
-                "<text x=\"{:.2}\" y=\"{baseline:.2}\" font-size=\"{FONT_SIZE}\" fill=\"{fg}\"{} xml:space=\"preserve\">{}</text>",
+                "<text x=\"{:.2}\" y=\"{baseline:.2}\" font-size=\"{FONT_SIZE}\" fill=\"{fg}\"{}{}{} xml:space=\"preserve\">{}</text>",
                 PAD + CELL_W * start as f64,
                 if bold { " font-weight=\"bold\"" } else { "" },
+                if dim { " fill-opacity=\"0.6\"" } else { "" },
+                if italic { " font-style=\"italic\"" } else { "" },
                 escape(&text)
             );
         }
@@ -156,9 +179,9 @@ pub fn png(b: &Badges) -> Result<Vec<u8>> {
     pixmap.encode_png().context("encoding the badge view png")
 }
 
-/// Where the picture goes: the Downloads folder, else `<data_dir>/cards/`. Same day, same file.
+/// Where the picture goes: beside the share card (Downloads, else `<data_dir>/cards/`). Same day, same file.
 pub fn path(downloads: Option<PathBuf>, data_dir: &Path, date: &str) -> PathBuf {
-    downloads.unwrap_or_else(|| data_dir.join("cards")).join(format!("marsad-badge-{date}.png"))
+    crate::share::card_path(downloads, data_dir, date).with_file_name(format!("marsad-badge-{date}.png"))
 }
 
 pub fn default_path() -> PathBuf {
@@ -198,6 +221,20 @@ mod tests {
         assert!(s.contains("font-weight=\"bold\""));
         assert!(s.matches("<circle").count() > 500, "the art is drawn as dots");
         assert!(usvg::Tree::from_str(&s, &options()).is_ok());
+    }
+
+    #[test]
+    fn backgrounds_fill_every_cell_and_reversed_or_dim_text_stays_visible() {
+        use ratatui::style::Style;
+        let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 6, 1));
+        buf.set_string(0, 0, "ab", Style::new().bg(Color::Rgb(1, 2, 3)));
+        buf.set_string(2, 0, "cd", Style::new().fg(Color::Black).reversed());
+        buf.set_string(4, 0, "ef", Style::new().dim());
+        let s = svg(&buf);
+        assert_eq!(s.matches("fill=\"#010203\"").count(), 2, "both cells of a styled span: {s}");
+        assert_eq!(s.matches("fill=\"#3e4451\"/>").count(), 2, "reversed: the black foreground becomes the background");
+        assert!(s.contains(&format!("fill=\"{BACKGROUND}\" xml:space=\"preserve\">cd<")), "{s}");
+        assert!(s.contains("fill-opacity=\"0.6\" xml:space=\"preserve\">ef<"), "{s}");
     }
 
     #[test]
