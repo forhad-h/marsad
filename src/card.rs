@@ -454,13 +454,13 @@ mod tests {
     #[test]
     fn achievements_from_badges_keep_only_earned_ones_gold_first() {
         let mut stats = crate::badges::Stats::default();
-        for (k, v) in [("rank", 386_200_000), ("streak", 2), ("skills", 45), ("subagents", 5000), ("busiest_day", 21_200_000_000)] {
+        for (k, v) in [("rank", 386_200_000), ("streak", 2), ("skills", 80), ("subagents", 10000), ("busiest_day", 21_200_000_000)] {
             stats.0.insert(k, v);
         }
         let got = achievements(&crate::badges::badges(&stats));
-        assert_eq!(got, vec![award("Busiest day", "21.2B", Medal::Gold), award("Skills", "45", Medal::Silver), award("Subagents", "5k", Medal::Silver)]);
-        stats.0.insert("streak", 30);
-        assert_eq!(achievements(&crate::badges::badges(&stats))[1], award("Streak", "30 days", Medal::Silver), "ties keep the badge order");
+        assert_eq!(got, vec![award("Busiest day", "21.2B", Medal::Gold), award("Skills", "80", Medal::Silver), award("Subagents", "10k", Medal::Silver)]);
+        stats.0.insert("streak", 60);
+        assert_eq!(achievements(&crate::badges::badges(&stats))[1], award("Streak", "60 days", Medal::Silver), "ties keep the badge order");
     }
 
     #[test]

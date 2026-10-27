@@ -166,26 +166,33 @@ matches the header's all-time figure.
 | Rank | All-time tokens | Badge |
 |---|---|---|
 | Novice | 0 | carved sandstone |
-| Apprentice | 100M | carved cedar |
-| Practitioner | 1B | bronze, Moorish tilework |
-| Specialist | 5B | silver, Moorish tilework |
-| Expert | 25B | gold, Moorish tilework |
-| Master | 100B | gold, Persian tilework |
+| Apprentice | 1B | carved cedar |
+| Practitioner | 10B | bronze, Moorish tilework |
+| Specialist | 40B | silver, Moorish tilework |
+| Expert | 100B | gold, Moorish tilework |
+| Master | 200B | gold, Persian tilework |
 | Grandmaster | 400B | jewelled gold, Persian tilework |
 
 The ladder is paced for years, not weeks: at about 8B tokens a month, a heavy daily user reaches
-Master in about a year and Grandmaster in about four.
+Practitioner within weeks, Specialist in about five months, Expert in about a year, Master in about
+two and Grandmaster in about four. Gold achievements are long-term goals too.
 
 | Achievement | Bronze | Silver | Gold |
 |---|---|---|---|
-| Longest streak (days in a row with usage) | 7 | 30 | 365 |
-| Distinct skills | 10 | 40 | 100 |
-| Subagents run | 500 | 5,000 | 25,000 |
-| Busiest day (tokens) | 1B | 5B | 20B |
+| Longest streak (days in a row with usage) | 14 | 60 | 180 |
+| Distinct skills | 25 | 75 | 150 |
+| Subagents run | 1,000 | 10,000 | 50,000 |
+| Busiest day (tokens) | 2B | 5B | 10B |
 
 marsad keeps the best value each one ever reached, so retention pruning or an import never takes a
 badge away. When a rank or level rises, the footer says so once (Esc dismisses it). `marsad badges`
 prints the same (`--format json` or `csv` for scripts).
+
+In the badge view, `s` saves the view as an image, `Downloads/marsad-badge-YYYY-MM-DD.png`, and
+shows it in your file manager. `L` does the same and opens LinkedIn's post box with a one-line
+caption, so you only attach the image. `marsad badges --png [PATH]` saves it from the command line.
+The image is drawn from the view itself (same art, colours and text), so it looks the same in any
+terminal.
 
 `p`, from the list or the badge view, prepares a LinkedIn post: a line about today's work drafted by
 Claude Code, then today's, the last 7 and 30 days', the daily average and all-time tokens, and your

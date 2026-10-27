@@ -215,8 +215,14 @@ pub fn draw(f: &mut Frame, app: &App) {
             ]
         }
         (View::Badges, _) => {
-            draw_badges(f, body, app);
-            vec![("p", "share".into()), ("esc", "back".into()), ("q", "quit".into())]
+            draw_badges(f, body, app.badges.as_ref());
+            vec![
+                ("s", "save image".into()),
+                ("L", "image + LinkedIn".into()),
+                ("p", "share".into()),
+                ("esc", "back".into()),
+                ("q", "quit".into()),
+            ]
         }
         (View::Board, _) => {
             draw_board(f, body, app);
@@ -424,11 +430,11 @@ fn level_color(level: usize) -> Color {
 
 /// The rank, its progress, and the four achievements with their levels as text, beside the badge art
 /// when there is room for it; the art is dropped first so the rows never clip.
-fn draw_badges(f: &mut Frame, area: Rect, app: &App) {
+pub(crate) fn draw_badges(f: &mut Frame, area: Rect, badges: Option<&Badges>) {
     let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().dark_gray()).title(" Badges ");
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let Some(b) = &app.badges else {
+    let Some(b) = badges else {
         f.render_widget(Paragraph::new(dim(" Reading your badges…")), inner);
         return;
     };
