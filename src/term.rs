@@ -37,14 +37,15 @@ fn row_has_complex(screen: &Buffer, y: u16) -> bool {
 }
 
 /// Draws `cells`, starting a fresh cursor position before and after every complex cluster, and
-/// blanking the cells a cluster covers first so a terminal that draws it narrower leaves no remains.
-fn draw_placed<B: Backend>(inner: &mut B, cells: Vec<(u16, u16, Cell)>) -> Result<(), B::Error> {
+/// blanking the cells a cluster covers (up to the screen's right edge, `right`) first so a terminal
+/// that draws it narrower leaves no remains.
+fn draw_placed<B: Backend>(inner: &mut B, cells: Vec<(u16, u16, Cell)>, right: u16) -> Result<(), B::Error> {
     let mut run: Vec<(u16, u16, Cell)> = Vec::new();
     for (x, y, cell) in cells {
         if complex(&cell) {
             let mut blank = cell.clone();
             blank.set_symbol(" ");
-            run.extend((x..x + width(&cell)).map(|bx| (bx, y, blank.clone())));
+            run.extend((x..(x + width(&cell)).min(right)).map(|bx| (bx, y, blank.clone())));
             inner.draw(run.iter().map(|(x, y, c)| (*x, *y, c)))?;
             run.clear();
             inner.draw(std::iter::once((x, y, &cell)))?;
@@ -98,7 +99,7 @@ impl<B: Backend> Backend for Aligned<B> {
                 }
             }
         }
-        draw_placed(&mut self.inner, cells)
+        draw_placed(&mut self.inner, cells, area.width)
     }
 
     fn hide_cursor(&mut self) -> Result<(), Self::Error> {
@@ -221,6 +222,15 @@ mod tests {
         draw(&mut a, &frame(4, &["", ""]), &first);
         draw(&mut a, &first, &frame(4, &["লা", "ac"]));
         assert_eq!(a.inner.calls, vec![vec![(1, 1, "c".to_string())]]);
+    }
+
+    #[test]
+    fn blanks_stop_at_the_right_edge() {
+        let mut a = Aligned::new(Log { size: (2, 1), ..Default::default() });
+        let mut wide = Cell::default();
+        wide.set_symbol("স্ট্রিং");
+        a.draw(std::iter::once((1, 0, &wide))).unwrap();
+        assert!(a.inner.calls.iter().flatten().all(|(x, _, _)| *x < 2), "{:?}", a.inner.calls);
     }
 
     #[test]
