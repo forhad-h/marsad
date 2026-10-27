@@ -18,22 +18,22 @@ pub struct Tier {
     pub min: i64,
 }
 
-/// Ranks from all-time tokens, cache reads included (the dashboard header's figure). Paced so a heavy
-/// daily user (about 8B tokens a month) reaches Master in about a year and Grandmaster in about four;
-/// past Practitioner each rank needs 4-5x the one below.
+/// Ranks from all-time tokens, cache reads included (the dashboard header's figure). Paced for a
+/// heavy daily user (about 8B tokens a month): Practitioner in the first months, then a rank about
+/// every year, Specialist to Grandmaster, so the top takes about four years.
 pub const TIERS: [Tier; 7] = [
     Tier { name: "Novice", min: 0 },
-    Tier { name: "Apprentice", min: 100_000_000 },
-    Tier { name: "Practitioner", min: 1_000_000_000 },
-    Tier { name: "Specialist", min: 5_000_000_000 },
-    Tier { name: "Expert", min: 25_000_000_000 },
-    Tier { name: "Master", min: 100_000_000_000 },
+    Tier { name: "Apprentice", min: 1_000_000_000 },
+    Tier { name: "Practitioner", min: 10_000_000_000 },
+    Tier { name: "Specialist", min: 40_000_000_000 },
+    Tier { name: "Expert", min: 100_000_000_000 },
+    Tier { name: "Master", min: 200_000_000_000 },
     Tier { name: "Grandmaster", min: 400_000_000_000 },
 ];
 
 /// Bumped whenever `TIERS` or `ACHIEVEMENTS` change, so the announced levels recorded against the
 /// old thresholds are reseeded instead of hiding every rise below them.
-pub const LADDER: u64 = 2;
+pub const LADDER: u64 = 3;
 
 const LADDER_KEY: &str = "ladder";
 
@@ -51,15 +51,15 @@ pub struct Achievement {
 }
 
 pub const ACHIEVEMENTS: [Achievement; 4] = [
-    Achievement { key: "streak", name: "Longest streak", short: "streak", unit: "days", levels: [7, 30, 365] },
-    Achievement { key: "skills", name: "Distinct skills", short: "skills", unit: "skills", levels: [10, 40, 100] },
-    Achievement { key: "subagents", name: "Subagents run", short: "subagents", unit: "subagents", levels: [500, 5000, 25000] },
+    Achievement { key: "streak", name: "Longest streak", short: "streak", unit: "days", levels: [14, 60, 180] },
+    Achievement { key: "skills", name: "Distinct skills", short: "skills", unit: "skills", levels: [25, 75, 150] },
+    Achievement { key: "subagents", name: "Subagents run", short: "subagents", unit: "subagents", levels: [1000, 10000, 50000] },
     Achievement {
         key: "busiest_day",
         name: "Busiest day",
         short: "busiest day",
         unit: "tokens",
-        levels: [1_000_000_000, 5_000_000_000, 20_000_000_000],
+        levels: [2_000_000_000, 5_000_000_000, 10_000_000_000],
     },
 ];
 
@@ -296,6 +296,9 @@ pub struct BadgesArgs {
     /// Don't index new transcript data first.
     #[arg(long)]
     no_sync: bool,
+    /// Save the badge view as a PNG instead (default: Downloads/marsad-badge-YYYY-MM-DD.png).
+    #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "")]
+    png: Option<std::path::PathBuf>,
 }
 
 /// `marsad badges`: the rank, each achievement's level and progress, and the stats behind them.
@@ -307,6 +310,12 @@ pub fn run(a: BadgesArgs) -> anyhow::Result<()> {
     let conn = store::open_readonly()?;
     let total = store::lifetime(&conn)?.total;
     let b = badges(&shown(&conn, total)?);
+    if let Some(path) = a.png {
+        let path = if path.as_os_str().is_empty() { crate::shot::default_path() } else { path };
+        crate::shot::write_at(&b, &path)?;
+        println!("{}", path.display());
+        return Ok(());
+    }
     print!("{}", render(&b, a.format));
     Ok(())
 }
@@ -399,18 +408,19 @@ mod tests {
     #[test]
     fn pruned_days_never_lower_a_recorded_streak() {
         // Covers AE1.
-        let week = ["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05", "2026-09-06", "2026-09-07"];
-        let conn = db(&days(&week, 5));
+        let fortnight: Vec<String> = (1..=14).map(|d| format!("2026-09-{d:02}")).collect();
+        let fortnight: Vec<&str> = fortnight.iter().map(String::as_str).collect();
+        let conn = db(&days(&fortnight, 5));
         let total = store::lifetime(&conn).unwrap().total;
         let before = record(&conn, total).unwrap();
-        assert_eq!(before.get("streak"), 7);
+        assert_eq!(before.get("streak"), 14);
         assert_eq!(badges(&before).achievements[0].level_name, Some("bronze"));
 
         // Retention pruning only touches detail tables, but even losing the counter rows
         // behind the streak keeps it.
-        conn.execute_batch("DELETE FROM token_days WHERE day < '2026-09-07';").unwrap();
+        conn.execute_batch("DELETE FROM token_days WHERE day < '2026-09-14';").unwrap();
         let after = shown(&conn, store::lifetime(&conn).unwrap().total).unwrap();
-        assert_eq!(after.get("streak"), 7, "shown streak stays at the best value");
+        assert_eq!(after.get("streak"), 14, "shown streak stays at the best value");
         assert_eq!(badges(&after).achievements[0].level_name, Some("bronze"));
     }
 
@@ -418,18 +428,18 @@ mod tests {
     fn tier_boundaries() {
         let rank = |tokens: i64| badges(&Stats(BTreeMap::from([(RANK_KEY, tokens)]))).rank;
         assert_eq!(rank(0).name, "Novice");
-        assert_eq!(rank(99_999_999).name, "Novice");
-        let apprentice = rank(100_000_000);
-        assert_eq!((apprentice.name, apprentice.next, apprentice.next_threshold), ("Apprentice", Some("Practitioner"), Some(1_000_000_000)));
+        assert_eq!(rank(999_999_999).name, "Novice");
+        let apprentice = rank(1_000_000_000);
+        assert_eq!((apprentice.name, apprentice.next, apprentice.next_threshold), ("Apprentice", Some("Practitioner"), Some(10_000_000_000)));
         assert_eq!(apprentice.progress, 0.0);
         assert_eq!(rank(399_999_999_999).name, "Master");
         assert_eq!(rank(400_000_000_000).name, "Grandmaster");
         let top = rank(900_000_000_000);
         assert_eq!((top.name, top.next, top.next_threshold, top.progress), ("Grandmaster", None, None, 1.0));
-        // A heavy user's first six weeks (about 10B) is Specialist, not the top rank.
-        let specialist = rank(10_000_000_000);
-        assert_eq!((specialist.name, specialist.next), ("Specialist", Some("Expert")));
-        assert!((specialist.progress - 5.0 / 20.0).abs() < 1e-9);
+        // A heavy user's first six weeks (about 10B) is rank 3 of 7, years from the top.
+        let practitioner = rank(16_000_000_000);
+        assert_eq!((practitioner.tier, practitioner.name, practitioner.next), (2, "Practitioner", Some("Specialist")));
+        assert!((practitioner.progress - 6.0 / 30.0).abs() < 1e-9);
     }
 
     #[test]
@@ -440,9 +450,9 @@ mod tests {
         assert_eq!(
             (LADDER, fingerprint.as_str()),
             (
-                2,
-                "0,100000000,1000000000,5000000000,25000000000,100000000000,400000000000 | streak=[7, 30, 365] \
-                 skills=[10, 40, 100] subagents=[500, 5000, 25000] busiest_day=[1000000000, 5000000000, 20000000000]"
+                3,
+                "0,1000000000,10000000000,40000000000,100000000000,200000000000,400000000000 | streak=[14, 60, 180] \
+                 skills=[25, 75, 150] subagents=[1000, 10000, 50000] busiest_day=[2000000000, 5000000000, 10000000000]"
             ),
             "the thresholds changed: bump LADDER so recorded levels are reseeded, then update this fingerprint"
         );
@@ -481,11 +491,12 @@ mod tests {
 
     #[test]
     fn a_lowering_restore_import_leaves_every_level() {
-        let mut rows = days(&["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05", "2026-09-06", "2026-09-07"], 2_000_000_000);
-        for i in 0..500 {
+        let fortnight: Vec<String> = (1..=14).map(|d| format!("2026-09-{d:02}")).collect();
+        let mut rows = days(&fortnight.iter().map(String::as_str).collect::<Vec<_>>(), 3_000_000_000);
+        for i in 0..1000 {
             rows += &format!("INSERT INTO token_days VALUES ('s', 'a{i}', '2026-09-01', 0, 1, 0, 0, 1, 1);");
         }
-        for i in 0..40 {
+        for i in 0..80 {
             rows += &format!("INSERT INTO skills_seen VALUES ('skill{i}', '2026-09-01');");
         }
         let conn = db(&rows);
@@ -507,12 +518,12 @@ mod tests {
         let file = dir.join("settings.json");
         let at = |rank: i64, streak: i64| badges(&Stats(BTreeMap::from([(RANK_KEY, rank), ("streak", streak)])));
 
-        let start = at(6_000_000_000, 30);
+        let start = at(6_000_000_000, 60);
         assert_eq!(pending_at(&file, &start).unwrap(), None, "no record: seeded silently");
         assert_eq!(crate::settings::badges_announced_at(&file), Some(levels(&start)));
         assert_eq!(pending_at(&file, &start).unwrap(), None, "nothing rose");
 
-        let up = at(30_000_000_000, 365);
+        let up = at(150_000_000_000, 180);
         assert_eq!(pending_at(&file, &up).unwrap().as_deref(), Some("rank up: Expert · new: gold streak"));
         assert_eq!(pending_at(&file, &up).unwrap().as_deref(), Some("rank up: Expert · new: gold streak"), "until recorded");
         mark_at(&file, &up).unwrap();
@@ -542,7 +553,7 @@ mod tests {
     #[test]
     fn diff_names_each_new_level_once() {
         let recorded = Levels::from([("rank".into(), 4), ("skills".into(), 0), ("streak".into(), 2)]);
-        let b = badges(&Stats(BTreeMap::from([(RANK_KEY, 30_000_000_000), ("skills", 45), ("streak", 30), ("subagents", 50)])));
+        let b = badges(&Stats(BTreeMap::from([(RANK_KEY, 150_000_000_000), ("skills", 80), ("streak", 60), ("subagents", 50)])));
         assert_eq!(diff(&recorded, &b).as_deref(), Some("new: silver skills"), "no rank change, unknown subagents skipped");
         let lower = Levels::from([("rank".into(), 6)]);
         assert_eq!(diff(&lower, &b), None, "a higher record is not a rise");
@@ -550,21 +561,21 @@ mod tests {
 
     #[test]
     fn json_has_rank_next_threshold_and_achievement_levels() {
-        let b = badges(&Stats(BTreeMap::from([(RANK_KEY, 30_000_000_000), ("streak", 8), ("skills", 2)])));
+        let b = badges(&Stats(BTreeMap::from([(RANK_KEY, 150_000_000_000), ("streak", 20), ("skills", 2)])));
         let v: serde_json::Value = serde_json::from_str(&render(&b, Format::Json)).unwrap();
         assert_eq!(v["rank"]["name"], "Expert");
-        assert_eq!(v["rank"]["next_threshold"], 100_000_000_000_i64);
+        assert_eq!(v["rank"]["next_threshold"], 200_000_000_000_i64);
         assert_eq!(v["achievements"].as_array().unwrap().len(), ACHIEVEMENTS.len());
         let streak = &v["achievements"][0];
-        assert_eq!((streak["key"].clone(), streak["level_name"].clone(), streak["next_threshold"].clone()), (json!("streak"), json!("bronze"), json!(30)));
+        assert_eq!((streak["key"].clone(), streak["level_name"].clone(), streak["next_threshold"].clone()), (json!("streak"), json!("bronze"), json!(60)));
         assert!(streak["progress"].as_f64().unwrap() > 0.0);
         assert_eq!(v["achievements"][1]["level_name"], serde_json::Value::Null);
 
         let csv = render(&b, Format::Csv);
         assert_eq!(csv.lines().count(), 1 + 1 + ACHIEVEMENTS.len());
-        assert!(csv.lines().nth(1).unwrap().starts_with("rank,30000000000,Expert,Master,100000000000,"));
+        assert!(csv.lines().nth(1).unwrap().starts_with("rank,150000000000,Expert,Master,200000000000,"));
         let table = render(&b, Format::Table);
-        assert!(table.starts_with("Rank: Expert (30B tokens)"), "{table}");
-        assert!(table.contains("next Master at 100B tokens"));
+        assert!(table.starts_with("Rank: Expert (150B tokens)"), "{table}");
+        assert!(table.contains("next Master at 200B tokens"));
     }
 }

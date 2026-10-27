@@ -603,6 +603,34 @@ impl App {
         self.badges = Some(b);
     }
 
+    /// Saves the badge view as a PNG and shows it in the file manager; with `linkedin`, also opens
+    /// LinkedIn's composer with a one-line caption, so the image only needs attaching.
+    fn save_badge_image(&mut self, linkedin: bool) {
+        let Some(b) = self.badges.clone() else { return };
+        let path = crate::shot::default_path();
+        if let Err(e) = crate::shot::write_at(&b, &path) {
+            self.error = Some(format!("couldn't save the badge image: {e:#}"));
+            return;
+        }
+        let desktop = crate::share::Desktop::current();
+        let _ = crate::share::reveal(&desktop, &path, &crate::share::launch);
+        let mut note = format!("saved {}", path.display());
+        if linkedin {
+            let caption = format!(
+                "My AI-assisted engineering rank with Claude Code: {} ({}).",
+                b.rank.name,
+                crate::badges::fmt_value(b.rank.tokens, "tokens")
+            );
+            let (_, opened) = crate::share::open_linkedin(&desktop, &caption, &crate::share::launch);
+            note += &match opened {
+                crate::share::Launch::Spawned => " · LinkedIn opened: attach the image to the post".to_string(),
+                crate::share::Launch::Skipped(why) => format!(" · LinkedIn not opened ({why})"),
+                crate::share::Launch::Failed(why) => format!(" · LinkedIn not opened: {why}"),
+            };
+        }
+        self.info = Some(note);
+    }
+
     fn open_share(&mut self) {
         self.share = Some(ShareView::start(crate::share_view::Env::real(self.counter.totals().1)));
     }
@@ -820,6 +848,8 @@ impl App {
             }
             (View::List, KeyCode::Char('B')) => self.open_badges(),
             (View::List | View::Badges, KeyCode::Char('p')) => self.open_share(),
+            (View::Badges, KeyCode::Char('s')) => self.save_badge_image(false),
+            (View::Badges, KeyCode::Char('L')) => self.save_badge_image(true),
             (View::Badges, KeyCode::Esc | KeyCode::Char('B') | KeyCode::Left | KeyCode::Char('h')) => self.view = View::List,
             (View::List | View::History | View::Agents, KeyCode::Char('b')) => self.open_board(),
             (View::List | View::Board, KeyCode::Char('c')) => self.open_rules_picker(),
