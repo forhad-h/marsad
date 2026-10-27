@@ -23,27 +23,29 @@ pub const DRAFT_WAIT: Duration = Duration::from_secs(60);
 /// The longest `git config` or a waited-on desktop tool may take.
 const TOOL_WAIT: Duration = Duration::from_secs(2);
 
-/// Sessions whose titles go into the summary, busiest first.
-const MAX_TITLES: usize = 20;
-
 /// Above this length LinkedIn's prefill link is dropped for the plain feed.
 const MAX_URL: usize = 2000;
 
 const FEED_URL: &str = "https://www.linkedin.com/feed/";
 
 const SYSTEM_PROMPT: &str = "You write one short line for a LinkedIn post about the author's AI-assisted software work today. \
-The user message is a summary of the author's Claude Code work today: session titles, skills, subagent types and token figures. \
+The user message is a summary of the author's Claude Code work today: session count, skills, subagent types and token figures. \
 Write 1-3 sentences in the first person, professional and concrete, for recruiters and business owners judging the author's AI fluency. \
-Describe the kind of work and how AI agents were used. \
-Never name projects, clients, companies, products or people, even if the summary seems to contain one. \
+Describe the kind of work and how AI agents were used, in general terms only: categories such as planning, building features, \
+debugging, testing, performance work, code review, security review and shipping. \
+The post is public and the work may be confidential: never name projects, clients, companies, products or people, \
+and never mention specific features, bugs, systems, languages, frameworks, servers, environments, branches or infrastructure, \
+even if the summary seems to contain one. \
+Never mention security findings, vulnerabilities, exploits, incidents, outages, authentication or login problems, credentials, \
+secrets, customer data or production and staging systems; say only that changes were security reviewed. \
 No hashtags, no emoji, no quotes, no lists, no token figures. Reply with the line only.";
 
-/// One of today's sessions, as stored.
+/// One of today's sessions: where it ran, so its names can be kept out. Titles are never read:
+/// they say what was worked on, which a public post must not.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WorkSession {
     pub project: String,
     pub cwd: String,
-    pub title: String,
 }
 
 /// Today's work: never sent as is; `summary` redacts it first.
@@ -100,12 +102,12 @@ pub fn snapshot(conn: &Connection, today: &str, rank_total: i64, home: Option<Pa
 
 fn work(conn: &Connection, day: &str) -> anyhow::Result<Work> {
     let mut stmt = conn.prepare(
-        "SELECT COALESCE(s.project, ''), COALESCE(s.cwd, ''), COALESCE(s.title, '')
+        "SELECT COALESCE(s.project, ''), COALESCE(s.cwd, '')
          FROM usage_daily u LEFT JOIN sessions s USING (session_id)
          WHERE u.day = ?1 GROUP BY u.session_id ORDER BY SUM(u.total) DESC",
     )?;
     let sessions = stmt
-        .query_map([day], |r| Ok(WorkSession { project: r.get(0)?, cwd: r.get(1)?, title: r.get(2)? }))?
+        .query_map([day], |r| Ok(WorkSession { project: r.get(0)?, cwd: r.get(1)? }))?
         .collect::<Result<_, _>>()?;
     let skills = store::skills_in(conn, store::Days::on(day))?.into_iter().map(|s| (s.skill, s.calls)).collect();
     let mut stmt = conn.prepare(
@@ -134,7 +136,20 @@ const CONTAINERS: [&str; 18] = [
 ];
 
 /// System folders above a cwd outside the home directory; they never count as names.
-const SYSTEM: [&str; 14] = ["srv", "opt", "var", "tmp", "private", "mnt", "media", "volumes", "usr", "local", "data", "home", "users", "root"];
+const SYSTEM: [&str; 15] =
+    ["srv", "opt", "var", "tmp", "private", "mnt", "media", "volumes", "usr", "local", "data", "home", "users", "root", "folders"];
+
+/// Tool and everyday software words. A folder or project named after one still counts as a name, but
+/// as a word of a longer name (`.claude`, `skill-web`, `css-core`) it names nothing, and a drafted line
+/// that says "Claude Code" or "web testing" must not be thrown away for it.
+const GENERIC: [&str; 62] = [
+    "claude", "code", "anthropic", "worktree", "worktrees", "agent", "agents", "skill", "skills", "session",
+    "sessions", "plugin", "plugins", "app", "apps", "web", "api", "apis", "core", "test", "tests", "testing",
+    "load", "query", "queries", "optimization", "performance", "engineering", "docs", "doc", "frontend",
+    "backend", "server", "client", "service", "services", "database", "data", "auth", "login", "admin", "mobile",
+    "site", "website", "platform", "tool", "tools", "cli", "lib", "library", "sdk", "ui", "ux", "dashboard",
+    "migration", "deploy", "release", "review", "fix", "feature", "main", "new",
+];
 
 /// The words of a name: split on `-`, `_`, `.`, spaces and camelCase boundaries.
 fn tokens(name: &str) -> Vec<String> {
@@ -175,15 +190,18 @@ fn names(work: &Work, home: Option<&Path>) -> Vec<String> {
             _ => None,
         }).filter(|p| below_home.is_some() || !SYSTEM.contains(&p.to_lowercase().as_str())));
     }
+    let project = |n: &str| work.sessions.iter().any(|s| s.project.eq_ignore_ascii_case(n));
     let mut out: Vec<String> = Vec::new();
     for name in raw {
         let lower = name.to_lowercase();
-        if CONTAINERS.contains(&lower.as_str()) && !work.sessions.iter().any(|s| s.project.eq_ignore_ascii_case(&name)) {
+        if CONTAINERS.contains(&lower.as_str()) && !project(&name) {
             continue;
         }
-        for n in std::iter::once(name.clone()).chain(tokens(&name)) {
+        let whole = std::iter::once((name.clone(), true));
+        for (n, is_whole) in whole.chain(tokens(&name).into_iter().map(|t| (t, false))) {
             let n = n.to_lowercase();
-            if n.chars().count() >= 3 && !out.contains(&n) {
+            let generic = GENERIC.contains(&n.as_str()) && !(is_whole && project(&n));
+            if n.chars().count() >= 3 && !generic && !out.contains(&n) {
                 out.push(n);
             }
         }
@@ -206,6 +224,15 @@ fn find_word(text: &[char], name: &[char], from: usize) -> Option<(usize, usize)
         (matches && open && close).then_some((i, end))
     })
 }
+
+/// Words a public post about possibly confidential work must not carry: security findings and the
+/// systems they were found in. A drafted line with one falls back to the template.
+const SENSITIVE: [&str; 30] = [
+    "vulnerability", "vulnerabilities", "vulnerable", "exploit", "exploits", "exploited", "cve", "breach", "breaches",
+    "leak", "leaks", "leaked", "incident", "incidents", "outage", "outages", "password", "passwords", "credential",
+    "credentials", "secret", "secrets", "malware", "injection", "xss", "csrf", "idor", "production", "staging",
+    "prod",
+];
 
 /// The first name in `text` as a whole word.
 fn mentioned<'a>(text: &str, names: &'a [String]) -> Option<&'a str> {
@@ -247,15 +274,11 @@ fn strip(text: &str, names: &[String]) -> String {
     out.trim_matches(|c: char| !c.is_alphanumeric() && !matches!(c, ')' | '"' | '\'')).to_string()
 }
 
-/// What goes to `claude -p` on stdin: titles, skills and subagent types with every name stripped
-/// (emptied ones dropped), and the period figures. Never a project or cwd field.
+/// What goes to `claude -p` on stdin: the session count, skills and subagent types with every name
+/// stripped (emptied ones dropped), and the period figures. Never a title, project or cwd field.
 fn summary(s: &Snapshot, names: &[String]) -> String {
     let mut out = String::from("Summary of my Claude Code work today (project and folder names removed).\n");
-    let titles: Vec<String> = s.work.sessions.iter().map(|w| strip(&w.title, names)).filter(|t| !t.is_empty()).take(MAX_TITLES).collect();
     out += &format!("Sessions today: {}\n", s.work.sessions.len());
-    for t in &titles {
-        out += &format!("- {t}\n");
-    }
     let counted = |items: &[(String, i64)]| -> Vec<String> {
         items.iter().filter_map(|(n, c)| Some(strip(n, names)).filter(|n| !n.is_empty()).map(|n| format!("{n} (x{c})"))).collect()
     };
@@ -302,6 +325,8 @@ pub enum Note {
     Empty,
     /// The reply named a project or folder.
     Rejected(String),
+    /// The reply carried a security or environment detail.
+    Sensitive(String),
 }
 
 impl Note {
@@ -316,6 +341,7 @@ impl Note {
             Note::Cancelled => "drafting was cancelled".to_string(),
             Note::Empty => "claude returned an empty line".to_string(),
             Note::Rejected(name) => format!("the drafted line named \"{name}\", one of your project or folder names"),
+            Note::Sensitive(word) => format!("the drafted line said \"{word}\", a security or environment detail"),
         };
         format!("Template line, not generated: {why}.")
     }
@@ -334,22 +360,78 @@ impl Draft {
     }
 }
 
-/// The line built from the stats alone, when no drafted line can be used.
+/// The kinds of work a skill or subagent name points to, in the order work usually flows, each
+/// with the name words that mean it.
+const ACTIVITIES: [(&str, &[&str]); 8] = [
+    ("plan", &["plan", "planner", "brainstorm", "ideate", "strategy", "spec"]),
+    ("build", &["work", "lfg", "implement", "prototype", "new", "ui", "frontend"]),
+    ("debug", &["debug", "rca", "cause", "trace", "investigate"]),
+    ("refactor", &["simplify", "refactor", "cleanup"]),
+    ("test", &["test", "tests", "e2e", "playwright", "healer", "qa"]),
+    ("review", &["review", "reviewer", "reviewers", "audit"]),
+    ("security-test", &["security", "redteam", "pentest", "blueteam", "attacker"]),
+    ("ship", &["ship", "commit", "pr", "release", "deploy", "merge"]),
+];
+
+/// `a, b and c`.
+fn and_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// The lower-case words of a skill or subagent name, without its `plugin:` prefix.
+fn name_words(name: &str) -> Vec<String> {
+    let name = name.rsplit(':').next().unwrap_or(name);
+    tokens(name).into_iter().map(|w| w.to_lowercase()).collect()
+}
+
+/// The line built from today's skills and subagents, when no drafted line can be used: what kind of
+/// work it was, not only how much. Names are stripped like the summary's.
 pub fn template_line(s: &Snapshot) -> String {
     let n = s.work.sessions.len();
     if n == 0 && s.today <= 0 {
         return format!("No Claude Code sessions today; this is where my AI-assisted work stands at the {} rank.", s.badges.rank.name);
     }
+    let names = names(&s.work, s.home.as_deref());
     let plural = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+    let used: Vec<Vec<String>> =
+        s.work.skills.iter().chain(&s.work.agents).map(|(name, _)| name_words(&strip(name, &names))).collect();
+    let activities: Vec<String> = ACTIVITIES
+        .iter()
+        .filter(|(_, words)| used.iter().any(|u| u.iter().any(|w| words.contains(&w.as_str()))))
+        .map(|(verb, _)| verb.to_string())
+        .collect();
+    let mut line = if activities.is_empty() {
+        format!("Today I built software with Claude Code across {}", plural(n.max(1), "session"))
+    } else {
+        format!("Today I used Claude Code to {} software across {}", and_list(&activities), plural(n.max(1), "session"))
+    };
     let agents: i64 = s.work.agents.iter().map(|(_, c)| c).sum();
-    let using: Vec<String> = [(s.work.skills.len(), "skill"), (agents.max(0) as usize, "subagent")]
+    let with: Vec<String> = [(s.work.skills.len(), "skill"), (agents.max(0) as usize, "subagent")]
         .into_iter()
         .filter(|(n, _)| *n > 0)
         .map(|(n, one)| plural(n, one))
         .collect();
-    let mut line = format!("Today I worked with Claude Code across {}", plural(n.max(1), "session"));
-    if !using.is_empty() {
-        line += &format!(", using {}", using.join(" and "));
+    if !with.is_empty() {
+        line += &format!(", with {}", and_list(&with));
+    }
+    // Specialist reviewers say most about how the agents were used: `security-reviewer` is "security".
+    let reviewers: Vec<String> = s
+        .work
+        .agents
+        .iter()
+        .filter_map(|(name, _)| {
+            let words = name_words(&strip(name, &names));
+            let (last, focus) = words.split_last()?;
+            (last == "reviewer" && !focus.is_empty()).then(|| focus.join("-"))
+        })
+        .take(4)
+        .collect();
+    if !reviewers.is_empty() {
+        line += &format!(", including {} reviewer{}", and_list(&reviewers), if reviewers.len() == 1 { "" } else { "s" });
     }
     line + "."
 }
@@ -364,10 +446,14 @@ pub fn draft(s: &Snapshot, cancel: &AtomicBool) -> Draft {
 fn draft_with(s: &Snapshot, program: &str, wait: Duration, cancel: &AtomicBool) -> Draft {
     let names = names(&s.work, s.home.as_deref());
     match ask(program, &summary(s, &names), wait, cancel) {
-        Ok(line) => match mentioned(&line, &names) {
-            Some(name) => Draft::template(s, Note::Rejected(name.to_string())),
-            None => Draft { line, note: None },
-        },
+        Ok(line) => {
+            let sensitive: Vec<String> = SENSITIVE.iter().map(|w| w.to_string()).collect();
+            match (mentioned(&line, &names), mentioned(&line, &sensitive)) {
+                (Some(name), _) => Draft::template(s, Note::Rejected(name.to_string())),
+                (None, Some(word)) => Draft::template(s, Note::Sensitive(word.to_string())),
+                (None, None) => Draft { line, note: None },
+            }
+        }
         Err(note) => Draft::template(s, note),
     }
 }
@@ -780,7 +866,7 @@ mod tests {
 
     const DAY: &str = "2026-10-24";
 
-    /// Today: one session in `acme-portal` titled "Acme Corp invoice parser", the skill `acme-deploy`
+    /// Today: one session in `acme-portal` titled "Acme Corp invoice parser" (never read), the skill `acme-deploy`
     /// and `ce-plan`, and two Explore subagents.
     fn acme() -> Snapshot {
         let conn = db(&format!(
@@ -840,11 +926,11 @@ mod tests {
     }
 
     #[test]
-    fn titles_skills_and_agents_go_out_without_project_names() {
+    fn skills_and_agents_go_out_without_titles_or_project_names() {
         let s = acme();
         let names = names(&s.work, s.home.as_deref());
         let payload = summary(&s, &names);
-        assert!(payload.contains("- Corp invoice parser\n"), "{payload}");
+        assert!(!payload.contains("invoice") && payload.contains("Sessions today: 1\n"), "no session title: {payload}");
         assert!(!payload.to_lowercase().contains("acme"), "{payload}");
         assert!(!payload.contains("portal") && !payload.contains("/Users"), "no project or cwd field: {payload}");
         assert!(payload.contains("Skills used: deploy (x1), ce-plan (x1)"), "acme-deploy loses acme: {payload}");
@@ -865,15 +951,24 @@ mod tests {
     #[test]
     fn names_are_project_and_folders_below_home_with_their_words() {
         let work = |project: &str, cwd: &str| Work {
-            sessions: vec![WorkSession { project: project.into(), cwd: cwd.into(), title: String::new() }],
+            sessions: vec![WorkSession { project: project.into(), cwd: cwd.into() }],
             ..Work::default()
         };
         let n = names(&work("acme-portal", "/Users/x/Projects/acme-portal"), Some(Path::new("/Users/x")));
         assert_eq!(n, ["acme-portal", "portal", "acme"]);
         let n = names(&work("billingApp", "/Users/x/clients/GlobexCorp/billingApp"), Some(Path::new("/Users/x")));
-        for want in ["billingapp", "billing", "app", "globexcorp", "globex", "corp", "clients"] {
+        for want in ["billingapp", "billing", "globexcorp", "globex", "corp", "clients"] {
             assert!(n.contains(&want.to_string()), "{want} missing from {n:?}");
         }
+        assert!(!n.contains(&"app".to_string()), "a generic word of a longer name is not a name: {n:?}");
+        // A worktree under `.claude` and a project of everyday words: "Claude Code" and "web" stay usable.
+        let n = names(&work("skill-web", "/Users/x/Projects/skill-web/.claude/worktrees/load-test"), Some(Path::new("/Users/x")));
+        assert_eq!(n, ["load-test", "skill-web", ".claude"]);
+        let mut n = names(&work("web", "/Users/x/Projects/web"), Some(Path::new("/Users/x")));
+        n.sort();
+        assert_eq!(n, ["web"], "a project named after a generic word is still a name");
+        let n = names(&work("ae-seeded-Rf", "/private/var/folders/cr/T/ae-seeded-Rf"), Some(Path::new("/Users/x")));
+        assert!(!n.contains(&"folders".to_string()), "{n:?}");
         assert!(!n.contains(&"x".to_string()) && !n.contains(&"users".to_string()));
         // Outside the home directory every folder counts except system ones; short tokens never do.
         let n = names(&work("wt-u5", "/private/tmp/wt-u5"), Some(Path::new("/Users/x")));
@@ -911,6 +1006,25 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_reply_with_a_security_or_environment_detail_is_rejected() {
+        let dir = scratch("sensitive");
+        let s = acme();
+        for (reply, word) in [
+            ("I found and fixed an IDOR vulnerability with review agents.", "vulnerability"),
+            ("I shipped reviewed changes to Production.", "production"),
+            ("I hardened a login against XSS.", "xss"),
+        ] {
+            let d = draft_with(&s, &fake(&dir, &answer(reply)), Duration::from_secs(10), &never());
+            assert_eq!(d.note, Some(Note::Sensitive(word.into())), "{reply}");
+            assert_eq!(d.line, template_line(&s));
+        }
+        let ok = "I planned, built and security reviewed changes with parallel review agents.";
+        assert_eq!(draft_with(&s, &fake(&dir, &answer(ok)), Duration::from_secs(10), &never()).note, None);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_clean_reply_is_the_line_and_the_call_is_isolated() {
         let dir = scratch("clean");
         let s = acme();
@@ -922,7 +1036,7 @@ mod tests {
         assert_eq!(&args[..10], ["-p", "--safe-mode", "--no-session-persistence", "--tools", "", "--model", "haiku", "--output-format", "json", "--system-prompt"]);
         assert!(!args.contains(&"--max-turns") && !args.contains(&"--resume") && !args.contains(&"--continue"));
         let stdin = std::fs::read_to_string(dir.join("stdin")).unwrap();
-        assert!(stdin.contains("Corp invoice parser") && !stdin.to_lowercase().contains("acme"), "{stdin}");
+        assert!(!stdin.contains("invoice") && !stdin.to_lowercase().contains("acme"), "{stdin}");
         let cwd = std::fs::read_to_string(dir.join("cwd")).unwrap();
         assert!(cwd.contains("marsad-draft-"), "a fresh temp cwd: {cwd}");
         assert!(!Path::new(cwd.trim()).exists(), "the temp cwd is removed afterwards");
@@ -985,10 +1099,43 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(unix)]
     #[test]
-    fn the_template_says_plainly_when_nothing_happened_today() {
+    fn a_reply_saying_claude_code_is_kept_when_a_folder_is_dot_claude() {
+        let dir = scratch("dotclaude");
+        let mut s = acme();
+        s.work.sessions.push(WorkSession {
+            project: "load-test".into(),
+            cwd: "/Users/x/Projects/acme-portal/.claude/worktrees/load-test".into(),
+        });
+        let line = "I used Claude Code to plan and load test a web app with parallel review agents.";
+        let d = draft_with(&s, &fake(&dir, &answer(line)), Duration::from_secs(10), &never());
+        assert_eq!(d, Draft { line: line.into(), note: None });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_template_says_what_kind_of_work_it_was() {
         let s = acme();
-        assert_eq!(template_line(&s), "Today I worked with Claude Code across 1 session, using 2 skills and 2 subagents.");
+        assert_eq!(template_line(&s), "Today I used Claude Code to plan and ship software across 1 session, with 2 skills and 2 subagents.");
+        let mut busy = acme();
+        busy.work.skills = ["compound-engineering:ce-work", "assunnah-engineering:ae-review", "ce-commit-push-pr", "ae-test", "acme-deploy"]
+            .iter()
+            .map(|n| (n.to_string(), 1))
+            .collect();
+        busy.work.agents = vec![
+            ("general-purpose".into(), 30),
+            ("assunnah-engineering:security-reviewer".into(), 2),
+            ("logic-reviewer".into(), 2),
+            ("acme-reviewer".into(), 1),
+        ];
+        assert_eq!(
+            template_line(&busy),
+            "Today I used Claude Code to build, test, review, security-test and ship software across 1 session, \
+             with 5 skills and 35 subagents, including security and logic reviewers."
+        );
+        let plain = Snapshot { work: Work { sessions: s.work.sessions.clone(), ..Work::default() }, ..s.clone() };
+        assert_eq!(template_line(&plain), "Today I built software with Claude Code across 1 session.");
         let quiet = Snapshot { today: 0, work: Work::default(), ..s };
         assert!(template_line(&quiet).starts_with("No Claude Code sessions today"));
     }
