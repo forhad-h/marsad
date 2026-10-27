@@ -3,6 +3,12 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## 0.6.0 - 2026-10-27
+
+- Ranks are rebased for a multi-year climb: Apprentice at 100M up to Grandmaster at 400B tokens
+- Achievement levels rise to match: streak 7/30/365 days, skills 10/40/100, subagents 500/5k/25k, busiest day 1B/5B/20B
+- Your rank and some levels may go down once; rank-ups from the new level are announced as before
+
 ## 0.5.1 - 2026-10-27
 
 - Table columns stay aligned when a row shows Bengali or other complex-script text
