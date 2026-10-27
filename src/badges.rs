@@ -20,7 +20,7 @@ pub struct Tier {
 
 /// Ranks from all-time tokens, cache reads included (the dashboard header's figure). Paced so a heavy
 /// daily user (about 8B tokens a month) reaches Master in about a year and Grandmaster in about four;
-/// each rank needs 4-5x the one below.
+/// past Practitioner each rank needs 4-5x the one below.
 pub const TIERS: [Tier; 7] = [
     Tier { name: "Novice", min: 0 },
     Tier { name: "Apprentice", min: 100_000_000 },
@@ -260,8 +260,7 @@ fn merged(recorded: Option<Levels>, b: &Badges) -> Levels {
 /// `badges_announced` yet, or one from an older ladder) the current levels are recorded silently
 /// instead, as are stats the record doesn't know yet.
 fn pending_at(path: &Path, b: &Badges) -> anyhow::Result<Option<String>> {
-    let recorded = crate::settings::badges_announced_at(path).filter(|r| r.get(LADDER_KEY) == Some(&LADDER));
-    let Some(recorded) = recorded else {
+    let Some(recorded) = recorded_at(path) else {
         crate::settings::set_badges_announced_at(path, &levels(b))?;
         return Ok(None);
     };
@@ -272,9 +271,14 @@ fn pending_at(path: &Path, b: &Badges) -> anyhow::Result<Option<String>> {
     Ok(note)
 }
 
+/// The recorded levels, or None when there are none or they were measured on an older ladder.
+fn recorded_at(path: &Path) -> Option<Levels> {
+    crate::settings::badges_announced_at(path).filter(|r| r.get(LADDER_KEY) == Some(&LADDER))
+}
+
 /// Records the current levels as announced, once the dashboard has drawn the note.
 fn mark_at(path: &Path, b: &Badges) -> anyhow::Result<()> {
-    crate::settings::set_badges_announced_at(path, &merged(crate::settings::badges_announced_at(path), b))
+    crate::settings::set_badges_announced_at(path, &merged(recorded_at(path), b))
 }
 
 pub fn pending_announcement(b: &Badges) -> anyhow::Result<Option<String>> {
@@ -429,6 +433,22 @@ mod tests {
     }
 
     #[test]
+    fn the_ladder_version_moves_with_the_thresholds() {
+        let tiers: Vec<String> = TIERS.iter().map(|t| t.min.to_string()).collect();
+        let achievements: Vec<String> = ACHIEVEMENTS.iter().map(|a| format!("{}={:?}", a.key, a.levels)).collect();
+        let fingerprint = format!("{} | {}", tiers.join(","), achievements.join(" "));
+        assert_eq!(
+            (LADDER, fingerprint.as_str()),
+            (
+                2,
+                "0,100000000,1000000000,5000000000,25000000000,100000000000,400000000000 | streak=[7, 30, 365] \
+                 skills=[10, 40, 100] subagents=[500, 5000, 25000] busiest_day=[1000000000, 5000000000, 20000000000]"
+            ),
+            "the thresholds changed: bump LADDER so recorded levels are reseeded, then update this fingerprint"
+        );
+    }
+
+    #[test]
     fn streak_counts_consecutive_days_and_a_gap_resets_it() {
         let d = |v: &[&str]| longest_streak(v.iter().copied());
         assert_eq!(d(&[]), 0);
@@ -512,6 +532,10 @@ mod tests {
         assert_eq!(pending_at(&file, &start).unwrap(), None, "the rebase itself is not announced");
         assert_eq!(crate::settings::badges_announced_at(&file), Some(levels(&start)));
         assert_eq!(pending_at(&file, &up).unwrap().as_deref(), Some("rank up: Expert · new: gold streak"));
+        // Marking over an old-ladder record replaces it rather than keeping its higher levels.
+        crate::settings::set_badges_announced_at(&file, &old).unwrap();
+        mark_at(&file, &start).unwrap();
+        assert_eq!(crate::settings::badges_announced_at(&file), Some(levels(&start)));
         std::fs::remove_dir_all(dir).ok();
     }
 
