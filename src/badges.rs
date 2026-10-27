@@ -18,16 +18,24 @@ pub struct Tier {
     pub min: i64,
 }
 
-/// Ranks from all-time tokens, cache reads included (the dashboard header's figure).
+/// Ranks from all-time tokens, cache reads included (the dashboard header's figure). Paced so a heavy
+/// daily user (about 8B tokens a month) reaches Master in about a year and Grandmaster in about four;
+/// past Practitioner each rank needs 4-5x the one below.
 pub const TIERS: [Tier; 7] = [
     Tier { name: "Novice", min: 0 },
-    Tier { name: "Apprentice", min: 1_000_000 },
-    Tier { name: "Practitioner", min: 10_000_000 },
-    Tier { name: "Specialist", min: 50_000_000 },
-    Tier { name: "Expert", min: 250_000_000 },
-    Tier { name: "Master", min: 1_000_000_000 },
-    Tier { name: "Grandmaster", min: 5_000_000_000 },
+    Tier { name: "Apprentice", min: 100_000_000 },
+    Tier { name: "Practitioner", min: 1_000_000_000 },
+    Tier { name: "Specialist", min: 5_000_000_000 },
+    Tier { name: "Expert", min: 25_000_000_000 },
+    Tier { name: "Master", min: 100_000_000_000 },
+    Tier { name: "Grandmaster", min: 400_000_000_000 },
 ];
+
+/// Bumped whenever `TIERS` or `ACHIEVEMENTS` change, so the announced levels recorded against the
+/// old thresholds are reseeded instead of hiding every rise below them.
+pub const LADDER: u64 = 2;
+
+const LADDER_KEY: &str = "ladder";
 
 pub const LEVELS: [&str; 3] = ["bronze", "silver", "gold"];
 
@@ -43,15 +51,15 @@ pub struct Achievement {
 }
 
 pub const ACHIEVEMENTS: [Achievement; 4] = [
-    Achievement { key: "streak", name: "Longest streak", short: "streak", unit: "days", levels: [3, 7, 30] },
-    Achievement { key: "skills", name: "Distinct skills", short: "skills", unit: "skills", levels: [3, 10, 25] },
-    Achievement { key: "subagents", name: "Subagents run", short: "subagents", unit: "subagents", levels: [10, 100, 1000] },
+    Achievement { key: "streak", name: "Longest streak", short: "streak", unit: "days", levels: [7, 30, 365] },
+    Achievement { key: "skills", name: "Distinct skills", short: "skills", unit: "skills", levels: [10, 40, 100] },
+    Achievement { key: "subagents", name: "Subagents run", short: "subagents", unit: "subagents", levels: [500, 5000, 25000] },
     Achievement {
         key: "busiest_day",
         name: "Busiest day",
         short: "busiest day",
         unit: "tokens",
-        levels: [10_000_000, 50_000_000, 200_000_000],
+        levels: [1_000_000_000, 5_000_000_000, 20_000_000_000],
     },
 ];
 
@@ -203,11 +211,13 @@ pub fn badges(stats: &Stats) -> Badges {
     Badges { rank, achievements }
 }
 
-/// The last announced level per stat (rank: tier index; achievements: 0 none to 3 gold).
+/// The last announced level per stat (rank: tier index; achievements: 0 none to 3 gold), and the
+/// `ladder` they were measured on.
 pub type Levels = BTreeMap<String, u64>;
 
 pub fn levels(b: &Badges) -> Levels {
     let mut out = Levels::new();
+    out.insert(LADDER_KEY.into(), LADDER);
     out.insert(RANK_KEY.into(), b.rank.tier as u64);
     for a in &b.achievements {
         out.insert(a.key.into(), a.level as u64);
@@ -247,10 +257,10 @@ fn merged(recorded: Option<Levels>, b: &Badges) -> Levels {
 }
 
 /// The note to show for levels that rose since the last announcement. The first time (no
-/// `badges_announced` yet) the current levels are recorded silently instead, as are stats the
-/// record doesn't know yet.
+/// `badges_announced` yet, or one from an older ladder) the current levels are recorded silently
+/// instead, as are stats the record doesn't know yet.
 fn pending_at(path: &Path, b: &Badges) -> anyhow::Result<Option<String>> {
-    let Some(recorded) = crate::settings::badges_announced_at(path) else {
+    let Some(recorded) = recorded_at(path) else {
         crate::settings::set_badges_announced_at(path, &levels(b))?;
         return Ok(None);
     };
@@ -261,9 +271,14 @@ fn pending_at(path: &Path, b: &Badges) -> anyhow::Result<Option<String>> {
     Ok(note)
 }
 
+/// The recorded levels, or None when there are none or they were measured on an older ladder.
+fn recorded_at(path: &Path) -> Option<Levels> {
+    crate::settings::badges_announced_at(path).filter(|r| r.get(LADDER_KEY) == Some(&LADDER))
+}
+
 /// Records the current levels as announced, once the dashboard has drawn the note.
 fn mark_at(path: &Path, b: &Badges) -> anyhow::Result<()> {
-    crate::settings::set_badges_announced_at(path, &merged(crate::settings::badges_announced_at(path), b))
+    crate::settings::set_badges_announced_at(path, &merged(recorded_at(path), b))
 }
 
 pub fn pending_announcement(b: &Badges) -> anyhow::Result<Option<String>> {
@@ -389,30 +404,48 @@ mod tests {
         let total = store::lifetime(&conn).unwrap().total;
         let before = record(&conn, total).unwrap();
         assert_eq!(before.get("streak"), 7);
-        assert_eq!(badges(&before).achievements[0].level_name, Some("silver"));
+        assert_eq!(badges(&before).achievements[0].level_name, Some("bronze"));
 
         // Retention pruning only touches detail tables, but even losing the counter rows
         // behind the streak keeps it.
         conn.execute_batch("DELETE FROM token_days WHERE day < '2026-09-07';").unwrap();
         let after = shown(&conn, store::lifetime(&conn).unwrap().total).unwrap();
         assert_eq!(after.get("streak"), 7, "shown streak stays at the best value");
-        assert_eq!(badges(&after).achievements[0].level_name, Some("silver"));
+        assert_eq!(badges(&after).achievements[0].level_name, Some("bronze"));
     }
 
     #[test]
     fn tier_boundaries() {
         let rank = |tokens: i64| badges(&Stats(BTreeMap::from([(RANK_KEY, tokens)]))).rank;
         assert_eq!(rank(0).name, "Novice");
-        assert_eq!(rank(999_999).name, "Novice");
-        let apprentice = rank(1_000_000);
-        assert_eq!((apprentice.name, apprentice.next, apprentice.next_threshold), ("Apprentice", Some("Practitioner"), Some(10_000_000)));
+        assert_eq!(rank(99_999_999).name, "Novice");
+        let apprentice = rank(100_000_000);
+        assert_eq!((apprentice.name, apprentice.next, apprentice.next_threshold), ("Apprentice", Some("Practitioner"), Some(1_000_000_000)));
         assert_eq!(apprentice.progress, 0.0);
-        assert_eq!(rank(5_000_000_000).name, "Grandmaster");
-        let top = rank(9_000_000_000);
+        assert_eq!(rank(399_999_999_999).name, "Master");
+        assert_eq!(rank(400_000_000_000).name, "Grandmaster");
+        let top = rank(900_000_000_000);
         assert_eq!((top.name, top.next, top.next_threshold, top.progress), ("Grandmaster", None, None, 1.0));
-        let expert = rank(344_000_000);
-        assert_eq!(expert.name, "Expert");
-        assert!((expert.progress - 94.0 / 750.0).abs() < 1e-9);
+        // A heavy user's first six weeks (about 10B) is Specialist, not the top rank.
+        let specialist = rank(10_000_000_000);
+        assert_eq!((specialist.name, specialist.next), ("Specialist", Some("Expert")));
+        assert!((specialist.progress - 5.0 / 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_ladder_version_moves_with_the_thresholds() {
+        let tiers: Vec<String> = TIERS.iter().map(|t| t.min.to_string()).collect();
+        let achievements: Vec<String> = ACHIEVEMENTS.iter().map(|a| format!("{}={:?}", a.key, a.levels)).collect();
+        let fingerprint = format!("{} | {}", tiers.join(","), achievements.join(" "));
+        assert_eq!(
+            (LADDER, fingerprint.as_str()),
+            (
+                2,
+                "0,100000000,1000000000,5000000000,25000000000,100000000000,400000000000 | streak=[7, 30, 365] \
+                 skills=[10, 40, 100] subagents=[500, 5000, 25000] busiest_day=[1000000000, 5000000000, 20000000000]"
+            ),
+            "the thresholds changed: bump LADDER so recorded levels are reseeded, then update this fingerprint"
+        );
     }
 
     #[test]
@@ -448,9 +481,11 @@ mod tests {
 
     #[test]
     fn a_lowering_restore_import_leaves_every_level() {
-        let mut rows = days(&["2026-09-01", "2026-09-02", "2026-09-03"], 20_000_000);
-        for i in 0..10 {
+        let mut rows = days(&["2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05", "2026-09-06", "2026-09-07"], 2_000_000_000);
+        for i in 0..500 {
             rows += &format!("INSERT INTO token_days VALUES ('s', 'a{i}', '2026-09-01', 0, 1, 0, 0, 1, 1);");
+        }
+        for i in 0..40 {
             rows += &format!("INSERT INTO skills_seen VALUES ('skill{i}', '2026-09-01');");
         }
         let conn = db(&rows);
@@ -472,12 +507,12 @@ mod tests {
         let file = dir.join("settings.json");
         let at = |rank: i64, streak: i64| badges(&Stats(BTreeMap::from([(RANK_KEY, rank), ("streak", streak)])));
 
-        let start = at(60_000_000, 7);
+        let start = at(6_000_000_000, 30);
         assert_eq!(pending_at(&file, &start).unwrap(), None, "no record: seeded silently");
         assert_eq!(crate::settings::badges_announced_at(&file), Some(levels(&start)));
         assert_eq!(pending_at(&file, &start).unwrap(), None, "nothing rose");
 
-        let up = at(300_000_000, 30);
+        let up = at(30_000_000_000, 365);
         assert_eq!(pending_at(&file, &up).unwrap().as_deref(), Some("rank up: Expert · new: gold streak"));
         assert_eq!(pending_at(&file, &up).unwrap().as_deref(), Some("rank up: Expert · new: gold streak"), "until recorded");
         mark_at(&file, &up).unwrap();
@@ -490,13 +525,24 @@ mod tests {
         crate::settings::set_badges_announced_at(&file, &partial).unwrap();
         assert_eq!(pending_at(&file, &start).unwrap(), None);
         assert!(crate::settings::badges_announced_at(&file).unwrap().contains_key("skills"));
+
+        // A record from the old ladder (Grandmaster was 5B) is reseeded, so later rises still show.
+        let old = Levels::from([("rank".into(), 6), ("streak".into(), 3), ("skills".into(), 3)]);
+        crate::settings::set_badges_announced_at(&file, &old).unwrap();
+        assert_eq!(pending_at(&file, &start).unwrap(), None, "the rebase itself is not announced");
+        assert_eq!(crate::settings::badges_announced_at(&file), Some(levels(&start)));
+        assert_eq!(pending_at(&file, &up).unwrap().as_deref(), Some("rank up: Expert · new: gold streak"));
+        // Marking over an old-ladder record replaces it rather than keeping its higher levels.
+        crate::settings::set_badges_announced_at(&file, &old).unwrap();
+        mark_at(&file, &start).unwrap();
+        assert_eq!(crate::settings::badges_announced_at(&file), Some(levels(&start)));
         std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
     fn diff_names_each_new_level_once() {
         let recorded = Levels::from([("rank".into(), 4), ("skills".into(), 0), ("streak".into(), 2)]);
-        let b = badges(&Stats(BTreeMap::from([(RANK_KEY, 300_000_000), ("skills", 12), ("streak", 7), ("subagents", 50)])));
+        let b = badges(&Stats(BTreeMap::from([(RANK_KEY, 30_000_000_000), ("skills", 45), ("streak", 30), ("subagents", 50)])));
         assert_eq!(diff(&recorded, &b).as_deref(), Some("new: silver skills"), "no rank change, unknown subagents skipped");
         let lower = Levels::from([("rank".into(), 6)]);
         assert_eq!(diff(&lower, &b), None, "a higher record is not a rise");
@@ -504,21 +550,21 @@ mod tests {
 
     #[test]
     fn json_has_rank_next_threshold_and_achievement_levels() {
-        let b = badges(&Stats(BTreeMap::from([(RANK_KEY, 344_000_000), ("streak", 8), ("skills", 2)])));
+        let b = badges(&Stats(BTreeMap::from([(RANK_KEY, 30_000_000_000), ("streak", 8), ("skills", 2)])));
         let v: serde_json::Value = serde_json::from_str(&render(&b, Format::Json)).unwrap();
         assert_eq!(v["rank"]["name"], "Expert");
-        assert_eq!(v["rank"]["next_threshold"], 1_000_000_000);
+        assert_eq!(v["rank"]["next_threshold"], 100_000_000_000_i64);
         assert_eq!(v["achievements"].as_array().unwrap().len(), ACHIEVEMENTS.len());
         let streak = &v["achievements"][0];
-        assert_eq!((streak["key"].clone(), streak["level_name"].clone(), streak["next_threshold"].clone()), (json!("streak"), json!("silver"), json!(30)));
+        assert_eq!((streak["key"].clone(), streak["level_name"].clone(), streak["next_threshold"].clone()), (json!("streak"), json!("bronze"), json!(30)));
         assert!(streak["progress"].as_f64().unwrap() > 0.0);
         assert_eq!(v["achievements"][1]["level_name"], serde_json::Value::Null);
 
         let csv = render(&b, Format::Csv);
         assert_eq!(csv.lines().count(), 1 + 1 + ACHIEVEMENTS.len());
-        assert!(csv.lines().nth(1).unwrap().starts_with("rank,344000000,Expert,Master,1000000000,"));
+        assert!(csv.lines().nth(1).unwrap().starts_with("rank,30000000000,Expert,Master,100000000000,"));
         let table = render(&b, Format::Table);
-        assert!(table.starts_with("Rank: Expert (344M tokens)"), "{table}");
-        assert!(table.contains("next Master at 1B tokens"));
+        assert!(table.starts_with("Rank: Expert (30B tokens)"), "{table}");
+        assert!(table.contains("next Master at 100B tokens"));
     }
 }
