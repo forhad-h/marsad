@@ -15,6 +15,7 @@ pub const MAX_POST: usize = 3000;
 
 type DraftFn = dyn Fn(&Snapshot, &AtomicBool) -> Draft + Send + Sync;
 type RunFn = dyn Fn(&Step) -> Result<(), String> + Send + Sync;
+type SaveImageFn = dyn Fn(&crate::badges::Badges) -> Result<String, String> + Send + Sync;
 
 /// What the share view runs: the real thing in the dashboard, fakes in tests.
 #[derive(Clone)]
@@ -27,6 +28,8 @@ pub struct Env {
     pub copy: Arc<dyn Fn(&str) -> Copied + Send + Sync>,
     pub run: Arc<RunFn>,
     pub desktop: Desktop,
+    /// Writes the badge view as an image; the note says where it went.
+    pub save_image: Arc<SaveImageFn>,
 }
 
 impl Env {
@@ -39,6 +42,7 @@ impl Env {
             copy: Arc::new(crate::clipboard::copy),
             run: Arc::new(share::launch),
             desktop: Desktop::current(),
+            save_image: Arc::new(|b| save_image(b, &crate::shot::default_path(), &Desktop::current(), &share::launch)),
         }
     }
 }
@@ -51,6 +55,16 @@ fn prepare(rank_total: i64) -> anyhow::Result<Snapshot> {
     let conn = crate::store::open_readonly()?;
     let total = rank_total.max(crate::store::lifetime(&conn)?.total);
     share::snapshot(&conn, &crate::store::day_n_ago(0), total, dirs::home_dir(), name.join().ok().flatten())
+}
+
+/// Writes the badge image to `path` and shows it in the file manager; the note says what each step did.
+fn save_image(b: &crate::badges::Badges, path: &std::path::Path, desktop: &Desktop, run: &dyn Fn(&Step) -> Result<(), String>) -> Result<String, String> {
+    crate::shot::write_at(b, path).map_err(|e| format!("Couldn't save the badge image: {e:#}"))?;
+    Ok(match share::reveal(desktop, path, run) {
+        Launch::Spawned => format!("Saved {}.", path.display()),
+        Launch::Skipped(why) => format!("Saved {} (not shown: {why}).", path.display()),
+        Launch::Failed(why) => format!("Saved {} (couldn't show it: {why}).", path.display()),
+    })
 }
 
 /// What a key did to the view.
@@ -128,7 +142,7 @@ enum Phase {
 /// What the dashboard draws.
 pub enum Screen<'a> {
     Busy(&'static str),
-    Preview { post: String, editing: Option<(&'a [char], usize)>, note: Option<String>, warning: Option<&'a str> },
+    Preview { post: String, editing: Option<(&'a [char], usize)>, note: Option<String>, warning: Option<&'a str>, notice: Option<&'a str> },
     Done(&'a Done),
     Failed(&'a str),
 }
@@ -143,6 +157,10 @@ pub struct ShareView {
     custom: Option<String>,
     /// A failure to show above the keys: a regenerate that didn't work, a card that couldn't be written.
     warning: Option<String>,
+    /// What a `c` copy or an `s` save did, until the post changes or the view moves on.
+    notice: Option<String>,
+    /// The badge image being saved on its own thread: the notice, or the warning.
+    image: Option<Receiver<Result<String, String>>>,
     /// Set when the share is cancelled or closed, which kills a running `claude`.
     cancel: Arc<AtomicBool>,
     /// The badges of a snapshot just frozen after the share's own sync, until the dashboard takes them.
@@ -179,6 +197,8 @@ impl ShareView {
             note: None,
             custom: None,
             warning: None,
+            notice: None,
+            image: None,
             cancel,
             prepared: None,
             scroll: 0,
@@ -211,6 +231,7 @@ impl ShareView {
                 },
                 note: self.note.as_ref().map(Note::message),
                 warning: self.warning.as_deref(),
+                notice: self.notice.as_deref(),
             },
         }
     }
@@ -218,17 +239,25 @@ impl ShareView {
     /// The keys the footer offers now.
     pub fn keys(&self) -> Vec<(&'static str, &'static str)> {
         match &self.phase {
-            Phase::Preview => vec![("enter", "confirm"), ("e", "edit line"), ("E", "edit post"), ("r", "regenerate"), ("↑↓", "scroll"), ("q/esc", "cancel")],
+            Phase::Preview => vec![("enter", "share to LinkedIn"), ("c", "copy text"), ("s", "save image"), ("e", "edit line"), ("E", "edit post"), ("r", "regenerate"), ("↑↓", "scroll"), ("q/esc", "cancel")],
             Phase::Editing { .. } => vec![("enter", "keep"), ("esc", "discard")],
             Phase::Drafting(_) => vec![("q/esc", "cancel")],
             Phase::Regenerating(_) => vec![("esc", "keep the current line"), ("q", "cancel")],
             Phase::Saving(_) | Phase::Opening { .. } => vec![],
-            Phase::Done(_) | Phase::Failed(_) => vec![("enter", "close")],
+            Phase::Done(_) => vec![("c", "copy text"), ("s", "save image"), ("enter", "close")],
+            Phase::Failed(_) => vec![("enter", "close")],
         }
     }
 
     /// Collects finished work; call every frame on the main thread.
     pub fn tick(&mut self) {
+        if let Some(done) = self.image.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.image = None;
+            match done {
+                Ok(note) => self.notice = Some(note),
+                Err(why) => (self.notice, self.warning) = (None, Some(why)),
+            }
+        }
         match &self.phase {
             Phase::Drafting(rx) => match rx.try_recv() {
                 Ok(Ok((s, d))) => {
@@ -306,7 +335,7 @@ impl ShareView {
         std::thread::spawn(move || {
             let _ = tx.send(share::save_card(&s, &path).map_err(|e| format!("{e:#}")));
         });
-        self.warning = None;
+        (self.warning, self.notice) = (None, None);
         self.phase = Phase::Saving(rx);
     }
 
@@ -331,7 +360,7 @@ impl ShareView {
         std::thread::spawn(move || {
             let _ = tx.send(draft(&s, &flag));
         });
-        self.warning = None;
+        (self.warning, self.notice) = (None, None);
         self.phase = Phase::Regenerating(rx);
     }
 
@@ -342,6 +371,7 @@ impl ShareView {
 
     /// Takes the post back from the user's editor.
     pub fn edited_post(&mut self, edited: Result<String, String>) {
+        self.notice = None;
         match edited {
             Ok(text) if text.trim().is_empty() => self.warning = Some("The edited post was empty, so it was not used.".into()),
             Ok(text) => {
@@ -382,7 +412,10 @@ impl ShareView {
             Phase::Preview => match code {
                 KeyCode::Char('q') | KeyCode::Esc => return Outcome::Close,
                 KeyCode::Enter => self.confirm(),
+                KeyCode::Char('c') => self.copy_post(),
+                KeyCode::Char('s') => self.save_image(),
                 KeyCode::Char('e') => {
+                    self.notice = None;
                     let text: Vec<char> = self.line.chars().collect();
                     self.phase = Phase::Editing { cursor: text.len(), text };
                 }
@@ -422,6 +455,8 @@ impl ShareView {
                 _ => {}
             },
             Phase::Saving(_) | Phase::Opening { .. } => {}
+            Phase::Done(done) if code == KeyCode::Char('c') => done.copied = (self.env.copy)(&done.post),
+            Phase::Done(_) if code == KeyCode::Char('s') => self.save_image(),
             Phase::Done(_) | Phase::Failed(_) => {
                 if matches!(code, KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q')) {
                     return Outcome::Close;
@@ -429,6 +464,42 @@ impl ShareView {
             }
         }
         Outcome::Stay
+    }
+
+    /// Copies the whole post as it stands, without saving or opening anything.
+    fn copy_post(&mut self) {
+        self.notice = None;
+        self.warning = None;
+        match (self.env.copy)(&self.post()) {
+            Copied::Native(tool) => self.notice = Some(format!("Copied the post to your clipboard ({tool}).")),
+            Copied::Terminal => self.notice = Some("Sent the post to your terminal's clipboard, if it allows that.".into()),
+            Copied::Failed => self.warning = Some("Couldn't reach a clipboard; press E to open the post in your editor and copy it there.".into()),
+        }
+    }
+
+    /// Saves the badge view as an image on its own thread, so the dashboard never stalls.
+    fn save_image(&mut self) {
+        let Some(b) = self.snapshot.as_ref().map(|s| s.badges.clone()) else { return };
+        if self.image.is_some() {
+            return;
+        }
+        let (tx, rx) = channel();
+        let save = self.env.save_image.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(save(&b));
+        });
+        (self.warning, self.notice) = (None, Some("Saving the badge image…".into()));
+        self.image = Some(rx);
+    }
+
+    /// The badges the post is about, once the snapshot is frozen.
+    pub fn badges(&self) -> Option<&crate::badges::Badges> {
+        self.snapshot.as_ref().map(|s| &s.badges)
+    }
+
+    /// The last copy or save's result, and any failure, for screens other than the preview.
+    pub fn status(&self) -> (Option<&str>, Option<&str>) {
+        (self.notice.as_deref(), self.warning.as_deref())
     }
 
     fn scroll_by(&mut self, delta: i32) {
@@ -507,6 +578,7 @@ mod tests {
     fn env(dir: &Path, line: &'static str, wait: Duration, copied: Copied) -> (Env, Fake) {
         let (copies, runs) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())));
         let (c, r, dir) = (copies.clone(), runs.clone(), dir.to_path_buf());
+        let image = dir.join("badge.png");
         let env = Env {
             prepare: Arc::new(|| Ok(snapshot())),
             draft: Arc::new(move |_, cancel| {
@@ -526,6 +598,7 @@ mod tests {
                 Ok(())
             }),
             desktop: Desktop::for_tests(),
+            save_image: Arc::new(move |b| save_image(b, &image, &Desktop::for_tests(), &|_| Ok(()))),
         };
         (env, Fake { copies, runs })
     }
@@ -645,6 +718,61 @@ mod tests {
         assert_eq!(done.manual_url(), None);
         drop(runs);
         assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Close);
+    }
+
+    #[test]
+    fn c_copies_the_whole_post_from_the_preview_and_the_done_screen() {
+        let dir = scratch("copy");
+        let (mut v, fake) = preview(&dir);
+        let post = v.post();
+        v.on_key(key(KeyCode::Char('c')));
+        let Screen::Preview { notice: Some(msg), .. } = v.screen() else { panic!("no copy notice") };
+        assert!(msg.contains("pbcopy"), "{msg}");
+        assert_eq!(fake.copies.lock().unwrap().as_slice(), std::slice::from_ref(&post));
+        assert!(fake.runs.lock().unwrap().is_empty() && files(&dir) == 0, "copying saves and opens nothing");
+        v.on_key(key(KeyCode::Enter));
+        settle(&mut v);
+        assert!(matches!(v.screen(), Screen::Done(_)));
+        assert_eq!(v.on_key(key(KeyCode::Char('c'))), Outcome::Stay);
+        assert_eq!(fake.copies.lock().unwrap().len(), 3, "once by c, once on confirm, once more by c");
+    }
+
+    #[test]
+    fn s_saves_the_badge_image_without_sharing() {
+        let dir = scratch("image");
+        let (mut v, fake) = preview(&dir);
+        v.on_key(key(KeyCode::Char('s')));
+        let until = Instant::now() + Duration::from_secs(30);
+        while v.status().0.is_some_and(|n| n.starts_with("Saving")) && Instant::now() < until {
+            v.tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (Some(note), None) = v.status() else { panic!("no saved note: {:?}", v.status()) };
+        assert!(note.starts_with("Saved ") && note.contains("badge.png"), "{note}");
+        assert!(std::fs::read(dir.join("badge.png")).unwrap().starts_with(b"\x89PNG"));
+        assert!(fake.copies.lock().unwrap().is_empty() && fake.runs.lock().unwrap().is_empty());
+        assert!(matches!(v.screen(), Screen::Preview { .. }));
+    }
+
+    #[test]
+    fn saving_the_badge_image_reports_a_file_manager_that_failed() {
+        let dir = scratch("image-reveal");
+        let path = dir.join("badge.png");
+        let failing = |_: &Step| -> Result<(), String> { Err("no file manager".into()) };
+        let note = save_image(&snapshot().badges, &path, &Desktop::for_tests(), &failing).unwrap();
+        assert!(note.contains("couldn't show it: no file manager"), "{note}");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn a_copy_with_no_clipboard_points_to_the_editor() {
+        let dir = scratch("copy-fail");
+        let (env, _) = env(&dir, "line", Duration::ZERO, Copied::Failed);
+        let mut v = ShareView::start(env);
+        settle(&mut v);
+        v.on_key(key(KeyCode::Char('c')));
+        let Screen::Preview { warning: Some(w), notice: None, .. } = v.screen() else { panic!("no warning") };
+        assert!(w.contains("press E"), "{w}");
     }
 
     #[test]

@@ -214,16 +214,6 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("q", "quit".into()),
             ]
         }
-        (View::Badges, _) => {
-            draw_badges(f, body, app.badges.as_ref());
-            vec![
-                ("s", "save image".into()),
-                ("L", "image + LinkedIn".into()),
-                ("p", "share".into()),
-                ("esc", "back".into()),
-                ("q", "quit".into()),
-            ]
-        }
         (View::Board, _) => {
             draw_board(f, body, app);
             vec![
@@ -242,7 +232,6 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("enter", "history".into()),
                 ("tab", "subagents".into()),
                 ("u", "usage".into()),
-                ("B", "badges".into()),
                 ("p", "share".into()),
                 ("b", "board".into()),
                 ("c", "launch cmd".into()),
@@ -256,7 +245,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let picker_digits = format!("space/1-{}", crate::rules::RULES.len());
     let keys = match (&app.share, &app.rules_picker) {
         (Some(share), _) => {
-            draw_share(f, body, share, app.tick);
+            draw_share(f, body, share, app.badges.as_ref(), app.tick);
             share.keys().into_iter().map(|(k, label)| (k, label.to_string())).collect()
         }
         (None, Some(picker)) => {
@@ -428,6 +417,9 @@ fn level_color(level: usize) -> Color {
     }
 }
 
+/// The badge art's height in rows at most; its width is twice that.
+const ART_ROWS: u16 = 22;
+
 /// The rank, its progress, and the four achievements with their levels as text, beside the badge art
 /// when there is room for it; the art is dropped first so the rows never clip.
 pub(crate) fn draw_badges(f: &mut Frame, area: Rect, badges: Option<&Badges>) {
@@ -439,9 +431,12 @@ pub(crate) fn draw_badges(f: &mut Frame, area: Rect, badges: Option<&Badges>) {
         return;
     };
     let rows = 4 + 3 * b.achievements.len() as u16;
-    let art_width = (inner.height.min(26) * 2 + 2).min(inner.width.saturating_sub(48));
-    let text = if inner.height >= 12 && art_width >= 26 {
-        let [art, _, text] = Layout::horizontal([Constraint::Length(art_width), Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+    // A braille cell is 2×4 dots and about twice as tall as wide, so twice as many columns as rows is
+    // square; the art is never taller than ART_ROWS, so a bigger terminal doesn't stretch it.
+    let art_rows = inner.height.min(ART_ROWS).min(inner.width.saturating_sub(50) / 2);
+    let text = if art_rows >= 12 {
+        let [art, _, text] = Layout::horizontal([Constraint::Length(art_rows * 2), Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+        let [_, art, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(art_rows), Constraint::Fill(1)]).areas(art);
         draw_badge_art(f, art, b.rank.tier);
         text
     } else {
@@ -529,12 +524,19 @@ fn draw_badge_art(f: &mut Frame, area: Rect, tier: usize) {
     f.render_widget(canvas, area);
 }
 
-/// The share view, drawn as a modal over the view it was opened from.
-fn draw_share(f: &mut Frame, area: Rect, share: &ShareView, tick: u64) {
-    let (w, h) = (area.width.saturating_sub(4).min(90), area.height.saturating_sub(2).min(26));
-    let [_, rect, _] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(w), Constraint::Fill(1)]).areas(area);
-    let [_, rect, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(h), Constraint::Fill(1)]).areas(rect);
-    f.render_widget(Clear, rect);
+/// The share view over the view it was opened from: the badges beside the post when the terminal is
+/// wide enough, above it otherwise. `fallback` stands in for the badges until the share has its own.
+fn draw_share(f: &mut Frame, area: Rect, share: &ShareView, fallback: Option<&Badges>, tick: u64) {
+    f.render_widget(Clear, area);
+    let [badges, rect] = if area.width >= 140 {
+        let post = (area.width * 2 / 5).max(60);
+        Layout::horizontal([Constraint::Fill(1), Constraint::Length(post)]).areas(area)
+    } else {
+        // The rank and achievements' rows plus the border, leaving the post at least 10 rows.
+        let rows = (6 + 3 * 4).min(area.height.saturating_sub(10));
+        Layout::vertical([Constraint::Length(rows), Constraint::Fill(1)]).areas(area)
+    };
+    draw_badges(f, badges, share.badges().or(fallback));
     let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(ACCENT)).title(" Share to LinkedIn ".bold());
     let inner = block.inner(rect).inner(Margin { horizontal: 1, vertical: 0 });
     f.render_widget(block, rect);
@@ -548,7 +550,7 @@ fn draw_share(f: &mut Frame, area: Rect, share: &ShareView, tick: u64) {
             let lines = vec![Line::from("Couldn't prepare the share.".red().bold()), Line::from(""), Line::from(why.to_string())];
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
         }
-        Screen::Preview { post, editing, note, warning } => draw_share_preview(f, inner, share, &post, editing, note, warning),
+        Screen::Preview { post, editing, note, warning, notice } => draw_share_preview(f, inner, share, &post, editing, note, warning, notice),
         Screen::Done(done) => {
             let mut lines = vec![Line::from("Shared.".green().bold()), Line::from("")];
             for (name, mark, text) in done.steps() {
@@ -566,18 +568,22 @@ fn draw_share(f: &mut Frame, area: Rect, share: &ShareView, tick: u64) {
                 lines.extend([Line::from(""), Line::from(dim("The post:"))]);
                 lines.extend(done.post.lines().map(|l| Line::from(l.to_string())));
             }
+            let (notice, warning) = share.status();
+            lines.extend(warning.map(|w| Line::from(w.to_string().red())).into_iter().chain(notice.map(|n| Line::from(n.to_string().green()))));
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
         }
     }
 }
 
-fn draw_share_preview(f: &mut Frame, area: Rect, share: &ShareView, post: &str, editing: Option<(&[char], usize)>, note: Option<String>, warning: Option<&str>) {
+#[allow(clippy::too_many_arguments)]
+fn draw_share_preview(f: &mut Frame, area: Rect, share: &ShareView, post: &str, editing: Option<(&[char], usize)>, note: Option<String>, warning: Option<&str>, notice: Option<&str>) {
     let width = area.width as usize;
     let edit_rows = editing.map_or(0, |(t, _)| (t.len() + 7) / width.max(1) + 3) as u16;
     let status: Vec<Line> = warning
         .map(|w| Line::from(w.to_string().red()))
         .into_iter()
         .chain(note.map(|n| Line::from(n.yellow())))
+        .chain(notice.map(|n| Line::from(n.to_string().green())))
         .flat_map(|l| wrap_line(l, width))
         .collect();
     let [edit, body, status_area, count] = Layout::vertical([
