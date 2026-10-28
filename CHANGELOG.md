@@ -3,6 +3,10 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## 0.8.1 - 2026-10-28
+
+- The badge art is square in any terminal font, sized from the terminal's cell shape
+
 ## 0.8.0 - 2026-10-28
 
 - `p` opens one share view: your badges beside the post, ready to share to LinkedIn

@@ -245,7 +245,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let picker_digits = format!("space/1-{}", crate::rules::RULES.len());
     let keys = match (&app.share, &app.rules_picker) {
         (Some(share), _) => {
-            draw_share(f, body, share, app.badges.as_ref(), app.tick);
+            draw_share(f, body, share, app.badges.as_ref(), app.cell_aspect, app.tick);
             share.keys().into_iter().map(|(k, label)| (k, label.to_string())).collect()
         }
         (None, Some(picker)) => {
@@ -417,12 +417,28 @@ fn level_color(level: usize) -> Color {
     }
 }
 
-/// The badge art's height in rows at most; its width is twice that.
+/// The badge art's height in rows at most; its width follows the cell shape.
 const ART_ROWS: u16 = 22;
 
+/// A cell's height over its width when the terminal doesn't report its size in pixels.
+pub const DEFAULT_CELL_ASPECT: f64 = 2.0;
+
+/// A cell's height over its width, from the terminal's size in cells and pixels.
+pub fn cell_aspect(size: Option<ratatui::backend::WindowSize>) -> f64 {
+    match size {
+        Some(s) if s.columns_rows.width > 0 && s.columns_rows.height > 0 && s.pixels.width > 0 && s.pixels.height > 0 => {
+            let cell_w = s.pixels.width as f64 / s.columns_rows.width as f64;
+            let cell_h = s.pixels.height as f64 / s.columns_rows.height as f64;
+            (cell_h / cell_w).clamp(1.2, 3.0)
+        }
+        _ => DEFAULT_CELL_ASPECT,
+    }
+}
+
 /// The rank, its progress, and the four achievements with their levels as text, beside the badge art
-/// when there is room for it; the art is dropped first so the rows never clip.
-pub(crate) fn draw_badges(f: &mut Frame, area: Rect, badges: Option<&Badges>) {
+/// when there is room for it; the art is dropped first so the rows never clip. `cell_aspect` is a
+/// cell's height over its width, so the art comes out square.
+pub(crate) fn draw_badges(f: &mut Frame, area: Rect, badges: Option<&Badges>, cell_aspect: f64) {
     let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().dark_gray()).title(" Badges ");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -431,11 +447,12 @@ pub(crate) fn draw_badges(f: &mut Frame, area: Rect, badges: Option<&Badges>) {
         return;
     };
     let rows = 4 + 3 * b.achievements.len() as u16;
-    // A braille cell is 2×4 dots and about twice as tall as wide, so twice as many columns as rows is
-    // square; the art is never taller than ART_ROWS, so a bigger terminal doesn't stretch it.
-    let art_rows = inner.height.min(ART_ROWS).min(inner.width.saturating_sub(50) / 2);
+    // A cell is `cell_aspect` times as tall as wide, so that many columns per row is square; the art
+    // is never taller than ART_ROWS, so a bigger terminal doesn't stretch it.
+    let art_rows = inner.height.min(ART_ROWS).min((inner.width.saturating_sub(50) as f64 / cell_aspect) as u16);
     let text = if art_rows >= 12 {
-        let [art, _, text] = Layout::horizontal([Constraint::Length(art_rows * 2), Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+        let art_cols = (art_rows as f64 * cell_aspect).round() as u16;
+        let [art, _, text] = Layout::horizontal([Constraint::Length(art_cols), Constraint::Length(2), Constraint::Min(0)]).areas(inner);
         let [_, art, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(art_rows), Constraint::Fill(1)]).areas(art);
         draw_badge_art(f, art, b.rank.tier);
         text
@@ -526,7 +543,7 @@ fn draw_badge_art(f: &mut Frame, area: Rect, tier: usize) {
 
 /// The share view over the view it was opened from: the badges beside the post when the terminal is
 /// wide enough, above it otherwise. `fallback` stands in for the badges until the share has its own.
-fn draw_share(f: &mut Frame, area: Rect, share: &ShareView, fallback: Option<&Badges>, tick: u64) {
+fn draw_share(f: &mut Frame, area: Rect, share: &ShareView, fallback: Option<&Badges>, cell_aspect: f64, tick: u64) {
     f.render_widget(Clear, area);
     let [badges, rect] = if area.width >= 140 {
         let post = (area.width * 2 / 5).max(60);
@@ -536,7 +553,7 @@ fn draw_share(f: &mut Frame, area: Rect, share: &ShareView, fallback: Option<&Ba
         let rows = (6 + 3 * 4).min(area.height.saturating_sub(10));
         Layout::vertical([Constraint::Length(rows), Constraint::Fill(1)]).areas(area)
     };
-    draw_badges(f, badges, share.badges().or(fallback));
+    draw_badges(f, badges, share.badges().or(fallback), cell_aspect);
     let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(ACCENT)).title(" Share to LinkedIn ".bold());
     let inner = block.inner(rect).inner(Margin { horizontal: 1, vertical: 0 });
     f.render_widget(block, rect);
