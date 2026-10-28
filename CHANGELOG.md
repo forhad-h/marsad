@@ -3,7 +3,7 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.8.0 - 2026-10-28
 
 - `p` opens one share view: your badges beside the post, ready to share to LinkedIn
 - In the share view, `c` copies the whole post and `s` saves the badge image
