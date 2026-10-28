@@ -3,7 +3,7 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.8.1 - 2026-10-28
 
 - The badge art is square in any terminal font, sized from the terminal's cell shape
 
