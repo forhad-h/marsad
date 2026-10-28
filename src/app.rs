@@ -5,6 +5,7 @@ use crate::transcript::{self, TranscriptReader};
 use crate::badges::Badges;
 use crate::share_view::{Outcome, ShareView};
 use ratatui::crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind};
+use ratatui::backend::Backend;
 use ratatui::crossterm::execute;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -153,6 +154,8 @@ pub struct App {
     pub badges: Option<Badges>,
     /// Sharing to LinkedIn, drawn over the current view and given its keys while open.
     pub share: Option<ShareView>,
+    /// A terminal cell's height over its width in pixels, so the badge art can be drawn square.
+    pub cell_aspect: f64,
     pub announcement: Option<Announcement>,
     alerts: crate::alerts::Detector,
     update_rx: std::sync::mpsc::Receiver<crate::update::Notice>,
@@ -431,6 +434,7 @@ impl App {
             board: BoardState::default(),
             badges: None,
             share: None,
+            cell_aspect: crate::ui::DEFAULT_CELL_ASPECT,
             announcement: None,
             alerts: crate::alerts::Detector::default(),
             update_rx: crate::update::background(),
@@ -856,6 +860,7 @@ pub fn run() -> anyhow::Result<()> {
     let mut app = App::new();
     app.refresh();
     let mut terminal = init_terminal()?;
+    app.cell_aspect = crate::ui::cell_aspect(terminal.backend_mut().window_size().ok());
     // Bracketed paste, so a pasted newline while editing the share line doesn't confirm it.
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     let result = (|| -> anyhow::Result<()> {
@@ -883,6 +888,7 @@ pub fn run() -> anyhow::Result<()> {
                             }
                         }
                     },
+                    Event::Resize(..) => app.cell_aspect = crate::ui::cell_aspect(terminal.backend_mut().window_size().ok()),
                     _ => {}
                 }
             }

@@ -34,7 +34,7 @@ const FOREGROUND: &str = "#d4d8e0";
 /// The badge view drawn into a buffer of `COLS`×`ROWS` cells.
 fn buffer(b: &Badges) -> Result<Buffer> {
     let mut terminal = Terminal::new(TestBackend::new(COLS, ROWS)).context("off-screen terminal")?;
-    terminal.draw(|f| crate::ui::draw_badges(f, f.area(), Some(b))).context("drawing the badge view")?;
+    terminal.draw(|f| crate::ui::draw_badges(f, f.area(), Some(b), CELL_H / CELL_W)).context("drawing the badge view")?;
     Ok(terminal.backend().buffer().clone())
 }
 
