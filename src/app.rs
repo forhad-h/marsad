@@ -71,8 +71,6 @@ pub enum View {
     Usage,
     /// The shared AGENT-BOARD.md of the selected session's repo.
     Board,
-    /// The rank and achievements, with the badge art.
-    Badges,
 }
 
 /// Which events the history shows; `f` cycles through them.
@@ -158,8 +156,6 @@ pub struct App {
     pub announcement: Option<Announcement>,
     alerts: crate::alerts::Detector,
     update_rx: std::sync::mpsc::Receiver<crate::update::Notice>,
-    /// A badge image being saved on its own thread: the footer note, or the error.
-    image_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     log: JsonlTail,
     readers: HashMap<PathBuf, TranscriptReader>,
     sys: System,
@@ -305,7 +301,7 @@ impl Announcement {
 
     /// The views whose footer shows the note.
     pub fn shows_in(view: View) -> bool {
-        matches!(view, View::List | View::Badges)
+        view == View::List
     }
 
     /// After a frame: whether the note was on screen for the first time, so its levels are announced now.
@@ -438,7 +434,6 @@ impl App {
             announcement: None,
             alerts: crate::alerts::Detector::default(),
             update_rx: crate::update::background(),
-            image_rx: None,
             log: JsonlTail::new(dir.join("events.jsonl")),
             readers: HashMap::new(),
             sys: System::new(),
@@ -577,16 +572,6 @@ impl App {
         Ok(crate::badges::badges(&crate::badges::shown(&conn, self.counter.totals().1)?))
     }
 
-    fn open_badges(&mut self) {
-        match self.load_badges() {
-            Ok(b) => {
-                self.badges = Some(b);
-                self.view = View::Badges;
-            }
-            Err(e) => self.error = Some(format!("couldn't read the badges: {e:#}")),
-        }
-    }
-
     /// After a background sync that changed something: the badges from the stats it recorded, and a
     /// note for any level that rose.
     fn after_sync(&mut self, mut stats: crate::badges::Stats) {
@@ -606,24 +591,11 @@ impl App {
         self.badges = Some(b);
     }
 
-    /// Saves the badge view as a PNG and shows it in the file manager; with `linkedin`, also opens
-    /// LinkedIn's composer with a one-line caption, so the image only needs attaching. The render and
-    /// the desktop tools run on their own thread, like the share's, so the dashboard never stalls.
-    fn save_badge_image(&mut self, linkedin: bool) {
-        let Some(b) = self.badges.clone() else { return };
-        if self.image_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.image_rx = Some(rx);
-        self.info = Some("saving the badge image…".into());
-        std::thread::spawn(move || {
-            let path = crate::shot::default_path();
-            let _ = tx.send(save_badge_image(&b, &path, linkedin, &crate::share::Desktop::current(), &crate::share::launch));
-        });
-    }
-
     fn open_share(&mut self) {
+        // The badges show beside the post while the share syncs and freezes its own.
+        if self.badges.is_none() {
+            self.badges = self.load_badges().ok();
+        }
         self.share = Some(ShareView::start(crate::share_view::Env::real(self.counter.totals().1)));
     }
 
@@ -717,13 +689,6 @@ impl App {
         }
         if let Ok(notice) = self.update_rx.try_recv() {
             self.update = Some(notice);
-        }
-        if let Some(done) = self.image_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            self.image_rx = None;
-            match done {
-                Ok(note) => self.info = Some(note),
-                Err(e) => self.error = Some(e),
-            }
         }
         for ev in self.log.read_new() {
             events::apply(&mut self.sessions, &ev);
@@ -845,11 +810,7 @@ impl App {
                     self.error = Some(format!("couldn't save alerts setting: {e}"));
                 }
             }
-            (View::List, KeyCode::Char('B')) => self.open_badges(),
-            (View::List | View::Badges, KeyCode::Char('p')) => self.open_share(),
-            (View::Badges, KeyCode::Char('s')) => self.save_badge_image(false),
-            (View::Badges, KeyCode::Char('L')) => self.save_badge_image(true),
-            (View::Badges, KeyCode::Esc | KeyCode::Char('B') | KeyCode::Left | KeyCode::Char('h')) => self.view = View::List,
+            (View::List, KeyCode::Char('p')) => self.open_share(),
             (View::List | View::History | View::Agents, KeyCode::Char('b')) => self.open_board(),
             (View::List | View::Board, KeyCode::Char('c')) => self.open_rules_picker(),
             (View::Board, KeyCode::Esc | KeyCode::Char('b') | KeyCode::Left | KeyCode::Char('h')) => self.view = View::List,
@@ -934,65 +895,12 @@ pub fn run() -> anyhow::Result<()> {
     result
 }
 
-/// Writes the badge image to `path`, shows it in the file manager and, with `linkedin`, opens the
-/// composer; the footer note says what each step did.
-fn save_badge_image(
-    b: &Badges,
-    path: &std::path::Path,
-    linkedin: bool,
-    desktop: &crate::share::Desktop,
-    run: &dyn Fn(&crate::share::Step) -> Result<(), String>,
-) -> Result<String, String> {
-    use crate::share::Launch;
-    crate::shot::write_at(b, path).map_err(|e| format!("couldn't save the badge image: {e:#}"))?;
-    let mut note = match crate::share::reveal(desktop, path, run) {
-        Launch::Spawned => format!("saved {}", path.display()),
-        Launch::Skipped(why) => format!("saved {} (not shown: {why})", path.display()),
-        Launch::Failed(why) => format!("saved {} (couldn't show it: {why})", path.display()),
-    };
-    if linkedin {
-        let caption = format!(
-            "My AI-assisted engineering rank with Claude Code: {} ({}).",
-            b.rank.name,
-            crate::badges::fmt_value(b.rank.tokens, "tokens")
-        );
-        note += &match crate::share::open_linkedin(desktop, &caption, run).1 {
-            Launch::Spawned => " · LinkedIn opened: attach the image to the post".to_string(),
-            Launch::Skipped(why) => format!(" · LinkedIn not opened ({why})"),
-            Launch::Failed(why) => format!(" · LinkedIn not opened: {why}"),
-        };
-    }
-    Ok(note)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn key(s: &str, a: &str) -> (String, String) {
         (s.to_string(), a.to_string())
-    }
-
-    #[test]
-    fn saving_the_badge_image_writes_reveals_and_opens_linkedin() {
-        let dir = std::env::temp_dir().join(format!("marsad-app-shot-{}", std::process::id()));
-        let path = dir.join("badge.png");
-        let b = badges();
-        let ran = std::cell::RefCell::new(Vec::new());
-        let run = |s: &crate::share::Step| -> Result<(), String> {
-            ran.borrow_mut().push(s.args.last().cloned().unwrap_or_default());
-            Ok(())
-        };
-        let desktop = crate::share::Desktop::for_tests();
-        let note = save_badge_image(&b, &path, true, &desktop, &run).unwrap();
-        assert!(std::fs::read(&path).unwrap().starts_with(b"\x89PNG"));
-        assert!(note.starts_with("saved ") && note.ends_with("attach the image to the post"), "{note}");
-        let ran = ran.into_inner();
-        assert!(ran.iter().any(|a| a.contains("linkedin.com")), "{ran:?}");
-        let failing = |_: &crate::share::Step| -> Result<(), String> { Err("no file manager".into()) };
-        let note = save_badge_image(&b, &path, false, &desktop, &failing).unwrap();
-        assert!(note.contains("couldn't show it: no file manager"), "{note}");
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -1097,7 +1005,7 @@ mod tests {
         assert!(!a.expired(start + ANNOUNCE_FOR * 2), "a note never drawn never expires");
         // The share closes over the list: drawn, recorded once.
         assert!(a.on_drawn(Announcement::shows_in(View::List), start), "both levels in one note");
-        assert!(!a.on_drawn(Announcement::shows_in(View::Badges), start), "recorded once");
+        assert!(!a.on_drawn(Announcement::shows_in(View::List), start), "recorded once");
         assert!(!a.expired(start + ANNOUNCE_FOR / 2), "it outlives the next key press");
         assert!(a.expired(start + ANNOUNCE_FOR));
         for view in [View::History, View::Agents, View::Usage, View::Board] {

@@ -49,7 +49,7 @@ The user stands behind these four claims publicly:
 ## Capabilities and Constraints
 
 - **Install:** `marsad install` / `uninstall` manage hooks, the status line, the skill and the rules files in `~/.claude/settings.json`. Running sessions pick them up after a restart.
-- **Dashboard keys:** sessions list, history, subagents, usage view, agent board (`b`), copy a launch command with the chosen rules (`c`), alerts, sort. Badges (`B`) and share (`p`) are being built on `feat/badges-and-share`.
+- **Dashboard keys:** sessions list, history, subagents, usage view, agent board (`b`), copy a launch command with the chosen rules (`c`), alerts, sort. Badges and share are one view (`p`): the post beside the badge, with share to LinkedIn, copy text and save image.
 - **Platforms:** macOS, Linux and Windows. Installers ship through GitHub Releases.
 - **Ranks:** seven tiers, Novice to Grandmaster, from all-time tokens (cache reads included). Achievements are bronze, silver and gold for streak, distinct skills, subagents and busiest day.
 - **Terms:** canonical domain terms live in `CONCEPTS.md`, for example session status, day counter, coordination protocol, agent board, claim.

@@ -48,7 +48,7 @@ marsad update      # install the latest version (shows current → latest and wh
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `B` badges · `p` share to LinkedIn · `b` agent board · `c` copy a launch command with coordination and/or output-hygiene rules · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `p` badges and share to LinkedIn · `b` agent board · `c` copy a launch command with coordination and/or output-hygiene rules · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
 In session history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session history also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
 
@@ -159,8 +159,8 @@ Over SSH, `c` sends the command through your terminal (OSC 52, which kitty, WezT
 
 ### Badges and sharing
 
-`B` shows your rank and four achievements, each with its level in words and how far it is to the
-next, beside a drawing of your badge. The rank counts every token, cache reads included, so it
+`p` shows your rank and four achievements, each with its level in words and how far it is to the
+next, beside a drawing of your badge and the post to share (see below). The rank counts every token, cache reads included, so it
 matches the header's all-time figure.
 
 | Rank | All-time tokens | Badge |
@@ -188,15 +188,15 @@ marsad keeps the best value each one ever reached, so retention pruning or an im
 badge away. When a rank or level rises, the footer says so once (Esc dismisses it). `marsad badges`
 prints the same (`--format json` or `csv` for scripts).
 
-In the badge view, `s` saves the view as an image, `Downloads/marsad-badge-YYYY-MM-DD.png`, and
-shows it in your file manager. `L` does the same and opens LinkedIn's post box with a one-line
-caption, so you only attach the image. `marsad badges --png [PATH]` saves it from the command line.
+In the share view, `s` saves the badges as an image, `Downloads/marsad-badge-YYYY-MM-DD.png`, and
+shows it in your file manager. `marsad badges --png [PATH]` saves it from the command line.
 The image is drawn from the view itself (same art, colours and text), so it looks the same in any
 terminal.
 
-`p`, from the list or the badge view, prepares a LinkedIn post: a line about today's work drafted by
-Claude Code, then today's, the last 7 and 30 days', the daily average and all-time tokens, and your
-rank. You see the whole post first: `enter` confirms, `e` edits the line, `E` opens the whole post
+`p` also prepares a LinkedIn post: a line about today's work drafted by Claude Code, then today's,
+the last 7 and 30 days', the daily average and all-time tokens, and your rank. You see the whole
+post beside your badges first: `enter` shares it to LinkedIn, `c` copies the whole post (and works
+again on the Done screen), `s` saves the badge image, `e` edits the line, `E` opens the whole post
 in `$VISUAL`/`$EDITOR`, `r` drafts a new line, and `q`/`esc` cancels without writing or opening
 anything. Confirming:
 
